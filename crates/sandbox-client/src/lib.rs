@@ -128,4 +128,42 @@ impl Client {
     pub fn read_exit_code(&mut self) -> Result<Response> {
         Ok(sandbox_proto::read_message(&mut self.stream)?)
     }
+
+    // -- Convenience methods --
+
+    /// Add a bind mount to a running container.
+    pub fn mount_add(
+        &mut self,
+        container: &str,
+        source: &str,
+        target: &str,
+        readonly: bool,
+    ) -> Result<Response> {
+        self.request(&Request::MountAdd {
+            name: container.to_string(),
+            source: source.to_string(),
+            target: target.to_string(),
+            readonly,
+        })
+    }
+
+    /// Remove a bind mount from a running container.
+    pub fn mount_remove(&mut self, container: &str, target: &str) -> Result<Response> {
+        self.request(&Request::MountRemove {
+            name: container.to_string(),
+            target: target.to_string(),
+        })
+    }
+
+    /// List bind mounts for a container.
+    pub fn mount_list(&mut self, container: &str) -> Result<Vec<sandbox_proto::MountInfo>> {
+        let resp = self.request(&Request::MountList {
+            name: container.to_string(),
+        })?;
+        match resp {
+            Response::MountList(mounts) => Ok(mounts),
+            Response::Error { message } => Err(Error::Other(message)),
+            _ => Err(Error::Other("unexpected response".to_string())),
+        }
+    }
 }

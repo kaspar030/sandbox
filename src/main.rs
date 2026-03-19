@@ -204,6 +204,12 @@ enum Commands {
         action: ImageAction,
     },
 
+    /// Manage bind mounts on containers
+    Mount {
+        #[command(subcommand)]
+        action: MountAction,
+    },
+
     /// Manage storage pools
     Pool {
         #[command(subcommand)]
@@ -269,6 +275,33 @@ enum ImageAction {
         /// Storage pool (default: main)
         #[arg(long)]
         pool: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MountAction {
+    /// Add a bind mount to a running container
+    Add {
+        /// Container name
+        name: String,
+
+        /// Mount spec: SOURCE:TARGET[:ro]
+        spec: String,
+    },
+    /// Remove a bind mount from a running container
+    #[command(alias = "rm")]
+    Remove {
+        /// Container name
+        name: String,
+
+        /// Target path inside the container
+        target: String,
+    },
+    /// List bind mounts for a container
+    #[command(alias = "ls")]
+    List {
+        /// Container name
+        name: String,
     },
 }
 
@@ -480,6 +513,43 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        Commands::Mount { action } => {
+            let mut client = Client::connect(cli.socket.as_deref())?;
+            match action {
+                MountAction::Add { name, spec } => {
+                    let (source, target, readonly) = parse_mount_spec(&spec)?;
+                    let resp = client.request(&Request::MountAdd {
+                        name,
+                        source,
+                        target,
+                        readonly,
+                    })?;
+                    print_response(&resp);
+                }
+                MountAction::Remove { name, target } => {
+                    let resp = client.request(&Request::MountRemove { name, target })?;
+                    print_response(&resp);
+                }
+                MountAction::List { name } => {
+                    let resp = client.request(&Request::MountList { name })?;
+                    match &resp {
+                        Response::MountList(mounts) => {
+                            if mounts.is_empty() {
+                                println!("No bind mounts");
+                            } else {
+                                println!("{:<30} {:<30} {:<5}", "SOURCE", "TARGET", "RO");
+                                for m in mounts {
+                                    let ro = if m.readonly { "yes" } else { "no" };
+                                    println!("{:<30} {:<30} {:<5}", m.source, m.target, ro);
+                                }
+                            }
+                        }
+                        _ => print_response(&resp),
+                    }
+                }
+            }
+        }
+
         Commands::Pool { action } => {
             let mut client = Client::connect(cli.socket.as_deref())?;
             match action {
@@ -527,6 +597,14 @@ fn print_response(resp: &Response) {
         }
         Response::ExecExited { exit_code } => println!("Exec exited with code {exit_code}"),
         Response::ImagePulled { name } => println!("Pulled image: {name}"),
+        Response::MountAdded { target } => println!("Mount added: {target}"),
+        Response::MountRemoved { target } => println!("Mount removed: {target}"),
+        Response::MountList(mounts) => {
+            for m in mounts {
+                let ro = if m.readonly { ":ro" } else { "" };
+                println!("{}:{}{}", m.source, m.target, ro);
+            }
+        }
         Response::Error { message } => eprintln!("Error: {message}"),
     }
 }
@@ -659,6 +737,19 @@ fn build_spec(
         use_init: init,
         detach: false,
     })
+}
+
+/// Parse a mount spec: "SOURCE:TARGET" or "SOURCE:TARGET:ro"
+fn parse_mount_spec(spec: &str) -> anyhow::Result<(String, String, bool)> {
+    let parts: Vec<&str> = spec.splitn(3, ':').collect();
+    match parts.len() {
+        2 => Ok((parts[0].to_string(), parts[1].to_string(), false)),
+        3 => {
+            let readonly = parts[2] == "ro";
+            Ok((parts[0].to_string(), parts[1].to_string(), readonly))
+        }
+        _ => anyhow::bail!("invalid mount spec: {spec} (expected SOURCE:TARGET[:ro])"),
+    }
 }
 
 fn parse_size(s: String) -> anyhow::Result<u64> {

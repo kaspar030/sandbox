@@ -433,6 +433,11 @@ impl ContainerManager {
             }
             Request::ImageList { pool } => self.handle_image_list(pool.as_deref()),
             Request::ImageRemove { name, pool } => self.handle_image_remove(&name, pool.as_deref()),
+            Request::MountAdd { name, source, target, readonly } => {
+                self.handle_mount_add(&name, &source, &target, readonly)
+            }
+            Request::MountRemove { name, target } => self.handle_mount_remove(&name, &target),
+            Request::MountList { name } => self.handle_mount_list(&name),
             Request::PoolList => self.handle_pool_list(),
             Request::Shutdown => {
                 tracing::info!("shutdown requested");
@@ -664,6 +669,146 @@ impl ContainerManager {
         }
     }
 
+
+    fn handle_mount_add(
+        &mut self,
+        name: &str,
+        source: &str,
+        target: &str,
+        readonly: bool,
+    ) -> HandleResult {
+        let container = match self.containers.get_mut(name) {
+            Some(c) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {name} not found"),
+                })
+            }
+        };
+
+        if !container.state.is_running() {
+            return HandleResult::response_only(Response::Error {
+                message: format!("container {name} is not running"),
+            });
+        }
+
+        let pid = match container.pid {
+            Some(p) => p,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: "container has no PID".to_string(),
+                })
+            }
+        };
+
+        let source_path = std::path::Path::new(source);
+        if !source_path.exists() {
+            return HandleResult::response_only(Response::Error {
+                message: format!("source path does not exist: {source}"),
+            });
+        }
+
+        // Perform the hot bind mount
+        if let Err(e) = sandbox::sys::hot_mount::hot_bind_mount(pid, source_path, target, readonly)
+        {
+            return HandleResult::response_only(Response::Error {
+                message: format!("mount failed: {e}"),
+            });
+        }
+
+        // Add to bind_mounts so it persists across restart
+        container.spec.bind_mounts.push(sandbox::protocol::BindMount {
+            source: source.to_string(),
+            target: target.to_string(),
+            readonly,
+        });
+
+        // Persist updated state
+        Self::persist_container(name, container);
+
+        HandleResult::response_only(Response::MountAdded {
+            target: target.to_string(),
+        })
+    }
+
+    fn handle_mount_remove(&mut self, name: &str, target: &str) -> HandleResult {
+        let container = match self.containers.get_mut(name) {
+            Some(c) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {name} not found"),
+                })
+            }
+        };
+
+        if !container.state.is_running() {
+            return HandleResult::response_only(Response::Error {
+                message: format!("container {name} is not running"),
+            });
+        }
+
+        let pid = match container.pid {
+            Some(p) => p,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: "container has no PID".to_string(),
+                })
+            }
+        };
+
+        // Check mount exists in bind_mounts
+        let idx = container
+            .spec
+            .bind_mounts
+            .iter()
+            .position(|m| m.target == target);
+        if idx.is_none() {
+            return HandleResult::response_only(Response::Error {
+                message: format!("no bind mount at {target}"),
+            });
+        }
+
+        // Perform the hot unmount
+        if let Err(e) = sandbox::sys::hot_mount::hot_unmount(pid, target) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("unmount failed: {e}"),
+            });
+        }
+
+        // Remove from bind_mounts
+        container.spec.bind_mounts.remove(idx.unwrap());
+
+        // Persist updated state
+        Self::persist_container(name, container);
+
+        HandleResult::response_only(Response::MountRemoved {
+            target: target.to_string(),
+        })
+    }
+
+    fn handle_mount_list(&self, name: &str) -> HandleResult {
+        let container = match self.containers.get(name) {
+            Some(c) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {name} not found"),
+                })
+            }
+        };
+
+        let mounts: Vec<sandbox::protocol::MountInfo> = container
+            .spec
+            .bind_mounts
+            .iter()
+            .map(|m| sandbox::protocol::MountInfo {
+                source: m.source.clone(),
+                target: m.target.clone(),
+                readonly: m.readonly,
+            })
+            .collect();
+
+        HandleResult::response_only(Response::MountList(mounts))
+    }
 
     fn handle_destroy(&mut self, name: &str) -> HandleResult {
         let mut container = match self.containers.remove(name) {

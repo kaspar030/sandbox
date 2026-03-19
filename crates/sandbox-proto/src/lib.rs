@@ -240,10 +240,29 @@ pub enum Request {
     ImageList { pool: Option<String> },
     /// Remove an image.
     ImageRemove { name: String, pool: Option<String> },
+    /// Add a bind mount to a running container.
+    MountAdd {
+        name: String,
+        source: String,
+        target: String,
+        readonly: bool,
+    },
+    /// Remove a bind mount from a running container.
+    MountRemove { name: String, target: String },
+    /// List bind mounts for a container.
+    MountList { name: String },
     /// List storage pools.
     PoolList,
     /// Shut down the daemon.
     Shutdown,
+}
+
+/// Information about a bind mount.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountInfo {
+    pub source: String,
+    pub target: String,
+    pub readonly: bool,
 }
 
 /// Response from daemon to CLI client.
@@ -277,6 +296,12 @@ pub enum Response {
     ContainerExited { exit_code: i32 },
     /// Exec child exited (sent after PTY EOF on interactive exec).
     ExecExited { exit_code: i32 },
+    /// Mount added to container.
+    MountAdded { target: String },
+    /// Mount removed from container.
+    MountRemoved { target: String },
+    /// Mount list for a container.
+    MountList(Vec<MountInfo>),
     /// Error response.
     Error { message: String },
 }
