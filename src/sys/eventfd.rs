@@ -1,6 +1,6 @@
 //! Eventfd wrapper for parent <-> child synchronization.
 //!
-//! We use a single eventfd to synchronize clone3:
+//! We use eventfds to synchronize clone3:
 //! 1. Parent creates eventfd before clone3
 //! 2. Child inherits the fd and blocks reading it
 //! 3. Parent sets up uid_map, gid_map, networking
@@ -9,35 +9,48 @@
 
 use crate::error::{Error, Result};
 use nix::fcntl::{FcntlArg, FdFlag, fcntl};
-use nix::sys::eventfd::{EfdFlags, EventFd as NixEventFd};
-use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
+use nix::sys::eventfd::EfdFlags;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 
 /// A synchronization primitive using Linux eventfd.
 ///
 /// Used for parent-child coordination after clone3.
 /// The child blocks on `wait()` until the parent calls `signal()`.
 pub struct EventFd {
-    fd: NixEventFd,
+    fd: OwnedFd,
 }
 
 impl EventFd {
     /// Create a new eventfd with initial value 0.
     pub fn new() -> Result<Self> {
-        let fd = NixEventFd::from_flags(EfdFlags::EFD_CLOEXEC).map_err(Error::EventFd)?;
+        #[allow(deprecated)] // eventfd() returns OwnedFd; EventFd struct doesn't transfer ownership
+        let fd = nix::sys::eventfd::eventfd(0, EfdFlags::EFD_CLOEXEC).map_err(Error::EventFd)?;
         Ok(Self { fd })
+    }
+
+    /// Create an EventFd from a raw file descriptor.
+    ///
+    /// # Safety
+    /// The fd must be a valid eventfd file descriptor.
+    pub unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        Self {
+            fd: unsafe { OwnedFd::from_raw_fd(fd) },
+        }
     }
 
     /// Signal the eventfd (unblock the waiter).
     /// Writes the value 1.
     pub fn signal(&self) -> Result<()> {
-        self.fd.write(1).map_err(Error::EventFd)?;
+        let val: u64 = 1;
+        nix::unistd::write(&self.fd, &val.to_ne_bytes()).map_err(Error::EventFd)?;
         Ok(())
     }
 
     /// Wait (block) until the eventfd is signaled.
     /// Reads and consumes the counter.
     pub fn wait(&self) -> Result<()> {
-        self.fd.read().map_err(Error::EventFd)?;
+        let mut buf = [0u8; 8];
+        nix::unistd::read(&self.fd, &mut buf).map_err(Error::EventFd)?;
         Ok(())
     }
 

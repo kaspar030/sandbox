@@ -3,16 +3,17 @@
 //! The sequence is:
 //! 1. Bind-mount the rootfs onto itself (required for pivot_root)
 //! 2. Set up /dev, /proc, /sys inside the new root
-//! 3. Set up user bind mounts
+//! 3. Mask sensitive paths (OCI defaults)
 //! 4. pivot_root to the new root
 //! 5. Unmount and remove the old root
+//!
+//! Bind mounts are NOT handled here — they are applied by the daemon
+//! via hot_bind_mount after the container is running, to avoid permission
+//! issues with mount() from inside a user namespace.
 
 use crate::error::{Error, Result};
-use crate::namespace::mount::{
-    mask_paths, readonly_paths, setup_bind_mounts, setup_dev, setup_sys,
-};
+use crate::namespace::mount::{mask_paths, readonly_paths, setup_dev, setup_sys};
 use crate::namespace::pid::mount_proc;
-use crate::protocol::BindMount;
 use nix::mount::MsFlags;
 use std::path::Path;
 
@@ -24,7 +25,7 @@ use std::path::Path;
 /// This must be called from the child process after namespaces are configured
 /// and the parent has signaled via eventfd.
 #[tracing::instrument(skip_all, level = "debug")]
-pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount], has_own_netns: bool) -> Result<()> {
+pub fn setup_rootfs(rootfs: &Path, has_own_netns: bool) -> Result<()> {
     // Verify rootfs exists
     if !rootfs.exists() {
         return Err(Error::RootfsNotFound(rootfs.to_path_buf()));
@@ -63,9 +64,6 @@ pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount], has_own_netns: boo
     setup_dev(&rootfs)?;
     mount_proc(&rootfs)?;
     setup_sys(&rootfs, has_own_netns)?;
-
-    // Set up user bind mounts
-    setup_bind_mounts(&rootfs, bind_mounts)?;
 
     // Mask sensitive paths (OCI runtime spec defaults)
     mask_paths(&rootfs);

@@ -125,6 +125,15 @@ impl Container {
         // 3. Create eventfd for parent-child sync (parent signals child)
         let sync_fd = EventFd::new()?;
 
+        // 3b. Create eventfd for bind mount sync (child signals "ready", parent
+        // applies bind mounts via hot_bind_mount, then signals "done").
+        // Only used when there are bind mounts to apply.
+        let mount_fd = if !self.spec.bind_mounts.is_empty() {
+            Some(EventFd::new()?)
+        } else {
+            None
+        };
+
         // 4. Create pipe for child to report setup result back to parent.
         // Write end has O_CLOEXEC: on successful exec(), the write end closes
         // and the parent reads EOF (0 bytes = success). On setup failure, the
@@ -140,6 +149,10 @@ impl Container {
         // Store raw fd values for the child to use after clone3.
         let master_raw = pty_fds.as_ref().map(|(m, _)| m.as_raw_fd()).unwrap_or(-1);
         let slave_raw = pty_fds.as_ref().map(|(_, s)| s.as_raw_fd()).unwrap_or(-1);
+        let mount_fd_raw = match &mount_fd {
+            Some(mfd) => mfd.dup_for_child()?,
+            None => -1,
+        };
 
         // 6. clone3
         let clone_result = clone3::clone3_with_pidfd(ns_flags.bits(), Some(cgroup_fd.as_raw_fd()))?;
@@ -173,7 +186,36 @@ impl Container {
                     return Err(Error::Other(format!("container setup failed: {msg}")));
                 }
 
-                // n == 0: EOF, exec succeeded
+                // n == 0: EOF, child setup succeeded (pivot_root done)
+
+                // Apply bind mounts from the daemon side (host root privileges).
+                // The child is waiting on mount_fd for us to finish.
+                if let Some(ref mfd) = mount_fd {
+                    // Wait for child to signal "ready" (pivot_root done)
+                    mfd.wait()?;
+
+                    // Apply all bind mounts via hot_bind_mount
+                    for bm in &self.spec.bind_mounts {
+                        if let Err(e) = crate::sys::hot_mount::hot_bind_mount(
+                            child_pid,
+                            std::path::Path::new(&bm.source),
+                            &bm.target,
+                            bm.readonly,
+                        ) {
+                            // Signal child before returning error so it doesn't hang
+                            let _ = mfd.signal();
+                            cgroup.destroy().ok();
+                            return Err(Error::Other(format!(
+                                "bind mount {} → {} failed: {e}",
+                                bm.source, bm.target
+                            )));
+                        }
+                    }
+
+                    // Signal child "mounts done"
+                    mfd.signal()?;
+                }
+
                 self.pid = Some(child_pid);
                 self.pidfd = Some(pidfd);
                 self.cgroup = Some(cgroup);
@@ -187,7 +229,13 @@ impl Container {
                 // Close read end of result pipe
                 drop(result_read);
                 // This function never returns — it either execs or exits
-                self.child_setup(&sync_fd, slave_raw, master_raw, result_write_raw);
+                self.child_setup(
+                    &sync_fd,
+                    slave_raw,
+                    master_raw,
+                    result_write_raw,
+                    mount_fd_raw,
+                );
             }
         }
     }
@@ -237,10 +285,12 @@ impl Container {
         slave_raw: i32,
         master_raw: i32,
         result_pipe_fd: i32,
+        mount_fd_raw: i32,
     ) -> ! {
         // SAFETY: result_pipe_fd is a valid fd from pipe2, and we own it in the child.
         let pipe_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(result_pipe_fd) };
-        let result = self.child_setup_inner(sync_fd, slave_raw, master_raw, result_pipe_fd);
+        let result =
+            self.child_setup_inner(sync_fd, slave_raw, master_raw, result_pipe_fd, mount_fd_raw);
         if let Err(e) = result {
             // Report error to parent via the result pipe
             let msg = format!("{e}");
@@ -260,6 +310,7 @@ impl Container {
         slave_raw: i32,
         master_raw: i32,
         result_pipe_fd: i32,
+        mount_fd_raw: i32,
     ) -> Result<()> {
         // Die if the daemon (our parent) crashes — ensures no orphan containers
         nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL)
@@ -295,9 +346,9 @@ impl Container {
         let hostname = self.spec.hostname.as_deref().unwrap_or(&self.spec.name);
         namespace::uts::set_hostname(hostname)?;
 
-        // Set up rootfs (mounts /dev, /proc, /sys, bind mounts, pivot_root).
-        // The rootfs path is the idmapped mount point set up by the daemon,
-        // or falls back to the container rootfs path.
+        // Set up rootfs (mounts /dev, /proc, /sys, pivot_root).
+        // Bind mounts are NOT done here — they're applied by the daemon
+        // via hot_bind_mount after pivot_root, using the mount_fd sync.
         let rootfs = self
             .idmap_mount
             .as_ref()
@@ -305,7 +356,7 @@ impl Container {
             .ok_or_else(|| Error::Other("no rootfs path configured".to_string()))?
             .clone();
         let has_own_netns = !matches!(self.spec.network, NetworkMode::Host);
-        setup_rootfs(&rootfs, &self.spec.bind_mounts, has_own_netns)?;
+        setup_rootfs(&rootfs, has_own_netns)?;
 
         // Set up PTY slave as controlling terminal and stdio.
         // Must be after pivot_root (rootfs setup) so that setsid() doesn't
@@ -346,16 +397,24 @@ impl Container {
             let _ = std::env::set_current_dir(&self.spec.working_dir);
         }
 
+        // Close result pipe to signal success to parent. The parent reads
+        // EOF and knows the child completed rootfs setup (pivot_root done).
+        let _ = nix::unistd::close(result_pipe_fd);
+
+        // Wait for daemon to apply bind mounts (if any).
+        // The daemon uses hot_bind_mount to inject mounts into our namespace.
+        if mount_fd_raw >= 0 {
+            // SAFETY: mount_fd_raw is a valid fd from dup_for_child, inherited across clone3.
+            let mount_fd = unsafe { EventFd::from_raw_fd(mount_fd_raw) };
+            mount_fd.signal()?; // "I'm ready for mounts"
+            mount_fd.wait()?; // wait for "mounts done"
+        }
+
         // Apply seccomp filter
         seccomp::apply_seccomp(&self.spec.seccomp)?;
 
         // Drop capabilities (must be after seccomp to avoid blocking prctl)
         capabilities::drop_capabilities(&self.spec.capabilities)?;
-
-        // Close result pipe to signal success to parent. For exec_command,
-        // O_CLOEXEC would handle this, but run_init never execs (it forks
-        // instead), so the pipe must be closed explicitly before entering init.
-        let _ = nix::unistd::close(result_pipe_fd);
 
         // Merge entrypoint + command for exec
         let exec_args = if self.spec.entrypoint.is_empty() {
