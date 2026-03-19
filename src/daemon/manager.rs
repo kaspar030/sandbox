@@ -68,23 +68,27 @@ impl ContainerManager {
 
     /// Recover from a previous daemon crash. Loads persisted state files,
     /// kills any surviving containers (PDEATHSIG should have handled this,
-    /// but be defensive), and cleans up all leftover resources.
-    pub fn recover_from_crash(&self) {
+    /// but be defensive), cleans up transient resources (cgroups, mounts),
+    /// and re-registers non-ephemeral containers as Created.
+    pub fn recover_from_crash(&mut self) {
         let records = persist::load_all_states();
         if records.is_empty() {
             return;
         }
 
         tracing::info!(
-            "found {} persisted container state(s), cleaning up",
+            "found {} persisted container state(s), recovering",
             records.len()
         );
 
-        for (name, record) in &records {
+        // Collect names for orphan scan before consuming records
+        let known_names: std::collections::HashSet<String> =
+            records.iter().map(|(n, _)| n.clone()).collect();
+
+        for (name, record) in records {
             // Kill the container process if it somehow survived
             if record.pid > 0 {
                 let pid = nix::unistd::Pid::from_raw(record.pid);
-                // Check if alive
                 if nix::sys::signal::kill(pid, None).is_ok() {
                     tracing::info!("killing orphaned container process {name} (pid {})", record.pid);
                     let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
@@ -92,13 +96,13 @@ impl ContainerManager {
                 }
             }
 
-            // Clean up cgroup
+            // Clean up cgroup (transient, re-created on start)
             if record.cgroup_path.exists() {
                 tracing::debug!("removing leftover cgroup {}", record.cgroup_path.display());
                 let _ = std::fs::remove_dir(&record.cgroup_path);
             }
 
-            // Unmount and remove idmapped mount
+            // Unmount and remove idmapped mount (transient, re-created on start)
             if let Some(ref mount_path) = record.idmap_mount {
                 if mount_path.exists() {
                     tracing::debug!("unmounting leftover idmap mount {}", mount_path.display());
@@ -107,8 +111,8 @@ impl ContainerManager {
                 }
             }
 
-            // Delete rootfs for ephemeral containers; leave non-ephemeral intact
             if record.ephemeral {
+                // Ephemeral: delete rootfs, remove state file, don't re-register
                 if let Some(ref rootfs_path) = record.rootfs_path {
                     if let Some(ref pool_name) = record.pool_name {
                         if let Some(pool) = self.storage.pool(pool_name) {
@@ -121,22 +125,41 @@ impl ContainerManager {
                         }
                     }
                 }
-            }
+                persist::remove_state(&name);
+                tracing::info!("cleaned up ephemeral container {name}");
+            } else {
+                // Non-ephemeral: keep rootfs, re-register as Created
+                let rootfs_exists = record
+                    .rootfs_path
+                    .as_ref()
+                    .is_some_and(|p| p.exists());
 
-            // Remove the state file
-            persist::remove_state(name);
-            tracing::info!("cleaned up leftover container {name}");
+                if rootfs_exists {
+                    let container = Container::from_recovered(
+                        record.spec,
+                        record.rootfs_path,
+                        record.pool_name,
+                        false,
+                    );
+                    // Update state file to Created
+                    Self::persist_container(&name, &container);
+                    self.containers.insert(name.clone(), container);
+                    tracing::info!("recovered container {name} as Created");
+                } else {
+                    // Rootfs gone — nothing to recover
+                    persist::remove_state(&name);
+                    tracing::warn!("container {name} rootfs missing, removed state");
+                }
+            }
         }
 
         // Scan for orphaned cgroups not in any state file
-        let known_names: std::collections::HashSet<&str> =
-            records.iter().map(|(n, _)| n.as_str()).collect();
         let cgroup_parent = std::path::Path::new("/sys/fs/cgroup/sandbox");
         if let Ok(entries) = std::fs::read_dir(cgroup_parent) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if !known_names.contains(name.as_ref()) && entry.path().is_dir() {
+                if !known_names.contains(name.as_ref()) && !self.containers.contains_key(name.as_ref()) && entry.path().is_dir() {
                     tracing::debug!("removing orphaned cgroup /sys/fs/cgroup/sandbox/{name}");
                     let _ = std::fs::remove_dir(entry.path());
                 }
@@ -149,7 +172,7 @@ impl ContainerManager {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if !known_names.contains(name.as_ref()) && entry.path().is_dir() {
+                if !known_names.contains(name.as_ref()) && !self.containers.contains_key(name.as_ref()) && entry.path().is_dir() {
                     tracing::debug!("unmounting orphaned mount {}", entry.path().display());
                     let _ = nix::mount::umount2(&entry.path(), nix::mount::MntFlags::MNT_DETACH);
                     let _ = std::fs::remove_dir(entry.path());
@@ -361,6 +384,30 @@ impl ContainerManager {
             &container.spec.name,
         )?;
 
+        container.rootfs_path = Some(rootfs_path);
+        container.pool_name = Some(pool_name);
+
+        // Set up idmapped mount on top of the new rootfs
+        Self::ensure_idmap_mount(container)?;
+
+        Ok(())
+    }
+
+    /// Ensure the idmapped mount is set up for a container.
+    ///
+    /// Called during create (after rootfs copy) and on start if the mount
+    /// was cleaned up (e.g., after daemon restart recovery).
+    fn ensure_idmap_mount(container: &mut Container) -> Result<()> {
+        // Skip if already mounted
+        if container.idmap_mount.is_some() {
+            return Ok(());
+        }
+
+        let rootfs_path = container
+            .rootfs_path
+            .as_ref()
+            .ok_or_else(|| Error::Other("no rootfs path configured".to_string()))?;
+
         // Resolve UID/GID mappings if not provided
         if container.spec.uid_mappings.is_empty() || container.spec.gid_mappings.is_empty() {
             let (uid_maps, gid_maps) = user::build_id_mappings()?;
@@ -372,7 +419,6 @@ impl ContainerManager {
             }
         }
 
-        // Set up idmapped mount
         let mount_target = PathBuf::from(MOUNTS_DIR).join(&container.spec.name);
         std::fs::create_dir_all(&mount_target).map_err(|e| {
             Error::Other(format!(
@@ -382,16 +428,13 @@ impl ContainerManager {
         })?;
 
         idmap::setup_idmapped_mount(
-            &rootfs_path,
+            rootfs_path,
             &mount_target,
             &container.spec.uid_mappings,
             &container.spec.gid_mappings,
         )?;
 
-        container.rootfs_path = Some(rootfs_path);
         container.idmap_mount = Some(mount_target);
-        container.pool_name = Some(pool_name);
-
         Ok(())
     }
 
@@ -477,6 +520,15 @@ impl ContainerManager {
 
         if let Some(cmd) = command {
             container.spec.command = cmd;
+        }
+
+        // Re-create idmap mount if needed (e.g., after daemon restart recovery)
+        if container.idmap_mount.is_none() {
+            if let Err(e) = Self::ensure_idmap_mount(container) {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("failed to set up idmap mount: {e}"),
+                });
+            }
         }
 
         match container.start() {

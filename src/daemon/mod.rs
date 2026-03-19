@@ -52,7 +52,7 @@ pub fn run_daemon(socket_path: Option<&str>, foreground: bool, data_dir: Option<
         tracing::info!("running in foreground");
     }
 
-    let mgr = manager::ContainerManager::new(Arc::clone(&storage));
+    let mut mgr = manager::ContainerManager::new(Arc::clone(&storage));
 
     // Recover from previous crash: clean up leftover containers, cgroups, mounts
     mgr.recover_from_crash();

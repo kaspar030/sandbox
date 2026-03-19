@@ -65,6 +65,29 @@ impl Container {
         }
     }
 
+    /// Reconstruct a container from persisted state after daemon restart.
+    /// The container is in Created state — process, cgroup, and idmap mount
+    /// are gone, but the rootfs on disk is intact.
+    pub fn from_recovered(
+        spec: ContainerSpec,
+        rootfs_path: Option<std::path::PathBuf>,
+        pool_name: Option<String>,
+        ephemeral: bool,
+    ) -> Self {
+        Self {
+            spec,
+            state: state::State::new(),
+            pid: None,
+            pidfd: None,
+            cgroup: None,
+            pty_master: None,
+            ephemeral,
+            idmap_mount: None,
+            rootfs_path,
+            pool_name,
+        }
+    }
+
     /// Start the container.
     ///
     /// This performs the full container creation sequence:
