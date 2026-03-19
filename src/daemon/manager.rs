@@ -5,9 +5,7 @@
 
 use sandbox::container::Container;
 use sandbox::error::{Error, Result};
-use sandbox::protocol::{
-    ContainerInfo, ContainerSpec, Request, Response,
-};
+use sandbox::protocol::{ContainerInfo, ContainerSpec, Request, Response};
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 
@@ -46,16 +44,53 @@ impl ContainerManager {
         }
     }
 
+    /// Take the pidfd out of a container for async monitoring.
+    /// Returns None if the container doesn't exist or has no pidfd.
+    pub fn take_pidfd(&mut self, name: &str) -> Option<OwnedFd> {
+        self.containers.get_mut(name)?.pidfd.take()
+    }
+
+    /// Handle a container exit: reap the child, update state, clean up resources.
+    pub fn handle_container_exit(&mut self, name: &str) {
+        let container = match self.containers.get_mut(name) {
+            Some(c) => c,
+            None => return,
+        };
+
+        if !container.state.is_running() {
+            return;
+        }
+
+        let mut status = 0i32;
+        if let Some(pid) = container.pid {
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        }
+
+        let exit_code = if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else if libc::WIFSIGNALED(status) {
+            128 + libc::WTERMSIG(status)
+        } else {
+            1
+        };
+
+        let _ = container.state.stop(exit_code);
+        tracing::info!("container {name} exited with code {exit_code}");
+
+        // Clean up cgroup
+        if let Some(ref cgroup) = container.cgroup {
+            let _ = cgroup.destroy();
+        }
+        container.cgroup = None;
+    }
+
     /// Handle a request and return a response + optional PTY fd.
     pub fn handle_request(&mut self, request: Request) -> HandleResult {
         match request {
             Request::Create(spec) => self.handle_create(spec),
             Request::Run(spec) => self.handle_run(spec),
             Request::Start { name, command } => self.handle_start(&name, command),
-            Request::Stop {
-                name,
-                timeout_secs,
-            } => self.handle_stop(&name, timeout_secs),
+            Request::Stop { name, timeout_secs } => self.handle_stop(&name, timeout_secs),
             Request::Destroy { name } => self.handle_destroy(&name),
             Request::List => self.handle_list(),
             Request::Exec { name, command } => self.handle_exec(&name, command),

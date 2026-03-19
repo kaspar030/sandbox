@@ -8,7 +8,7 @@
 pub mod manager;
 
 use sandbox::error::{Error, Result};
-use sandbox::protocol::{self, Request};
+use sandbox::protocol::{self, Request, Response};
 use sandbox::sys::scm_rights;
 
 use async_io::Async;
@@ -86,8 +86,6 @@ async fn handle_client(
 
     // If we have a PTY master fd, send it via SCM_RIGHTS
     if let Some(ref pty_master) = result.pty_master {
-        // SCM_RIGHTS requires a blocking sendmsg — do it on the underlying fd.
-        // The Async wrapper's inner UnixStream has the raw fd.
         let socket_ref = stream.get_ref();
         scm_rights::send_fd(socket_ref, pty_master)
             .map_err(|e| {
@@ -95,6 +93,33 @@ async fn handle_client(
                 e
             })?;
         tracing::debug!("sent PTY master fd to client");
+    }
+
+    // If a container was started, spawn a background task to monitor its
+    // pidfd. When the pidfd becomes readable (child exited), we reap the
+    // child and update the container state. This uses smol's async epoll
+    // integration — no polling threads, no busy-waiting.
+    if let Response::Started { ref name, .. } = result.response {
+        let name = name.clone();
+        let mgr = Arc::clone(&mgr);
+        smol::spawn(async move {
+            // Take the pidfd out of the container (so we can await it
+            // without holding the manager lock).
+            let pidfd = {
+                let mut m = mgr.lock().await;
+                m.take_pidfd(&name)
+            };
+            if let Some(pidfd) = pidfd {
+                if let Ok(async_fd) = Async::new(pidfd) {
+                    // Block until the child exits (pidfd becomes readable)
+                    let _ = async_fd.readable().await;
+                }
+                // Reap the child and update container state
+                let mut m = mgr.lock().await;
+                m.handle_container_exit(&name);
+            }
+        })
+        .detach();
     }
 
     Ok(())

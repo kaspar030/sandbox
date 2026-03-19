@@ -246,9 +246,13 @@ fn main() -> anyhow::Result<()> {
                 let resp = client.request(&Request::Run(spec))?;
                 print_response(&resp);
             } else {
-                // Interactive mode — receive PTY fd and proxy I/O
+                // Interactive mode — receive PTY fd and proxy I/O.
+                // Don't print "Started container" — container output is
+                // already flowing through the PTY. Matches docker run behavior.
                 let (resp, exit_code) = client.request_interactive(&Request::Run(spec))?;
-                print_response(&resp);
+                if let Response::Error { .. } = &resp {
+                    print_response(&resp);
+                }
                 if let Some(code) = exit_code {
                     std::process::exit(code);
                 }
