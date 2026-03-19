@@ -74,36 +74,25 @@ impl Container {
         cgroup.apply_limits(&self.spec.cgroup)?;
         let cgroup_fd = cgroup.open_fd()?;
 
-        // 2. Open host device nodes before clone3 (while /dev is accessible).
-        // These fds survive clone3 and are used in the child to bind-mount
-        // device nodes via /proc/self/fd/<N> inside the user namespace.
-        let dev_fds = namespace::mount::open_host_devices()?;
-
-        // 3. Allocate PTY if interactive (not detached)
+        // 2. Allocate PTY if interactive (not detached)
         let pty_fds = if !self.spec.detach {
             Some(pty::allocate_pty()?)
         } else {
             None
         };
 
-        // 4. Create eventfd for parent-child sync
+        // 3. Create eventfd for parent-child sync
         let sync_fd = EventFd::new()?;
 
-        // 5. Compute namespace flags
+        // 4. Compute namespace flags
         let ns_config = NamespaceConfig::from_network_mode(&self.spec.network);
         let ns_flags = ns_config.to_flags();
 
         // Store raw fd values for the child to use after clone3.
-        // clone3 inherits raw fds but OwnedFd doesn't survive the fork —
-        // the parent and child each have their own copies.
         let master_raw = pty_fds.as_ref().map(|(m, _)| m.as_raw_fd()).unwrap_or(-1);
         let slave_raw = pty_fds.as_ref().map(|(_, s)| s.as_raw_fd()).unwrap_or(-1);
-        let dev_fd_raw: Vec<(String, i32)> = dev_fds
-            .iter()
-            .map(|(name, fd)| (name.clone(), fd.as_raw_fd()))
-            .collect();
 
-        // 6. clone3
+        // 5. clone3
         let clone_result = clone3::clone3_with_pidfd(
             ns_flags.bits(),
             Some(cgroup_fd.as_raw_fd()),
@@ -117,9 +106,6 @@ impl Container {
                     drop(slave); // close slave in parent
                     self.pty_master = Some(master);
                 }
-                // Close host device fds in the parent — child has its own copies
-                drop(dev_fds);
-
                 self.parent_setup(child_pid, &sync_fd, &ns_config)?;
                 self.pid = Some(child_pid);
                 self.pidfd = Some(pidfd);
@@ -130,7 +116,7 @@ impl Container {
             None => {
                 // === CHILD ===
                 // This function never returns — it either execs or exits
-                self.child_setup(&sync_fd, slave_raw, master_raw, &dev_fd_raw);
+                self.child_setup(&sync_fd, slave_raw, master_raw);
             }
         }
     }
@@ -169,14 +155,8 @@ impl Container {
     }
 
     /// Child-side setup after clone3. Never returns.
-    fn child_setup(
-        &self,
-        sync_fd: &EventFd,
-        slave_raw: i32,
-        master_raw: i32,
-        dev_fd_raw: &[(String, i32)],
-    ) -> ! {
-        let result = self.child_setup_inner(sync_fd, slave_raw, master_raw, dev_fd_raw);
+    fn child_setup(&self, sync_fd: &EventFd, slave_raw: i32, master_raw: i32) -> ! {
+        let result = self.child_setup_inner(sync_fd, slave_raw, master_raw);
         if let Err(e) = result {
             eprintln!("sandbox: child setup failed: {e}");
             std::process::exit(1);
@@ -190,29 +170,17 @@ impl Container {
         sync_fd: &EventFd,
         slave_raw: i32,
         master_raw: i32,
-        dev_fd_raw: &[(String, i32)],
     ) -> Result<()> {
         // Wait for parent to finish uid_map / network setup
         sync_fd.wait()?;
 
         // Set up PTY slave as controlling terminal and stdio
         if slave_raw >= 0 {
-            // We need an OwnedFd for pty::setup_slave_pty but we shouldn't take
-            // ownership here (the fd will be closed by dup2 logic). Use from_raw_fd.
             let slave_owned = unsafe { OwnedFd::from_raw_fd(slave_raw) };
             pty::setup_slave_pty(&slave_owned, master_raw)?;
             // Don't drop slave_owned — setup_slave_pty already closed the raw fd
             std::mem::forget(slave_owned);
         }
-
-        // Reconstruct device fds from raw fd numbers inherited across clone3
-        let dev_fds: Vec<(String, OwnedFd)> = dev_fd_raw
-            .iter()
-            .map(|(name, raw)| {
-                let fd = unsafe { OwnedFd::from_raw_fd(*raw) };
-                (name.clone(), fd)
-            })
-            .collect();
 
         // Make mounts private
         namespace::mount::make_mounts_private()?;
@@ -222,9 +190,11 @@ impl Container {
             namespace::uts::set_hostname(hostname)?;
         }
 
-        // Set up rootfs (mounts /dev, /proc, /sys, bind mounts, pivot_root)
+        // Set up rootfs (mounts /dev, /proc, /sys, bind mounts, pivot_root).
+        // Device nodes are bind-mounted from host /dev paths which are still
+        // accessible since pivot_root hasn't happened yet.
         let rootfs = PathBuf::from(&self.spec.rootfs);
-        setup_rootfs(&rootfs, &self.spec.bind_mounts, &dev_fds)?;
+        setup_rootfs(&rootfs, &self.spec.bind_mounts)?;
 
         // Apply seccomp filter
         seccomp::apply_seccomp(&self.spec.seccomp)?;

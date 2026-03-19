@@ -88,39 +88,19 @@ pub fn setup_bind_mounts(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()>
     Ok(())
 }
 
-/// Device nodes to populate in /dev, with their host paths.
-pub const HOST_DEV_NODES: &[&str] = &[
+/// Device nodes to bind-mount from the host into the container's /dev.
+const HOST_DEV_NODES: &[&str] = &[
     "null", "zero", "full", "random", "urandom", "tty",
 ];
 
-/// Open host device nodes before clone3 (while /dev is still accessible).
-/// Returns a list of (name, OwnedFd) pairs.
-pub fn open_host_devices() -> Result<Vec<(String, std::os::fd::OwnedFd)>> {
-    use std::os::fd::OwnedFd;
-    let mut fds = Vec::with_capacity(HOST_DEV_NODES.len());
-    for name in HOST_DEV_NODES {
-        let path = format!("/dev/{name}");
-        let fd = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .map_err(|e| Error::Mount {
-                path: path.into(),
-                source: e,
-            })?;
-        fds.push((name.to_string(), OwnedFd::from(fd)));
-    }
-    Ok(fds)
-}
-
 /// Mount /dev with minimal device nodes.
 ///
-/// `dev_fds` are pre-opened host device fds (from `open_host_devices`).
-/// Device nodes are bind-mounted into the container via `/proc/self/fd/<N>`,
-/// which works inside user namespaces where mknod is blocked.
-pub fn setup_dev(rootfs: &Path, dev_fds: &[(String, std::os::fd::OwnedFd)]) -> Result<()> {
-    use std::os::fd::AsRawFd;
-
+/// Bind-mounts device nodes directly from host `/dev/<name>` paths.
+/// This runs before `pivot_root`, so host paths are still accessible.
+/// The bind-mount preserves the source superblock (host devtmpfs, no
+/// `SB_I_NODEV`), so the devices remain functional inside the user
+/// namespace even though the target tmpfs has `SB_I_NODEV`.
+pub fn setup_dev(rootfs: &Path) -> Result<()> {
     let dev_path = rootfs.join("dev");
     std::fs::create_dir_all(&dev_path).map_err(|e| Error::Mount {
         path: dev_path.clone(),
@@ -140,14 +120,16 @@ pub fn setup_dev(rootfs: &Path, dev_fds: &[(String, std::os::fd::OwnedFd)]) -> R
         source: std::io::Error::from_raw_os_error(e as i32),
     })?;
 
-    // Bind-mount device nodes from pre-opened host fds via /proc/self/fd/<N>.
-    // This works in user namespaces where mknod is blocked, because we're
-    // bind-mounting an existing device node rather than creating a new one.
-    for (name, fd) in dev_fds {
+    // Bind-mount each device node from the host.
+    // Source is the host's /dev/<name> (on devtmpfs, init user namespace).
+    // Target is <rootfs>/dev/<name> (on our tmpfs).
+    // The bind mount preserves the source superblock, so the device works
+    // despite the target tmpfs having SB_I_NODEV.
+    for name in HOST_DEV_NODES {
         let dev_node = dev_path.join(name);
-        let proc_fd_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+        let host_path = format!("/dev/{name}");
 
-        // Create empty file to mount onto
+        // Create empty file as bind-mount target
         std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -159,7 +141,7 @@ pub fn setup_dev(rootfs: &Path, dev_fds: &[(String, std::os::fd::OwnedFd)]) -> R
             })?;
 
         nix::mount::mount(
-            Some(proc_fd_path.as_str()),
+            Some(host_path.as_str()),
             &dev_node,
             None::<&str>,
             MsFlags::MS_BIND,

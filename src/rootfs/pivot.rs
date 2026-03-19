@@ -9,7 +9,6 @@
 
 use crate::error::{Error, Result};
 use crate::namespace::mount::{setup_bind_mounts, setup_dev, setup_sys};
-use std::os::fd::OwnedFd;
 use crate::namespace::pid::mount_proc;
 use crate::protocol::BindMount;
 use nix::mount::MsFlags;
@@ -19,11 +18,7 @@ use std::path::Path;
 ///
 /// This must be called from the child process after namespaces are configured
 /// and the parent has signaled via eventfd.
-pub fn setup_rootfs(
-    rootfs: &Path,
-    bind_mounts: &[BindMount],
-    dev_fds: &[(String, OwnedFd)],
-) -> Result<()> {
+pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()> {
     // Verify rootfs exists
     if !rootfs.exists() {
         return Err(Error::RootfsNotFound(rootfs.to_path_buf()));
@@ -55,7 +50,7 @@ pub fn setup_rootfs(
     })?;
 
     // Set up special filesystems inside the new root
-    setup_dev(rootfs, dev_fds)?;
+    setup_dev(rootfs)?;
     mount_proc(rootfs)?;
     setup_sys(rootfs)?;
 
