@@ -8,7 +8,9 @@
 //! 5. Unmount and remove the old root
 
 use crate::error::{Error, Result};
-use crate::namespace::mount::{setup_bind_mounts, setup_dev, setup_sys};
+use crate::namespace::mount::{
+    mask_paths, readonly_paths, setup_bind_mounts, setup_dev, setup_sys,
+};
 use crate::namespace::pid::mount_proc;
 use crate::protocol::BindMount;
 use nix::mount::MsFlags;
@@ -16,10 +18,13 @@ use std::path::Path;
 
 /// Perform the full rootfs setup and pivot_root.
 ///
+/// `has_own_netns`: true if the container has its own network namespace
+/// (required for fresh sysfs mount; falls back to bind-mount otherwise).
+///
 /// This must be called from the child process after namespaces are configured
 /// and the parent has signaled via eventfd.
 #[tracing::instrument(skip_all, level = "debug")]
-pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()> {
+pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount], has_own_netns: bool) -> Result<()> {
     // Verify rootfs exists
     if !rootfs.exists() {
         return Err(Error::RootfsNotFound(rootfs.to_path_buf()));
@@ -57,10 +62,14 @@ pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()> {
     // Set up special filesystems inside the new root
     setup_dev(&rootfs)?;
     mount_proc(&rootfs)?;
-    setup_sys(&rootfs)?;
+    setup_sys(&rootfs, has_own_netns)?;
 
     // Set up user bind mounts
     setup_bind_mounts(&rootfs, bind_mounts)?;
+
+    // Mask sensitive paths (OCI runtime spec defaults)
+    mask_paths(&rootfs);
+    readonly_paths(&rootfs);
 
     // Create the old_root directory for pivot_root
     let old_root = rootfs.join("old_root");

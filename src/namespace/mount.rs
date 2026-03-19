@@ -207,25 +207,163 @@ pub fn setup_dev(rootfs: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Mount /sys inside the container (read-only).
-/// Non-fatal: sysfs mount may be blocked by LSMs (e.g., Landlock) in
-/// user namespaces. The container can function without /sys.
-pub fn setup_sys(rootfs: &Path) -> Result<()> {
+/// Mount /sys inside the container.
+///
+/// If the container has its own network namespace (`has_own_netns`), mount a
+/// fresh sysfs — the kernel scopes it to show only the container's devices.
+///
+/// If the container shares the host network namespace, a fresh sysfs mount
+/// fails with EPERM (the kernel requires the netns to be owned by the same
+/// userns). In that case, fall back to bind-mounting /sys from the host as
+/// read-only (the runc rootless approach).
+pub fn setup_sys(rootfs: &Path, has_own_netns: bool) -> Result<()> {
     let sys_path = rootfs.join("sys");
     std::fs::create_dir_all(&sys_path).map_err(|e| Error::Mount {
         path: sys_path.clone(),
         source: e,
     })?;
 
-    if let Err(e) = nix::mount::mount(
-        Some("sysfs"),
-        &sys_path,
-        Some("sysfs"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC | MsFlags::MS_RDONLY,
-        None::<&str>,
-    ) {
-        tracing::warn!("sysfs mount on /sys failed: {e}");
+    let ro_flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC | MsFlags::MS_RDONLY;
+
+    if has_own_netns {
+        // Own network namespace — mount a fresh sysfs (kernel scopes visibility)
+        if let Err(e) = nix::mount::mount(
+            Some("sysfs"),
+            &sys_path,
+            Some("sysfs"),
+            ro_flags,
+            None::<&str>,
+        ) {
+            tracing::warn!("sysfs mount failed (falling back to bind mount): {e}");
+            // Fall back to bind-mount even with own netns (in case of other restrictions)
+            bind_mount_sys_readonly(&sys_path, ro_flags);
+        }
+    } else {
+        // Host networking — bind-mount /sys read-only
+        bind_mount_sys_readonly(&sys_path, ro_flags);
     }
 
     Ok(())
+}
+
+/// Bind-mount /sys from the host as read-only recursive.
+fn bind_mount_sys_readonly(sys_path: &Path, ro_flags: MsFlags) {
+    // First, bind-mount /sys recursively
+    if let Err(e) = nix::mount::mount(
+        Some("/sys"),
+        sys_path,
+        None::<&str>,
+        MsFlags::MS_BIND | MsFlags::MS_REC,
+        None::<&str>,
+    ) {
+        tracing::warn!("sysfs bind mount failed: {e}");
+        return;
+    }
+
+    // Then remount as read-only
+    if let Err(e) = nix::mount::mount(
+        None::<&str>,
+        sys_path,
+        None::<&str>,
+        MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_REC | ro_flags,
+        None::<&str>,
+    ) {
+        tracing::warn!("sysfs bind remount readonly failed: {e}");
+    }
+}
+
+/// Mask sensitive paths inside the container (OCI runtime spec defaults).
+///
+/// - Directories: mount a read-only tmpfs on top (hides all contents)
+/// - Files: bind-mount /dev/null on top (reads return empty)
+///
+/// Non-fatal: paths that don't exist or fail to mask are silently skipped.
+/// Must be called after /proc, /sys, and /dev are mounted.
+pub fn mask_paths(rootfs: &Path) {
+    // Directories to mask with a read-only tmpfs
+    let masked_dirs = ["proc/acpi", "proc/scsi", "sys/firmware"];
+
+    for path in &masked_dirs {
+        let full = rootfs.join(path);
+        if full.is_dir() {
+            if let Err(e) = nix::mount::mount(
+                Some("tmpfs"),
+                &full,
+                Some("tmpfs"),
+                MsFlags::MS_RDONLY,
+                Some("size=0"),
+            ) {
+                tracing::debug!("mask {path}: {e}");
+            }
+        }
+    }
+
+    // Files to mask with /dev/null
+    let masked_files = [
+        "proc/kcore",
+        "proc/keys",
+        "proc/latency_stats",
+        "proc/timer_list",
+        "proc/timer_stats",
+        "proc/sched_debug",
+    ];
+
+    let dev_null = rootfs.join("dev/null");
+    for path in &masked_files {
+        let full = rootfs.join(path);
+        if full.exists() && !full.is_dir() {
+            if let Err(e) = nix::mount::mount(
+                Some(&dev_null),
+                &full,
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
+            ) {
+                tracing::debug!("mask {path}: {e}");
+            }
+        }
+    }
+}
+
+/// Make sensitive paths read-only inside the container (OCI runtime spec defaults).
+///
+/// Bind-mounts each path onto itself, then remounts read-only.
+/// Non-fatal: paths that don't exist or fail are silently skipped.
+pub fn readonly_paths(rootfs: &Path) {
+    let paths = [
+        "proc/bus",
+        "proc/fs",
+        "proc/irq",
+        "proc/sys",
+        "proc/sysrq-trigger",
+    ];
+
+    for path in &paths {
+        let full = rootfs.join(path);
+        if !full.exists() {
+            continue;
+        }
+
+        // Bind-mount onto self
+        if nix::mount::mount(
+            Some(&full),
+            &full,
+            None::<&str>,
+            MsFlags::MS_BIND | MsFlags::MS_REC,
+            None::<&str>,
+        )
+        .is_err()
+        {
+            continue;
+        }
+
+        // Remount read-only
+        let _ = nix::mount::mount(
+            None::<&str>,
+            &full,
+            None::<&str>,
+            MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY | MsFlags::MS_REC,
+            None::<&str>,
+        );
+    }
 }

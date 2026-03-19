@@ -304,7 +304,8 @@ impl Container {
             .or(self.rootfs_path.as_ref())
             .ok_or_else(|| Error::Other("no rootfs path configured".to_string()))?
             .clone();
-        setup_rootfs(&rootfs, &self.spec.bind_mounts)?;
+        let has_own_netns = !matches!(self.spec.network, NetworkMode::Host);
+        setup_rootfs(&rootfs, &self.spec.bind_mounts, has_own_netns)?;
 
         // Set up PTY slave as controlling terminal and stdio.
         // Must be after pivot_root (rootfs setup) so that setsid() doesn't
