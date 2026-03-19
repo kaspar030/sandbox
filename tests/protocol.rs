@@ -5,7 +5,7 @@
 #[allow(dead_code)]
 mod common;
 
-use sandbox::protocol::*;
+use sandbox_proto::*;
 
 #[test]
 fn test_roundtrip_request_create() {
@@ -218,7 +218,7 @@ fn test_network_mode_bridged_roundtrip() {
 #[test]
 fn test_message_too_short() {
     let buf = [0u8; 2]; // Too short for length prefix
-    let result: Result<(Request, &[u8]), _> = decode_message(&buf);
+    let result: std::result::Result<(Request, &[u8]), _> = decode_message(&buf);
     assert!(result.is_err());
 }
 
@@ -229,6 +229,6 @@ fn test_message_truncated_payload() {
     buf.extend_from_slice(&100u32.to_le_bytes());
     buf.extend_from_slice(&[0u8; 5]);
 
-    let result: Result<(Request, &[u8]), _> = decode_message(&buf);
+    let result: std::result::Result<(Request, &[u8]), _> = decode_message(&buf);
     assert!(result.is_err());
 }

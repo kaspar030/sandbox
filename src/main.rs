@@ -1,10 +1,10 @@
-mod client;
 mod daemon;
 
 use clap::{Parser, Subcommand};
-use sandbox::protocol::{
-    self, BindMount, CgroupSpec, ContainerSpec, IdMapping, NetworkMode, Request, Response,
-    SeccompMode, CapabilitySpec,
+use sandbox_client::Client;
+use sandbox_proto::{
+    BindMount, CgroupSpec, ContainerSpec, CapabilitySpec, IdMapping, NetworkMode, Request,
+    Response, SeccompMode,
 };
 
 #[derive(Parser)]
@@ -296,7 +296,7 @@ fn main() -> anyhow::Result<()> {
                 daemon::run_daemon(cli.socket.as_deref(), foreground, data_dir.as_deref())?;
             }
             DaemonAction::Stop => {
-                let mut client = client::Client::connect(cli.socket.as_deref())?;
+                let mut client = Client::connect(cli.socket.as_deref())?;
                 let resp = client.request(&Request::Shutdown)?;
                 print_response(&resp);
             }
@@ -311,17 +311,23 @@ fn main() -> anyhow::Result<()> {
                 ip, gateway, seccomp, cap_add, bind, init, uid_map, gid_map, command,
             )?;
             spec.detach = detach;
-            let mut client = client::Client::connect(cli.socket.as_deref())?;
+            let mut client = Client::connect(cli.socket.as_deref())?;
 
             if detach {
                 let resp = client.request(&Request::Run(spec))?;
                 print_response(&resp);
             } else {
-                let (resp, exit_code) = client.request_interactive(&Request::Run(spec))?;
+                let (resp, pty_fd) = client.request_with_fd(&Request::Run(spec))?;
                 if let Response::Error { .. } = &resp {
                     print_response(&resp);
-                }
-                if let Some(code) = exit_code {
+                } else if let Some(fd) = pty_fd {
+                    interactive_session(fd)?;
+                    let exit_resp = client.read_exit_code()?;
+                    let code = match exit_resp {
+                        Response::ContainerExited { exit_code } => exit_code,
+                        Response::ExecExited { exit_code } => exit_code,
+                        _ => 0,
+                    };
                     std::process::exit(code);
                 }
             }
@@ -335,7 +341,7 @@ fn main() -> anyhow::Result<()> {
                 name, image, pool, hostname, memory, cpus, pids_max, network, bridge,
                 ip, gateway, seccomp, cap_add, bind, init, uid_map, gid_map, command,
             )?;
-            let mut client = client::Client::connect(cli.socket.as_deref())?;
+            let mut client = Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Create(spec))?;
 
             if start {
@@ -348,11 +354,17 @@ fn main() -> anyhow::Result<()> {
                         let resp = client.request(&start_req)?;
                         print_response(&resp);
                     } else {
-                        let (resp, exit_code) = client.request_interactive(&start_req)?;
+                        let (resp, pty_fd) = client.request_with_fd(&start_req)?;
                         if let Response::Error { .. } = &resp {
                             print_response(&resp);
-                        }
-                        if let Some(code) = exit_code {
+                        } else if let Some(fd) = pty_fd {
+                            interactive_session(fd)?;
+                            let exit_resp = client.read_exit_code()?;
+                            let code = match exit_resp {
+                                Response::ContainerExited { exit_code } => exit_code,
+                                Response::ExecExited { exit_code } => exit_code,
+                                _ => 0,
+                            };
                             std::process::exit(code);
                         }
                     }
@@ -366,25 +378,25 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Start { name, command } => {
             let cmd = if command.is_empty() { None } else { Some(command) };
-            let mut client = client::Client::connect(cli.socket.as_deref())?;
+            let mut client = Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Start { name, command: cmd })?;
             print_response(&resp);
         }
 
         Commands::Stop { name, timeout } => {
-            let mut client = client::Client::connect(cli.socket.as_deref())?;
+            let mut client = Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Stop { name, timeout_secs: timeout })?;
             print_response(&resp);
         }
 
         Commands::Destroy { name } => {
-            let mut client = client::Client::connect(cli.socket.as_deref())?;
+            let mut client = Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Destroy { name })?;
             print_response(&resp);
         }
 
         Commands::List => {
-            let mut client = client::Client::connect(cli.socket.as_deref())?;
+            let mut client = Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::List)?;
             match &resp {
                 Response::ContainerList(list) => {
@@ -394,9 +406,9 @@ fn main() -> anyhow::Result<()> {
                         println!("{:<20} {:<15} {:<10}", "NAME", "STATE", "PID");
                         for info in list {
                             let state_str = match &info.state {
-                                protocol::ContainerState::Created => "Created".to_string(),
-                                protocol::ContainerState::Running => "Running".to_string(),
-                                protocol::ContainerState::Stopped { exit_code } => {
+                                sandbox_proto::ContainerState::Created => "Created".to_string(),
+                                sandbox_proto::ContainerState::Running => "Running".to_string(),
+                                sandbox_proto::ContainerState::Stopped { exit_code } => {
                                     format!("Stopped({exit_code})")
                                 }
                             };
@@ -412,23 +424,29 @@ fn main() -> anyhow::Result<()> {
         }
 
         Commands::Exec { name, command, detach } => {
-            let mut client = client::Client::connect(cli.socket.as_deref())?;
+            let mut client = Client::connect(cli.socket.as_deref())?;
             if detach {
                 let resp = client.request(&Request::Exec { name, command, detach: true })?;
                 print_response(&resp);
             } else {
-                let (resp, exit_code) = client.request_interactive(&Request::Exec { name, command, detach: false })?;
+                let (resp, pty_fd) = client.request_with_fd(&Request::Exec { name, command, detach: false })?;
                 if let Response::Error { .. } = &resp {
                     print_response(&resp);
-                }
-                if let Some(code) = exit_code {
+                } else if let Some(fd) = pty_fd {
+                    interactive_session(fd)?;
+                    let exit_resp = client.read_exit_code()?;
+                    let code = match exit_resp {
+                        Response::ContainerExited { exit_code } => exit_code,
+                        Response::ExecExited { exit_code } => exit_code,
+                        _ => 0,
+                    };
                     std::process::exit(code);
                 }
             }
         }
 
         Commands::Image { action } => {
-            let mut client = client::Client::connect(cli.socket.as_deref())?;
+            let mut client = Client::connect(cli.socket.as_deref())?;
             match action {
                 ImageAction::Import { name, source, pool } => {
                     let resp = client.request(&Request::ImageImport { name, source, pool })?;
@@ -463,7 +481,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         Commands::Pool { action } => {
-            let mut client = client::Client::connect(cli.socket.as_deref())?;
+            let mut client = Client::connect(cli.socket.as_deref())?;
             match action {
                 PoolAction::List => {
                     let resp = client.request(&Request::PoolList)?;
@@ -673,6 +691,98 @@ fn parse_id_mapping(s: &str) -> anyhow::Result<IdMapping> {
         host_id: parts[1].parse()?,
         count: parts[2].parse()?,
     })
+}
+
+/// Run an interactive session, proxying between the local terminal and
+/// a PTY master fd received from the daemon.
+fn interactive_session(pty_master: std::os::fd::OwnedFd) -> anyhow::Result<()> {
+    use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
+    use std::io::{Read, Write};
+    use std::os::fd::{AsFd, AsRawFd};
+
+    let stdin_fd = std::io::stdin();
+    let is_tty = nix::unistd::isatty(stdin_fd.as_fd()).unwrap_or(false);
+
+    // Save original terminal settings
+    let original_termios = if is_tty {
+        Some(tcgetattr(&stdin_fd)?)
+    } else {
+        None
+    };
+
+    // Guard to restore terminal on exit (including panic)
+    struct TerminalGuard {
+        original: Option<nix::sys::termios::Termios>,
+    }
+    impl Drop for TerminalGuard {
+        fn drop(&mut self) {
+            if let Some(ref orig) = self.original {
+                let stdin = std::io::stdin();
+                let _ = nix::sys::termios::tcsetattr(
+                    &stdin,
+                    nix::sys::termios::SetArg::TCSANOW,
+                    orig,
+                );
+            }
+        }
+    }
+    let _guard = TerminalGuard {
+        original: original_termios.clone(),
+    };
+
+    // Put stdin in raw mode
+    if let Some(ref orig) = original_termios {
+        let mut raw = orig.clone();
+        cfmakeraw(&mut raw);
+        tcsetattr(&stdin_fd, SetArg::TCSANOW, &raw)?;
+    }
+
+    // Forward current terminal size to the PTY
+    if is_tty {
+        if let Ok(ws) = sandbox::sys::pty::get_window_size(&stdin_fd) {
+            let _ = sandbox::sys::pty::set_window_size(&pty_master, &ws);
+        }
+    }
+
+    let master_raw = pty_master.as_raw_fd();
+
+    // Thread 1: stdin → PTY master
+    let _stdin_handle = std::thread::spawn(move || {
+        let master_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(master_raw) };
+        let mut stdin = std::io::stdin().lock();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if nix::unistd::write(master_fd, &buf[..n]).is_err() {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Thread 2 (main): PTY master → stdout
+    let mut stdout = std::io::stdout().lock();
+    let mut buf = [0u8; 4096];
+    loop {
+        match nix::unistd::read(&pty_master, &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if stdout.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+                if stdout.flush().is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn format_size(bytes: u64) -> String {

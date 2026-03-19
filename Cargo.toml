@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/sandbox-proto", "crates/sandbox-client"]
+
 [package]
 name = "sandbox"
 version = "0.1.0"
@@ -15,6 +18,10 @@ name = "sandbox"
 path = "src/main.rs"
 
 [dependencies]
+# Workspace crates
+sandbox-proto = { path = "crates/sandbox-proto" }
+sandbox-client = { path = "crates/sandbox-client" }
+
 # Syscall wrappers
 nix = { version = "0.31", features = ["sched", "mount", "signal", "hostname", "user", "process", "fs", "net", "ioctl", "event", "term", "ptrace"] }
 libc = "0.2"

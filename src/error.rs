@@ -120,3 +120,9 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<sandbox_proto::Error> for Error {
+    fn from(e: sandbox_proto::Error) -> Self {
+        Error::Protocol(e.to_string())
+    }
+}

@@ -7,6 +7,21 @@
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 
+// -- Error type for protocol operations --
+
+/// Protocol error.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("protocol error: {0}")]
+    Protocol(String),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+// -- Types --
+
 /// Container specification for creation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerSpec {
@@ -266,10 +281,11 @@ pub enum Response {
     Error { message: String },
 }
 
+// -- Encoding / decoding --
+
 /// Encode a message with a u32 LE length prefix.
-pub fn encode_message<T: Serialize>(msg: &T) -> crate::error::Result<Vec<u8>> {
-    let payload =
-        postcard::to_allocvec(msg).map_err(|e| crate::error::Error::Protocol(e.to_string()))?;
+pub fn encode_message<T: Serialize>(msg: &T) -> Result<Vec<u8>> {
+    let payload = postcard::to_allocvec(msg).map_err(|e| Error::Protocol(e.to_string()))?;
     let len = payload.len() as u32;
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&len.to_le_bytes());
@@ -278,54 +294,42 @@ pub fn encode_message<T: Serialize>(msg: &T) -> crate::error::Result<Vec<u8>> {
 }
 
 /// Decode a length-prefixed message. Returns the message and remaining bytes.
-pub fn decode_message<'a, T: Deserialize<'a>>(
-    buf: &'a [u8],
-) -> crate::error::Result<(T, &'a [u8])> {
+pub fn decode_message<'a, T: Deserialize<'a>>(buf: &'a [u8]) -> Result<(T, &'a [u8])> {
     if buf.len() < 4 {
-        return Err(crate::error::Error::Protocol(
+        return Err(Error::Protocol(
             "buffer too short for length prefix".to_string(),
         ));
     }
     let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
     let rest = &buf[4..];
     if rest.len() < len {
-        return Err(crate::error::Error::Protocol(format!(
+        return Err(Error::Protocol(format!(
             "expected {} bytes, got {}",
             len,
             rest.len()
         )));
     }
-    let msg = postcard::from_bytes(&rest[..len])
-        .map_err(|e| crate::error::Error::Protocol(e.to_string()))?;
+    let msg = postcard::from_bytes(&rest[..len]).map_err(|e| Error::Protocol(e.to_string()))?;
     Ok((msg, &rest[len..]))
 }
 
 /// Read a complete length-prefixed message from a reader.
-pub fn read_message<T: for<'a> Deserialize<'a>>(
-    reader: &mut impl std::io::Read,
-) -> crate::error::Result<T> {
+pub fn read_message<T: for<'a> Deserialize<'a>>(reader: &mut impl std::io::Read) -> Result<T> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
 
-    // Sanity check: reject messages larger than 16 MiB
     if len > 16 * 1024 * 1024 {
-        return Err(crate::error::Error::Protocol(format!(
-            "message too large: {} bytes",
-            len
-        )));
+        return Err(Error::Protocol(format!("message too large: {} bytes", len)));
     }
 
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload)?;
-    postcard::from_bytes(&payload).map_err(|e| crate::error::Error::Protocol(e.to_string()))
+    postcard::from_bytes(&payload).map_err(|e| Error::Protocol(e.to_string()))
 }
 
 /// Write a length-prefixed message to a writer.
-pub fn write_message<T: Serialize>(
-    writer: &mut impl std::io::Write,
-    msg: &T,
-) -> crate::error::Result<()> {
+pub fn write_message<T: Serialize>(writer: &mut impl std::io::Write, msg: &T) -> Result<()> {
     let data = encode_message(msg)?;
     writer.write_all(&data)?;
     writer.flush()?;

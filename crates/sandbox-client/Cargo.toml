@@ -1,0 +1,13 @@
+[package]
+name = "sandbox-client"
+version = "0.1.0"
+edition = "2024"
+description = "Client library for the sandbox container manager"
+license = "MIT"
+rust-version = "1.85"
+
+[dependencies]
+sandbox-proto = { path = "../sandbox-proto" }
+nix = { version = "0.31", features = ["net", "fs"] }
+thiserror = "2"
+tracing = "0.1"

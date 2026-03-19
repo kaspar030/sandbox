@@ -1363,6 +1363,8 @@ dependencies = [
  "libc",
  "nix",
  "postcard",
+ "sandbox-client",
+ "sandbox-proto",
  "seccompiler",
  "serde",
  "serde_json",
@@ -1377,6 +1379,25 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "zstd",
+]
+
+[[package]]
+name = "sandbox-client"
+version = "0.1.0"
+dependencies = [
+ "nix",
+ "sandbox-proto",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "sandbox-proto"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]

@@ -11,8 +11,10 @@ pub mod container;
 pub mod error;
 pub mod namespace;
 pub mod net;
-pub mod protocol;
 pub mod rootfs;
 pub mod security;
 pub mod storage;
 pub mod sys;
+
+// Re-export protocol types so existing `use sandbox::protocol::*` continues to work.
+pub use sandbox_proto as protocol;
