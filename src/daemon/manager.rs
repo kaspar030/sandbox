@@ -351,6 +351,9 @@ impl ContainerManager {
             Request::ImageImport { name, source, pool } => {
                 self.handle_image_import(&name, &source, pool.as_deref())
             }
+            Request::ImagePull { reference, name, pool } => {
+                self.handle_image_pull(&reference, name.as_deref(), pool.as_deref())
+            }
             Request::ImageList { pool } => self.handle_image_list(pool.as_deref()),
             Request::ImageRemove { name, pool } => self.handle_image_remove(&name, pool.as_deref()),
             Request::PoolList => self.handle_pool_list(),
@@ -438,7 +441,35 @@ impl ContainerManager {
         Ok(())
     }
 
-    fn handle_create(&mut self, spec: ContainerSpec) -> HandleResult {
+    /// Apply image config (entrypoint, cmd, env, working_dir) to a ContainerSpec.
+    /// Image defaults are used only if the user didn't provide overrides.
+    fn apply_image_config(&self, spec: &mut ContainerSpec) {
+        let pool = match self.storage.resolve_pool(spec.pool.as_deref()) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        if let Some(meta) = storage::layers::load_image_meta(pool, &spec.image) {
+            // Entrypoint: use image default if user didn't override
+            if spec.entrypoint.is_empty() {
+                spec.entrypoint = meta.config.entrypoint;
+            }
+            // Command: use image default only if user didn't provide any command
+            // (default is ["/bin/sh"] from ContainerSpec::default — check if unchanged)
+            if spec.command == vec!["/bin/sh".to_string()] && !meta.config.cmd.is_empty() {
+                spec.command = meta.config.cmd;
+            }
+            // Env: merge image env with user env (user overrides image)
+            if spec.env.is_empty() {
+                spec.env = meta.config.env;
+            }
+            // Working dir: use image default if user didn't set one
+            if spec.working_dir == "/" && !meta.config.working_dir.is_empty() {
+                spec.working_dir = meta.config.working_dir;
+            }
+        }
+    }
+
+    fn handle_create(&mut self, mut spec: ContainerSpec) -> HandleResult {
         let name = spec.name.clone();
 
         if self.containers.contains_key(&name) {
@@ -447,6 +478,7 @@ impl ContainerManager {
             });
         }
 
+        self.apply_image_config(&mut spec);
         let mut container = Container::new(spec);
 
         // Prepare rootfs (copy image + idmap mount)
@@ -460,7 +492,7 @@ impl ContainerManager {
         HandleResult::response_only(Response::Created { name })
     }
 
-    fn handle_run(&mut self, spec: ContainerSpec) -> HandleResult {
+    fn handle_run(&mut self, mut spec: ContainerSpec) -> HandleResult {
         let name = spec.name.clone();
 
         if self.containers.contains_key(&name) {
@@ -469,6 +501,7 @@ impl ContainerManager {
             });
         }
 
+        self.apply_image_config(&mut spec);
         let mut container = Container::new(spec);
         container.ephemeral = true;
 
@@ -664,6 +697,79 @@ impl ContainerManager {
 
     // -- Image handlers --
 
+    fn handle_image_pull(
+        &self,
+        reference: &str,
+        name: Option<&str>,
+        pool: Option<&str>,
+    ) -> HandleResult {
+        let pool = match self.storage.resolve_pool(pool) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                })
+            }
+        };
+
+        // Parse the reference
+        let parsed_ref = match storage::oci::Reference::parse(reference) {
+            Ok(r) => r,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("invalid reference: {e}"),
+                })
+            }
+        };
+
+        let image_name = name
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| parsed_ref.base_name());
+
+        // Pull: authenticate, fetch manifest + config, download uncached layers.
+        // We don't know chain IDs before fetching the config (need diff_ids),
+        // so we download all layers and let layers.rs skip cached ones during extraction.
+        let pull_result =
+            match storage::oci::pull_image(&parsed_ref, &std::collections::HashSet::new()) {
+                Ok(r) => r,
+                Err(e) => {
+                    return HandleResult::response_only(Response::Error {
+                        message: format!("pull failed: {e}"),
+                    })
+                }
+            };
+
+        // Now we have the config with diff_ids — compute chain IDs and check cache
+        let diff_ids = pull_result
+            .config
+            .rootfs
+            .as_ref()
+            .map(|r| r.diff_ids.clone())
+            .unwrap_or_default();
+        let chain_ids = storage::layers::compute_chain_ids(&diff_ids);
+        let num_cached = storage::layers::find_cached_layers(pool, &chain_ids).len();
+
+        if num_cached == chain_ids.len() {
+            tracing::info!("all {} layers cached", chain_ids.len());
+        } else if num_cached > 0 {
+            tracing::info!(
+                "{} of {} layers cached",
+                num_cached,
+                chain_ids.len()
+            );
+        }
+
+        // Create image from pulled layers
+        match storage::layers::create_image_from_pull(pool, &pull_result, &image_name) {
+            Ok(()) => HandleResult::response_only(Response::ImagePulled {
+                name: image_name,
+            }),
+            Err(e) => HandleResult::response_only(Response::Error {
+                message: format!("image creation failed: {e}"),
+            }),
+        }
+    }
+
     fn handle_image_import(&self, name: &str, source: &str, pool: Option<&str>) -> HandleResult {
         let pool = match self.storage.resolve_pool(pool) {
             Ok(p) => p,
@@ -721,6 +827,11 @@ impl ContainerManager {
                 })
             }
         };
+
+        // Clean up layer references (if this was a pulled image)
+        if let Err(e) = storage::layers::remove_image_layers(pool, name) {
+            tracing::warn!("layer cleanup for {name}: {e}");
+        }
 
         match storage::image::remove_image(pool, name) {
             Ok(()) => HandleResult::response_only(Response::ImageRemoved {

@@ -15,7 +15,14 @@ pub struct ContainerSpec {
     pub image: String,
     /// Storage pool name (default: "main").
     pub pool: Option<String>,
+    /// Entrypoint from image config or --entrypoint override.
+    /// Combined with command at exec time: exec(entrypoint + command).
+    pub entrypoint: Vec<String>,
     pub command: Vec<String>,
+    /// Environment variables: ["KEY=VALUE", ...].
+    pub env: Vec<String>,
+    /// Working directory inside the container.
+    pub working_dir: String,
     pub hostname: Option<String>,
     pub uid_mappings: Vec<IdMapping>,
     pub gid_mappings: Vec<IdMapping>,
@@ -36,7 +43,10 @@ impl Default for ContainerSpec {
             name: String::new(),
             image: String::new(),
             pool: None,
+            entrypoint: Vec::new(),
             command: vec!["/bin/sh".to_string()],
+            env: Vec::new(),
+            working_dir: "/".to_string(),
             hostname: None,
             uid_mappings: Vec::new(),
             gid_mappings: Vec::new(),
@@ -185,6 +195,14 @@ pub enum Request {
         source: String,
         pool: Option<String>,
     },
+    /// Pull an image from an OCI registry.
+    ImagePull {
+        /// OCI reference, e.g. "alpine:latest", "docker.io/library/ubuntu:22.04"
+        reference: String,
+        /// Local image name override (defaults to repo basename).
+        name: Option<String>,
+        pool: Option<String>,
+    },
     /// List images.
     ImageList { pool: Option<String> },
     /// Remove an image.
@@ -214,6 +232,8 @@ pub enum Response {
     ExecStarted { pid: u32 },
     /// Image imported successfully.
     ImageImported { name: String },
+    /// Image pulled from registry.
+    ImagePulled { name: String },
     /// Image list.
     ImageList(Vec<ImageInfo>),
     /// Image removed.

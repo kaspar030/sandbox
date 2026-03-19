@@ -13,7 +13,10 @@ fn test_roundtrip_request_create() {
         name: "test".to_string(),
         image: "alpine".to_string(),
         pool: None,
+        entrypoint: Vec::new(),
         command: vec!["/bin/sh".to_string()],
+        env: vec!["PATH=/usr/bin".to_string()],
+        working_dir: "/app".to_string(),
         hostname: Some("myhost".to_string()),
         uid_mappings: vec![IdMapping {
             container_id: 0,

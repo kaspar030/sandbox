@@ -257,6 +257,19 @@ enum ImageAction {
         #[arg(long)]
         pool: Option<String>,
     },
+    /// Pull an image from an OCI registry (e.g., Docker Hub)
+    Pull {
+        /// Image reference (e.g., alpine:latest, docker.io/library/ubuntu:22.04)
+        reference: String,
+
+        /// Local image name override (defaults to repo basename)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Storage pool (default: main)
+        #[arg(long)]
+        pool: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -441,6 +454,10 @@ fn main() -> anyhow::Result<()> {
                     let resp = client.request(&Request::ImageRemove { name, pool })?;
                     print_response(&resp);
                 }
+                ImageAction::Pull { reference, name, pool } => {
+                    let resp = client.request(&Request::ImagePull { reference, name, pool })?;
+                    print_response(&resp);
+                }
             }
         }
 
@@ -490,6 +507,7 @@ fn print_response(resp: &Response) {
             println!("Container exited with code {exit_code}")
         }
         Response::ExecExited { exit_code } => println!("Exec exited with code {exit_code}"),
+        Response::ImagePulled { name } => println!("Pulled image: {name}"),
         Response::Error { message } => eprintln!("Error: {message}"),
     }
 }
@@ -591,7 +609,10 @@ fn build_spec(
         name,
         image,
         pool,
+        entrypoint: Vec::new(),
         command: cmd,
+        env: Vec::new(),
+        working_dir: "/".to_string(),
         hostname,
         uid_mappings,
         gid_mappings,

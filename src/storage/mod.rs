@@ -1,8 +1,10 @@
 //! Storage pool management.
 //!
 //! Layout:
-//!   /var/lib/sandbox/storage/<pool>/images/<name>/   — imported rootfs images
-//!   /var/lib/sandbox/storage/<pool>/fs/<container>/  — per-container rootfs (copy/snapshot)
+//!   /var/lib/sandbox/storage/<pool>/images/<name>/       — rootfs images
+//!   /var/lib/sandbox/storage/<pool>/fs/<container>/      — per-container rootfs (copy/snapshot)
+//!   /var/lib/sandbox/storage/<pool>/layers/<chain_id>/   — cached OCI layer subvolumes
+//!   /var/lib/sandbox/storage/<pool>/image_meta/<name>.json — image metadata (config, chain IDs)
 //!
 //! The default pool is "main". Additional pools can be created by mounting
 //! a filesystem (btrfs, bcachefs, etc.) at storage/<name>/.
@@ -10,6 +12,9 @@
 pub mod container_fs;
 pub mod fs_detect;
 pub mod image;
+pub mod layers;
+pub mod oci;
+pub mod unpack;
 
 use crate::error::{Error, Result};
 use fs_detect::FsType;

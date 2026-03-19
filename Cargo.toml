@@ -42,11 +42,16 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-[dev-dependencies]
-tempfile = "3"
+# OCI registry pull
+ureq = { version = "2", features = ["json"] }
 sha2 = "0.10"
 hex = "0.4"
-ureq = "2"
+flate2 = "1"
+zstd = "0.13"
+tar = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 lto = true

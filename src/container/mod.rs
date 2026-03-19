@@ -309,19 +309,53 @@ impl Container {
             std::mem::forget(slave_owned);
         }
 
+        // Set environment variables.
+        // Clear inherited env from daemon, then apply image + user env.
+        // SAFETY: we're in a forked child process — single-threaded.
+        for (k, _) in std::env::vars() {
+            unsafe { std::env::remove_var(&k) };
+        }
+        if self.spec.env.is_empty() {
+            // Sensible fallback if no env is configured
+            unsafe {
+                std::env::set_var(
+                    "PATH",
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                )
+            };
+            unsafe { std::env::set_var("HOME", "/root") };
+            unsafe { std::env::set_var("TERM", "xterm") };
+        } else {
+            for var in &self.spec.env {
+                if let Some((k, v)) = var.split_once('=') {
+                    unsafe { std::env::set_var(k, v) };
+                }
+            }
+        }
+
+        // Set working directory (after pivot_root so container paths work)
+        if !self.spec.working_dir.is_empty() && self.spec.working_dir != "/" {
+            let _ = std::env::set_current_dir(&self.spec.working_dir);
+        }
+
         // Apply seccomp filter
         seccomp::apply_seccomp(&self.spec.seccomp)?;
 
         // Drop capabilities (must be after seccomp to avoid blocking prctl)
         capabilities::drop_capabilities(&self.spec.capabilities)?;
 
+        // Merge entrypoint + command for exec
+        let exec_args = if self.spec.entrypoint.is_empty() {
+            self.spec.command.clone()
+        } else {
+            [self.spec.entrypoint.clone(), self.spec.command.clone()].concat()
+        };
+
         // Exec the command
         if self.spec.use_init {
-            // Run mini-init as PID 1
-            init::run_init(&self.spec.command);
+            init::run_init(&exec_args);
         } else {
-            // Direct exec
-            exec_command(&self.spec.command)?;
+            exec_command(&exec_args)?;
         }
 
         Ok(())
