@@ -417,9 +417,11 @@ impl ContainerManager {
                 })
             }
             Request::Destroy { name } => self.handle_destroy(&name),
-            Request::Snapshot { name, image_name, force } => {
-                self.handle_snapshot(&name, &image_name, force)
-            }
+            Request::Snapshot {
+                name,
+                image_name,
+                force,
+            } => self.handle_snapshot(&name, &image_name, force),
             Request::List => self.handle_list(),
             Request::Exec {
                 name,
@@ -824,7 +826,7 @@ impl ContainerManager {
             None => {
                 return HandleResult::response_only(Response::Error {
                     message: format!("container {name} not found"),
-                })
+                });
             }
         };
 
@@ -834,7 +836,7 @@ impl ContainerManager {
             Err(e) => {
                 return HandleResult::response_only(Response::Error {
                     message: format!("{e}"),
-                })
+                });
             }
         };
 
@@ -849,9 +851,7 @@ impl ContainerManager {
         }
 
         // Perform the snapshot
-        if let Err(e) =
-            storage::container_fs::snapshot_container_to_image(pool, name, image_name)
-        {
+        if let Err(e) = storage::container_fs::snapshot_container_to_image(pool, name, image_name) {
             return HandleResult::response_only(Response::Error {
                 message: format!("snapshot failed: {e}"),
             });

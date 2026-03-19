@@ -489,9 +489,17 @@ fn main() -> anyhow::Result<()> {
             print_response(&resp);
         }
 
-        Commands::Snapshot { name, image_name, force } => {
+        Commands::Snapshot {
+            name,
+            image_name,
+            force,
+        } => {
             let mut client = Client::connect(cli.socket.as_deref())?;
-            let resp = client.request(&Request::Snapshot { name, image_name, force })?;
+            let resp = client.request(&Request::Snapshot {
+                name,
+                image_name,
+                force,
+            })?;
             print_response(&resp);
         }
 
