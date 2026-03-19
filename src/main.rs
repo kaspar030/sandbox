@@ -203,6 +203,10 @@ enum Commands {
         /// Container name
         name: String,
 
+        /// Run as user UID or UID:GID (default: 0, container root)
+        #[arg(short = 'u', long)]
+        user: Option<String>,
+
         /// Run detached (no PTY, no interactive I/O)
         #[arg(short, long)]
         detach: bool,
@@ -534,15 +538,18 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Exec {
             name,
+            user,
             command,
             detach,
         } => {
+            let exec_user = user.map(|u| parse_exec_user(&u)).transpose()?;
             let mut client = Client::connect(cli.socket.as_deref())?;
             if detach {
                 let resp = client.request(&Request::Exec {
                     name,
                     command,
                     detach: true,
+                    user: exec_user,
                 })?;
                 print_response(&resp);
             } else {
@@ -550,6 +557,7 @@ fn main() -> anyhow::Result<()> {
                     name,
                     command,
                     detach: false,
+                    user: exec_user,
                 })?;
                 if let Response::Error { .. } = &resp {
                     print_response(&resp);
@@ -843,6 +851,22 @@ fn build_spec(
         use_init: init,
         detach: false,
     })
+}
+
+/// Parse a user spec: "UID" or "UID:GID"
+fn parse_exec_user(s: &str) -> anyhow::Result<sandbox_proto::ExecUser> {
+    if let Some((uid_str, gid_str)) = s.split_once(':') {
+        let uid: u32 = uid_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid UID: {uid_str}"))?;
+        let gid: u32 = gid_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid GID: {gid_str}"))?;
+        Ok(sandbox_proto::ExecUser { uid, gid })
+    } else {
+        let uid: u32 = s.parse().map_err(|_| anyhow::anyhow!("invalid UID: {s}"))?;
+        Ok(sandbox_proto::ExecUser { uid, gid: uid })
+    }
 }
 
 /// Parse a mount spec: "SOURCE:TARGET" or "SOURCE:TARGET:ro"

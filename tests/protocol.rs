@@ -124,6 +124,10 @@ fn test_roundtrip_all_request_variants() {
             name: "foo".to_string(),
             command: vec!["/bin/ls".to_string(), "-la".to_string()],
             detach: false,
+            user: Some(sandbox_proto::ExecUser {
+                uid: 1000,
+                gid: 1000,
+            }),
         },
         Request::Shutdown,
     ];

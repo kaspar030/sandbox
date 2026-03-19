@@ -427,7 +427,8 @@ impl ContainerManager {
                 name,
                 command,
                 detach,
-            } => self.handle_exec(&name, command, detach),
+                user,
+            } => self.handle_exec(&name, command, detach, user),
             Request::ImageImport { name, source, pool } => {
                 self.handle_image_import(&name, &source, pool.as_deref())
             }
@@ -920,7 +921,13 @@ impl ContainerManager {
         HandleResult::response_only(Response::ContainerList(list))
     }
 
-    fn handle_exec(&mut self, name: &str, command: Vec<String>, detach: bool) -> HandleResult {
+    fn handle_exec(
+        &mut self,
+        name: &str,
+        command: Vec<String>,
+        detach: bool,
+        user: Option<sandbox::protocol::ExecUser>,
+    ) -> HandleResult {
         let container = match self.containers.get(name) {
             Some(c) => c,
             None => {
@@ -945,7 +952,7 @@ impl ContainerManager {
             }
         };
 
-        match exec_in_container(pid, name, &command, detach) {
+        match exec_in_container(pid, name, &command, detach, user) {
             Ok(result) => {
                 let response = Response::ExecStarted {
                     pid: result.pid as u32,
@@ -1137,6 +1144,7 @@ fn exec_in_container(
     container_name: &str,
     command: &[String],
     detach: bool,
+    user: Option<sandbox::protocol::ExecUser>,
 ) -> Result<ExecResult> {
     use std::os::fd::FromRawFd;
 
@@ -1243,6 +1251,20 @@ fn exec_in_container(
             std::process::exit(1);
         }
         let _ = std::env::set_current_dir("/");
+
+        // Switch to target user (default: container root)
+        let (uid, gid) = match &user {
+            Some(u) => (u.uid, u.gid),
+            None => (0, 0),
+        };
+        if let Err(e) = nix::unistd::setresgid(gid.into(), gid.into(), gid.into()) {
+            eprintln!("setresgid({gid}) failed: {e}");
+            std::process::exit(1);
+        }
+        if let Err(e) = nix::unistd::setresuid(uid.into(), uid.into(), uid.into()) {
+            eprintln!("setresuid({uid}) failed: {e}");
+            std::process::exit(1);
+        }
 
         // Set up PTY slave as stdin/stdout/stderr
         if let Some((_master, slave)) = pty {

@@ -179,6 +179,13 @@ pub struct BindMount {
     pub readonly: bool,
 }
 
+/// User identity for exec commands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecUser {
+    pub uid: u32,
+    pub gid: u32,
+}
+
 /// Container state as reported by the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ContainerState {
@@ -221,6 +228,8 @@ pub enum Request {
         command: Vec<String>,
         /// If true, run without PTY (fire-and-forget). Default: false (interactive).
         detach: bool,
+        /// Run as a specific user (default: container root, uid 0).
+        user: Option<ExecUser>,
     },
     /// Import an image from a path (directory or tar.gz).
     ImageImport {
