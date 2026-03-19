@@ -417,6 +417,9 @@ impl ContainerManager {
                 })
             }
             Request::Destroy { name } => self.handle_destroy(&name),
+            Request::Snapshot { name, image_name, force } => {
+                self.handle_snapshot(&name, &image_name, force)
+            }
             Request::List => self.handle_list(),
             Request::Exec {
                 name,
@@ -813,6 +816,59 @@ impl ContainerManager {
             .collect();
 
         HandleResult::response_only(Response::MountList(mounts))
+    }
+
+    fn handle_snapshot(&self, name: &str, image_name: &str, force: bool) -> HandleResult {
+        let container = match self.containers.get(name) {
+            Some(c) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {name} not found"),
+                })
+            }
+        };
+
+        // Safety check: non-CoW filesystem + running container = potentially inconsistent snapshot
+        let pool = match self.storage.resolve_pool(container.spec.pool.as_deref()) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                })
+            }
+        };
+
+        if container.state.is_running() && !pool.fs_type.supports_snapshots() && !force {
+            return HandleResult::response_only(Response::Error {
+                message: format!(
+                    "container {name} is running on non-CoW filesystem ({}); \
+                     snapshot may be inconsistent. Use --force to override.",
+                    pool.fs_type
+                ),
+            });
+        }
+
+        // Perform the snapshot
+        if let Err(e) =
+            storage::container_fs::snapshot_container_to_image(pool, name, image_name)
+        {
+            return HandleResult::response_only(Response::Error {
+                message: format!("snapshot failed: {e}"),
+            });
+        }
+
+        // Copy image metadata from the source image (if the container was created from a pulled image)
+        if let Some(meta) = storage::layers::load_image_meta(pool, &container.spec.image) {
+            let mut new_meta = meta;
+            new_meta.reference = format!("snapshot:{name}");
+            if let Err(e) = storage::layers::write_image_meta_pub(pool, image_name, &new_meta) {
+                tracing::warn!("failed to copy image metadata for snapshot: {e}");
+            }
+        }
+
+        HandleResult::response_only(Response::Snapshotted {
+            image_name: image_name.to_string(),
+        })
     }
 
     fn handle_destroy(&mut self, name: &str) -> HandleResult {

@@ -9,8 +9,8 @@
 //! when the filesystem supports reflinks).
 
 use crate::error::{Error, Result};
-use crate::storage::StoragePool;
 use crate::storage::fs_detect::FsType;
+use crate::storage::StoragePool;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -214,4 +214,38 @@ fn which(cmd: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+/// Snapshot a container's rootfs into the image store.
+///
+/// On btrfs/bcachefs: creates an instant CoW snapshot.
+/// On other filesystems: copies with cp -a --reflink=auto.
+pub fn snapshot_container_to_image(
+    pool: &StoragePool,
+    container_name: &str,
+    image_name: &str,
+) -> Result<()> {
+    let container_path = pool.container_path(container_name);
+    if !container_path.is_dir() {
+        return Err(Error::Other(format!(
+            "container rootfs '{}' not found",
+            container_path.display()
+        )));
+    }
+
+    let image_path = pool.image_path(image_name);
+    if image_path.exists() {
+        return Err(Error::Other(format!("image '{image_name}' already exists")));
+    }
+
+    match pool.fs_type {
+        FsType::Btrfs => btrfs_snapshot(&container_path, &image_path)?,
+        FsType::Bcachefs => bcachefs_snapshot(&container_path, &image_path)?,
+        _ => {
+            cp_reflink(&container_path, &image_path)?;
+        }
+    }
+
+    tracing::info!("snapshotted container '{container_name}' as image '{image_name}'");
+    Ok(())
 }

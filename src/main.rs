@@ -181,6 +181,19 @@ enum Commands {
         name: String,
     },
 
+    /// Snapshot a container's rootfs into a reusable image
+    Snapshot {
+        /// Container name
+        name: String,
+
+        /// Image name to create
+        image_name: String,
+
+        /// Force snapshot even if container is running on non-CoW filesystem
+        #[arg(long)]
+        force: bool,
+    },
+
     /// List all containers
     #[command(alias = "ls")]
     List,
@@ -476,6 +489,12 @@ fn main() -> anyhow::Result<()> {
             print_response(&resp);
         }
 
+        Commands::Snapshot { name, image_name, force } => {
+            let mut client = Client::connect(cli.socket.as_deref())?;
+            let resp = client.request(&Request::Snapshot { name, image_name, force })?;
+            print_response(&resp);
+        }
+
         Commands::List => {
             let mut client = Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::List)?;
@@ -666,6 +685,7 @@ fn print_response(resp: &Response) {
         }
         Response::ExecExited { exit_code } => println!("Exec exited with code {exit_code}"),
         Response::ImagePulled { name } => println!("Pulled image: {name}"),
+        Response::Snapshotted { image_name } => println!("Snapshotted as image: {image_name}"),
         Response::MountAdded { target } => println!("Mount added: {target}"),
         Response::MountRemoved { target } => println!("Mount removed: {target}"),
         Response::MountList(mounts) => {

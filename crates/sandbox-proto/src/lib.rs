@@ -251,6 +251,12 @@ pub enum Request {
     MountRemove { name: String, target: String },
     /// List bind mounts for a container.
     MountList { name: String },
+    /// Snapshot a container's rootfs into a reusable image.
+    Snapshot {
+        name: String,
+        image_name: String,
+        force: bool,
+    },
     /// List storage pools.
     PoolList,
     /// Shut down the daemon.
@@ -302,6 +308,8 @@ pub enum Response {
     MountRemoved { target: String },
     /// Mount list for a container.
     MountList(Vec<MountInfo>),
+    /// Container rootfs snapshotted as image.
+    Snapshotted { image_name: String },
     /// Error response.
     Error { message: String },
 }

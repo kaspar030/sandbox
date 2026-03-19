@@ -166,4 +166,13 @@ impl Client {
             _ => Err(Error::Other("unexpected response".to_string())),
         }
     }
+
+    /// Snapshot a container's rootfs into a reusable image.
+    pub fn snapshot(&mut self, container: &str, image_name: &str, force: bool) -> Result<Response> {
+        self.request(&Request::Snapshot {
+            name: container.to_string(),
+            image_name: image_name.to_string(),
+            force,
+        })
+    }
 }

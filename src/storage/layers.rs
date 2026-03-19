@@ -10,11 +10,11 @@
 //! they share the same chain ID subvolumes.
 
 use crate::error::{Error, Result};
-use crate::storage::StoragePool;
 use crate::storage::container_fs;
 use crate::storage::fs_detect::FsType;
 use crate::storage::oci::{ImageConfig, PullResult};
 use crate::storage::unpack;
+use crate::storage::StoragePool;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -424,6 +424,11 @@ fn load_layer_meta(pool: &StoragePool, chain_id: &str) -> Option<LayerMeta> {
     let path = layer_meta_path(pool, chain_id);
     let json = fs::read_to_string(&path).ok()?;
     serde_json::from_str(&json).ok()
+}
+
+/// Write image metadata (public wrapper for use by snapshot).
+pub fn write_image_meta_pub(pool: &StoragePool, image_name: &str, meta: &ImageMeta) -> Result<()> {
+    write_image_meta(pool, image_name, meta)
 }
 
 fn write_image_meta(pool: &StoragePool, image_name: &str, meta: &ImageMeta) -> Result<()> {
