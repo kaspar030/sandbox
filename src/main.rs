@@ -84,6 +84,10 @@ enum Commands {
         #[arg(long)]
         init: bool,
 
+        /// Run detached (no interactive PTY)
+        #[arg(long, short = 'd')]
+        detach: bool,
+
         /// UID mapping (CONTAINER:HOST:COUNT)
         #[arg(long = "uid-map")]
         uid_map: Vec<String>,
@@ -225,17 +229,30 @@ fn main() -> anyhow::Result<()> {
             cap_add,
             bind,
             init,
+            detach,
             uid_map,
             gid_map,
             command,
         } => {
-            let spec = build_spec(
+            let mut spec = build_spec(
                 name, rootfs, hostname, memory, cpus, pids_max, network, bridge, ip, gateway,
                 seccomp, cap_add, bind, init, uid_map, gid_map, command,
             )?;
+            spec.detach = detach;
             let mut client = client::Client::connect(cli.socket.as_deref())?;
-            let resp = client.request(&Request::Run(spec))?;
-            print_response(&resp);
+
+            if detach {
+                // Detached mode — just print the response
+                let resp = client.request(&Request::Run(spec))?;
+                print_response(&resp);
+            } else {
+                // Interactive mode — receive PTY fd and proxy I/O
+                let (resp, exit_code) = client.request_interactive(&Request::Run(spec))?;
+                print_response(&resp);
+                if let Some(code) = exit_code {
+                    std::process::exit(code);
+                }
+            }
         }
 
         Commands::Create {
@@ -471,6 +488,7 @@ fn build_spec(
         capabilities: CapabilitySpec { keep: cap_add },
         bind_mounts,
         use_init: init,
+        detach: false,
     })
 }
 

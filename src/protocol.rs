@@ -22,6 +22,9 @@ pub struct ContainerSpec {
     pub capabilities: CapabilitySpec,
     pub bind_mounts: Vec<BindMount>,
     pub use_init: bool,
+    /// If true, run detached (no PTY, no interactive I/O).
+    /// If false (default), allocate a PTY and send master fd to client.
+    pub detach: bool,
 }
 
 impl Default for ContainerSpec {
@@ -47,6 +50,7 @@ impl Default for ContainerSpec {
             capabilities: CapabilitySpec::default(),
             bind_mounts: Vec::new(),
             use_init: false,
+            detach: false,
         }
     }
 }

@@ -1,7 +1,14 @@
 //! CLI client — connects to the daemon over a Unix socket.
+//!
+//! Supports interactive sessions by receiving a PTY master fd
+//! via SCM_RIGHTS and proxying I/O between the local terminal
+//! and the container's PTY.
 
 use sandbox::error::{Error, Result};
 use sandbox::protocol::{self, Request, Response};
+use sandbox::sys::scm_rights;
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
@@ -22,7 +29,7 @@ impl Client {
         }
 
         let stream = UnixStream::connect(path).map_err(Error::Connection)?;
-        // Set a reasonable timeout
+        // Set a reasonable timeout for the initial request/response
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(30)))
             .map_err(Error::Connection)?;
@@ -34,5 +41,167 @@ impl Client {
     pub fn request(&mut self, req: &Request) -> Result<Response> {
         protocol::write_message(&mut self.stream, req)?;
         protocol::read_message(&mut self.stream)
+    }
+
+    /// Send a request, receive a response, and if a PTY fd follows,
+    /// enter an interactive session proxying I/O.
+    ///
+    /// Returns the response and the exit code (if interactive).
+    pub fn request_interactive(&mut self, req: &Request) -> Result<(Response, Option<i32>)> {
+        protocol::write_message(&mut self.stream, req)?;
+        let response: Response = protocol::read_message(&mut self.stream)?;
+
+        // Check if this response type implies a PTY fd follows
+        let expects_pty = matches!(
+            response,
+            Response::Started { .. } | Response::ExecStarted { .. }
+        );
+
+        if expects_pty {
+            // Remove read timeout for the interactive session
+            self.stream
+                .set_read_timeout(None)
+                .map_err(Error::Connection)?;
+
+            // Receive the PTY master fd via SCM_RIGHTS
+            match scm_rights::recv_fd(&self.stream) {
+                Ok(pty_master) => {
+                    let exit_code = interactive_session(pty_master)?;
+                    return Ok((response, Some(exit_code)));
+                }
+                Err(e) => {
+                    tracing::warn!("no PTY fd received (detached mode?): {e}");
+                    // Container started but no PTY — detached mode
+                    return Ok((response, None));
+                }
+            }
+        }
+
+        Ok((response, None))
+    }
+}
+
+/// Run an interactive session, proxying between the local terminal and
+/// a PTY master fd received from the daemon.
+///
+/// 1. Save terminal state
+/// 2. Put stdin in raw mode
+/// 3. Spawn two threads: stdin → PTY, PTY → stdout
+/// 4. Wait for PTY EOF (container exited)
+/// 5. Restore terminal
+fn interactive_session(pty_master: OwnedFd) -> Result<i32> {
+    use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
+
+    let stdin_fd = std::io::stdin();
+    let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
+
+    // Save original terminal settings
+    let original_termios = if is_tty {
+        Some(
+            tcgetattr(&stdin_fd)
+                .map_err(|e| Error::Other(format!("tcgetattr failed: {e}")))?,
+        )
+    } else {
+        None
+    };
+
+    // Guard to restore terminal on exit (including panic)
+    let _guard = TerminalGuard {
+        original: original_termios.clone(),
+    };
+
+    // Put stdin in raw mode
+    if let Some(ref orig) = original_termios {
+        let mut raw = orig.clone();
+        cfmakeraw(&mut raw);
+        tcsetattr(&stdin_fd, SetArg::TCSANOW, &raw)
+            .map_err(|e| Error::Other(format!("tcsetattr raw failed: {e}")))?;
+    }
+
+    // Forward current terminal size to the PTY
+    if is_tty {
+        if let Ok(ws) = sandbox::sys::pty::get_window_size(&stdin_fd) {
+            let _ = sandbox::sys::pty::set_window_size(&pty_master, &ws);
+        }
+    }
+
+    let master_raw = pty_master.as_raw_fd();
+
+    // Thread 1: stdin → PTY master (forward keystrokes to container)
+    let _stdin_handle = std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) => break,   // EOF
+                Ok(n) => {
+                    let written = unsafe {
+                        libc::write(
+                            master_raw,
+                            buf.as_ptr() as *const libc::c_void,
+                            n,
+                        )
+                    };
+                    if written <= 0 {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Thread 2 (main thread): PTY master → stdout (display container output)
+    let mut stdout = std::io::stdout().lock();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = unsafe {
+            libc::read(
+                pty_master.as_raw_fd(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+            )
+        };
+
+        if n <= 0 {
+            // EOF or error — container closed the PTY
+            break;
+        }
+
+        if stdout.write_all(&buf[..n as usize]).is_err() {
+            break;
+        }
+        if stdout.flush().is_err() {
+            break;
+        }
+    }
+
+    // The stdin thread will exit when its read returns an error
+    // (because the master fd was closed or stdin was closed).
+    // Don't join it — it may be blocked on stdin read.
+    // The TerminalGuard will restore the terminal on drop.
+
+    // Return 0 as exit code (we don't have the actual exit code here —
+    // the daemon tracks that via pidfd). In a full implementation, the
+    // daemon would send the exit code after the container exits.
+    Ok(0)
+}
+
+/// RAII guard that restores the terminal state on drop.
+struct TerminalGuard {
+    original: Option<nix::sys::termios::Termios>,
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if let Some(ref orig) = self.original {
+            let stdin = std::io::stdin();
+            let _ = nix::sys::termios::tcsetattr(
+                &stdin,
+                nix::sys::termios::SetArg::TCSANOW,
+                orig,
+            );
+        }
     }
 }

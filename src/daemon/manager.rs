@@ -9,6 +9,30 @@ use sandbox::protocol::{
     ContainerInfo, ContainerSpec, Request, Response,
 };
 use std::collections::HashMap;
+use std::os::fd::OwnedFd;
+
+/// Result of handling a request — includes the response and optionally
+/// a PTY master fd to send to the client via SCM_RIGHTS.
+pub struct HandleResult {
+    pub response: Response,
+    pub pty_master: Option<OwnedFd>,
+}
+
+impl HandleResult {
+    fn response_only(response: Response) -> Self {
+        Self {
+            response,
+            pty_master: None,
+        }
+    }
+
+    fn with_pty(response: Response, pty_master: Option<OwnedFd>) -> Self {
+        Self {
+            response,
+            pty_master,
+        }
+    }
+}
 
 /// Manages the lifecycle of all containers.
 pub struct ContainerManager {
@@ -22,8 +46,8 @@ impl ContainerManager {
         }
     }
 
-    /// Handle a request and return a response.
-    pub fn handle_request(&mut self, request: Request) -> Response {
+    /// Handle a request and return a response + optional PTY fd.
+    pub fn handle_request(&mut self, request: Request) -> HandleResult {
         match request {
             Request::Create(spec) => self.handle_create(spec),
             Request::Run(spec) => self.handle_run(spec),
@@ -42,33 +66,33 @@ impl ContainerManager {
                 for name in names {
                     let _ = self.handle_destroy(&name);
                 }
-                Response::Ok
+                HandleResult::response_only(Response::Ok)
             }
         }
     }
 
-    fn handle_create(&mut self, spec: ContainerSpec) -> Response {
+    fn handle_create(&mut self, spec: ContainerSpec) -> HandleResult {
         let name = spec.name.clone();
 
         if self.containers.contains_key(&name) {
-            return Response::Error {
+            return HandleResult::response_only(Response::Error {
                 message: format!("container {name} already exists"),
-            };
+            });
         }
 
         let container = Container::new(spec);
         self.containers.insert(name.clone(), container);
 
-        Response::Created { name }
+        HandleResult::response_only(Response::Created { name })
     }
 
-    fn handle_run(&mut self, spec: ContainerSpec) -> Response {
+    fn handle_run(&mut self, spec: ContainerSpec) -> HandleResult {
         let name = spec.name.clone();
 
         if self.containers.contains_key(&name) {
-            return Response::Error {
+            return HandleResult::response_only(Response::Error {
                 message: format!("container {name} already exists"),
-            };
+            });
         }
 
         let mut container = Container::new(spec);
@@ -76,22 +100,23 @@ impl ContainerManager {
         match container.start() {
             Ok(()) => {
                 let pid = container.pid.unwrap_or(0) as u32;
+                let pty_master = container.take_pty_master();
                 self.containers.insert(name.clone(), container);
-                Response::Started { name, pid }
+                HandleResult::with_pty(Response::Started { name, pid }, pty_master)
             }
-            Err(e) => Response::Error {
+            Err(e) => HandleResult::response_only(Response::Error {
                 message: format!("failed to start container: {e}"),
-            },
+            }),
         }
     }
 
-    fn handle_start(&mut self, name: &str, command: Option<Vec<String>>) -> Response {
+    fn handle_start(&mut self, name: &str, command: Option<Vec<String>>) -> HandleResult {
         let container = match self.containers.get_mut(name) {
             Some(c) => c,
             None => {
-                return Response::Error {
+                return HandleResult::response_only(Response::Error {
                     message: format!("container {name} not found"),
-                }
+                })
             }
         };
 
@@ -102,63 +127,67 @@ impl ContainerManager {
         match container.start() {
             Ok(()) => {
                 let pid = container.pid.unwrap_or(0) as u32;
-                Response::Started {
-                    name: name.to_string(),
-                    pid,
-                }
+                let pty_master = container.take_pty_master();
+                HandleResult::with_pty(
+                    Response::Started {
+                        name: name.to_string(),
+                        pid,
+                    },
+                    pty_master,
+                )
             }
-            Err(e) => Response::Error {
+            Err(e) => HandleResult::response_only(Response::Error {
                 message: format!("failed to start container: {e}"),
-            },
+            }),
         }
     }
 
-    fn handle_stop(&mut self, name: &str, timeout_secs: u32) -> Response {
+    fn handle_stop(&mut self, name: &str, timeout_secs: u32) -> HandleResult {
         let container = match self.containers.get_mut(name) {
             Some(c) => c,
             None => {
-                return Response::Error {
+                return HandleResult::response_only(Response::Error {
                     message: format!("container {name} not found"),
-                }
+                })
             }
         };
 
         match container.stop(timeout_secs) {
-            Ok(exit_code) => Response::Stopped {
+            Ok(exit_code) => HandleResult::response_only(Response::Stopped {
                 name: name.to_string(),
                 exit_code,
-            },
-            Err(e) => Response::Error {
+            }),
+            Err(e) => HandleResult::response_only(Response::Error {
                 message: format!("failed to stop container: {e}"),
-            },
+            }),
         }
     }
 
-    fn handle_destroy(&mut self, name: &str) -> Response {
+    fn handle_destroy(&mut self, name: &str) -> HandleResult {
         let mut container = match self.containers.remove(name) {
             Some(c) => c,
             None => {
-                return Response::Error {
+                return HandleResult::response_only(Response::Error {
                     message: format!("container {name} not found"),
-                }
+                })
             }
         };
 
         match container.destroy() {
-            Ok(()) => Response::Destroyed {
+            Ok(()) => HandleResult::response_only(Response::Destroyed {
                 name: name.to_string(),
-            },
+            }),
             Err(e) => {
                 // Put it back if destroy failed
                 self.containers.insert(name.to_string(), container);
-                Response::Error {
+                HandleResult::response_only(Response::Error {
                     message: format!("failed to destroy container: {e}"),
-                }
+                })
             }
         }
     }
 
-    fn handle_list(&self) -> Response {
+    fn handle_list(&self) -> HandleResult {
         let list: Vec<ContainerInfo> = self
             .containers
             .values()
@@ -169,42 +198,42 @@ impl ContainerManager {
             })
             .collect();
 
-        Response::ContainerList(list)
+        HandleResult::response_only(Response::ContainerList(list))
     }
 
-    fn handle_exec(&mut self, name: &str, command: Vec<String>) -> Response {
+    fn handle_exec(&mut self, name: &str, command: Vec<String>) -> HandleResult {
         let container = match self.containers.get(name) {
             Some(c) => c,
             None => {
-                return Response::Error {
+                return HandleResult::response_only(Response::Error {
                     message: format!("container {name} not found"),
-                }
+                })
             }
         };
 
         if !container.state.is_running() {
-            return Response::Error {
+            return HandleResult::response_only(Response::Error {
                 message: format!("container {name} is not running"),
-            };
+            });
         }
 
         let pid = match container.pid {
             Some(p) => p,
             None => {
-                return Response::Error {
+                return HandleResult::response_only(Response::Error {
                     message: "container has no PID".to_string(),
-                }
+                })
             }
         };
 
         // Exec into the container's namespaces
         match exec_in_container(pid, &command) {
-            Ok(child_pid) => Response::ExecStarted {
+            Ok(child_pid) => HandleResult::response_only(Response::ExecStarted {
                 pid: child_pid as u32,
-            },
-            Err(e) => Response::Error {
+            }),
+            Err(e) => HandleResult::response_only(Response::Error {
                 message: format!("exec failed: {e}"),
-            },
+            }),
         }
     }
 }

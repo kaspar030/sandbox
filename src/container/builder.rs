@@ -150,6 +150,11 @@ impl ContainerBuilder {
         self
     }
 
+    pub fn detach(mut self, detach: bool) -> Self {
+        self.spec.detach = detach;
+        self
+    }
+
     pub fn build(self) -> ContainerSpec {
         self.spec
     }

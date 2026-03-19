@@ -9,6 +9,7 @@ pub mod manager;
 
 use sandbox::error::{Error, Result};
 use sandbox::protocol::{self, Request};
+use sandbox::sys::scm_rights;
 
 use async_io::Async;
 use smol::io::{AsyncReadExt, AsyncWriteExt};
@@ -49,7 +50,6 @@ pub fn run_daemon(socket_path: Option<&str>, foreground: bool) -> Result<()> {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let mgr = Arc::clone(&mgr);
-                    // stream is already Async<UnixStream> from listener.accept()
                     smol::spawn(async move {
                         if let Err(e) = handle_client(stream, mgr).await {
                             tracing::error!("client error: {e}");
@@ -76,16 +76,26 @@ async fn handle_client(
     tracing::debug!("received request: {request:?}");
 
     // Process request
-    let response = {
+    let result = {
         let mut mgr = mgr.lock().await;
         mgr.handle_request(request)
     };
 
     // Send response
-    write_async_message(&mut stream, &response).await?;
+    write_async_message(&mut stream, &result.response).await?;
 
-    // For interactive commands (Run, Exec), we would send the PTY fd via SCM_RIGHTS here
-    // and then proxy I/O. For now, the container runs detached.
+    // If we have a PTY master fd, send it via SCM_RIGHTS
+    if let Some(ref pty_master) = result.pty_master {
+        // SCM_RIGHTS requires a blocking sendmsg — do it on the underlying fd.
+        // The Async wrapper's inner UnixStream has the raw fd.
+        let socket_ref = stream.get_ref();
+        scm_rights::send_fd(socket_ref, pty_master)
+            .map_err(|e| {
+                tracing::error!("failed to send PTY fd via SCM_RIGHTS: {e}");
+                e
+            })?;
+        tracing::debug!("sent PTY master fd to client");
+    }
 
     Ok(())
 }

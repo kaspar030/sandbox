@@ -42,6 +42,7 @@ fn test_roundtrip_request_create() {
             readonly: true,
         }],
         use_init: false,
+        detach: false,
     };
 
     let req = Request::Create(spec);

@@ -16,8 +16,9 @@ use crate::rootfs::pivot::setup_rootfs;
 use crate::security::{capabilities, seccomp};
 use crate::sys::clone3::{self, CloneResult};
 use crate::sys::eventfd::EventFd;
+use crate::sys::pty;
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
 
 /// A running or stopped container.
@@ -32,6 +33,9 @@ pub struct Container {
     pub pidfd: Option<OwnedFd>,
     /// Cgroup for resource limits.
     pub cgroup: Option<Cgroup>,
+    /// PTY master fd (for interactive containers). The daemon passes this
+    /// to the CLI client via SCM_RIGHTS after the container starts.
+    pub pty_master: Option<OwnedFd>,
 }
 
 impl Container {
@@ -43,6 +47,7 @@ impl Container {
             pid: None,
             pidfd: None,
             cgroup: None,
+            pty_master: None,
         }
     }
 
@@ -50,10 +55,11 @@ impl Container {
     ///
     /// This performs the full container creation sequence:
     /// 1. Create cgroup and apply limits
-    /// 2. Create eventfd for synchronization
-    /// 3. clone3 with namespace flags + CLONE_PIDFD + CLONE_INTO_CGROUP
-    /// 4. Parent: write uid/gid maps, set up network, signal child
-    /// 5. Child: pivot_root, mount filesystems, apply security, exec
+    /// 2. Allocate PTY (if interactive)
+    /// 3. Create eventfd for synchronization
+    /// 4. clone3 with namespace flags + CLONE_PIDFD + CLONE_INTO_CGROUP
+    /// 5. Parent: write uid/gid maps, set up network, signal child, close slave
+    /// 6. Child: set up PTY slave, pivot_root, mount, apply security, exec
     pub fn start(&mut self) -> Result<()> {
         if !self.state.is_created() {
             return Err(Error::InvalidState {
@@ -68,14 +74,27 @@ impl Container {
         cgroup.apply_limits(&self.spec.cgroup)?;
         let cgroup_fd = cgroup.open_fd()?;
 
-        // 2. Create eventfd for parent-child sync
+        // 2. Allocate PTY if interactive (not detached)
+        let pty_fds = if !self.spec.detach {
+            Some(pty::allocate_pty()?)
+        } else {
+            None
+        };
+
+        // 3. Create eventfd for parent-child sync
         let sync_fd = EventFd::new()?;
 
-        // 3. Compute namespace flags
+        // 4. Compute namespace flags
         let ns_config = NamespaceConfig::from_network_mode(&self.spec.network);
         let ns_flags = ns_config.to_flags();
 
-        // 4. clone3
+        // Store raw fd values for the child to use after clone3
+        // (clone3 does not copy OwnedFd across the fork properly —
+        // the child inherits the raw fds but we need the raw values)
+        let master_raw = pty_fds.as_ref().map(|(m, _)| m.as_raw_fd()).unwrap_or(-1);
+        let slave_raw = pty_fds.as_ref().map(|(_, s)| s.as_raw_fd()).unwrap_or(-1);
+
+        // 5. clone3
         let clone_result = clone3::clone3_with_pidfd(
             ns_flags.bits(),
             Some(cgroup_fd.as_raw_fd()),
@@ -84,6 +103,12 @@ impl Container {
         match clone_result {
             Some(CloneResult { child_pid, pidfd }) => {
                 // === PARENT ===
+                // Close the slave fd in the parent — only the child uses it
+                if let Some((master, slave)) = pty_fds {
+                    drop(slave); // close slave in parent
+                    self.pty_master = Some(master);
+                }
+
                 self.parent_setup(child_pid, &sync_fd, &ns_config)?;
                 self.pid = Some(child_pid);
                 self.pidfd = Some(pidfd);
@@ -94,9 +119,15 @@ impl Container {
             None => {
                 // === CHILD ===
                 // This function never returns — it either execs or exits
-                self.child_setup(&sync_fd);
+                self.child_setup(&sync_fd, slave_raw, master_raw);
             }
         }
+    }
+
+    /// Take the PTY master fd out of the container (transfers ownership).
+    /// Called by the daemon to send it to the client via SCM_RIGHTS.
+    pub fn take_pty_master(&mut self) -> Option<OwnedFd> {
+        self.pty_master.take()
     }
 
     /// Parent-side setup after clone3.
@@ -127,8 +158,8 @@ impl Container {
     }
 
     /// Child-side setup after clone3. Never returns.
-    fn child_setup(&self, sync_fd: &EventFd) -> ! {
-        let result = self.child_setup_inner(sync_fd);
+    fn child_setup(&self, sync_fd: &EventFd, slave_raw: i32, master_raw: i32) -> ! {
+        let result = self.child_setup_inner(sync_fd, slave_raw, master_raw);
         if let Err(e) = result {
             eprintln!("sandbox: child setup failed: {e}");
             std::process::exit(1);
@@ -137,9 +168,24 @@ impl Container {
         std::process::exit(1);
     }
 
-    fn child_setup_inner(&self, sync_fd: &EventFd) -> Result<()> {
+    fn child_setup_inner(
+        &self,
+        sync_fd: &EventFd,
+        slave_raw: i32,
+        master_raw: i32,
+    ) -> Result<()> {
         // Wait for parent to finish uid_map / network setup
         sync_fd.wait()?;
+
+        // Set up PTY slave as controlling terminal and stdio
+        if slave_raw >= 0 {
+            // We need an OwnedFd for pty::setup_slave_pty but we shouldn't take
+            // ownership here (the fd will be closed by dup2 logic). Use from_raw_fd.
+            let slave_owned = unsafe { OwnedFd::from_raw_fd(slave_raw) };
+            pty::setup_slave_pty(&slave_owned, master_raw)?;
+            // Don't drop slave_owned — setup_slave_pty already closed the raw fd
+            std::mem::forget(slave_owned);
+        }
 
         // Make mounts private
         namespace::mount::make_mounts_private()?;
@@ -265,6 +311,7 @@ impl Container {
         self.pid = None;
         self.pidfd = None;
         self.cgroup = None;
+        self.pty_master = None;
 
         Ok(())
     }
