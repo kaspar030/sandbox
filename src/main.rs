@@ -26,15 +26,19 @@ enum Commands {
         action: DaemonAction,
     },
 
-    /// Create and start a container
+    /// Create and start a container (ephemeral — auto-removed on exit)
     Run {
         /// Container name
         #[arg(long)]
         name: String,
 
-        /// Path to the root filesystem
+        /// Image to use as the root filesystem
         #[arg(long)]
-        rootfs: String,
+        image: String,
+
+        /// Storage pool (default: main)
+        #[arg(long)]
+        pool: Option<String>,
 
         /// Set container hostname
         #[arg(long)]
@@ -101,12 +105,14 @@ enum Commands {
         command: Vec<String>,
     },
 
-    /// Create a container without starting it
+    /// Create a container (persistent — needs explicit destroy)
     Create {
         #[arg(long)]
         name: String,
         #[arg(long)]
-        rootfs: String,
+        image: String,
+        #[arg(long)]
+        pool: Option<String>,
         #[arg(long)]
         hostname: Option<String>,
         #[arg(long)]
@@ -187,6 +193,18 @@ enum Commands {
         #[arg(last = true)]
         command: Vec<String>,
     },
+
+    /// Manage images
+    Image {
+        #[command(subcommand)]
+        action: ImageAction,
+    },
+
+    /// Manage storage pools
+    Pool {
+        #[command(subcommand)]
+        action: PoolAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -196,9 +214,52 @@ enum DaemonAction {
         /// Run in foreground (don't daemonize)
         #[arg(long)]
         foreground: bool,
+
+        /// Data directory (default: /var/lib/sandbox)
+        #[arg(long)]
+        data_dir: Option<String>,
     },
     /// Stop the daemon
     Stop,
+}
+
+#[derive(Subcommand)]
+enum ImageAction {
+    /// Import an image from a directory or tar.gz
+    Import {
+        /// Image name
+        name: String,
+
+        /// Path to directory or .tar.gz file
+        source: String,
+
+        /// Storage pool (default: main)
+        #[arg(long)]
+        pool: Option<String>,
+    },
+    /// List images
+    #[command(alias = "ls")]
+    List {
+        /// Storage pool (default: main)
+        #[arg(long)]
+        pool: Option<String>,
+    },
+    /// Remove an image
+    Rm {
+        /// Image name
+        name: String,
+
+        /// Storage pool (default: main)
+        #[arg(long)]
+        pool: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PoolAction {
+    /// List storage pools
+    #[command(alias = "ls")]
+    List,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -213,8 +274,8 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Daemon { action } => match action {
-            DaemonAction::Start { foreground } => {
-                daemon::run_daemon(cli.socket.as_deref(), foreground)?;
+            DaemonAction::Start { foreground, data_dir } => {
+                daemon::run_daemon(cli.socket.as_deref(), foreground, data_dir.as_deref())?;
             }
             DaemonAction::Stop => {
                 let mut client = client::Client::connect(cli.socket.as_deref())?;
@@ -224,40 +285,20 @@ fn main() -> anyhow::Result<()> {
         },
 
         Commands::Run {
-            name,
-            rootfs,
-            hostname,
-            memory,
-            cpus,
-            pids_max,
-            network,
-            bridge,
-            ip,
-            gateway,
-            seccomp,
-            cap_add,
-            bind,
-            init,
-            detach,
-            uid_map,
-            gid_map,
-            command,
+            name, image, pool, hostname, memory, cpus, pids_max, network, bridge,
+            ip, gateway, seccomp, cap_add, bind, init, detach, uid_map, gid_map, command,
         } => {
             let mut spec = build_spec(
-                name, rootfs, hostname, memory, cpus, pids_max, network, bridge, ip, gateway,
-                seccomp, cap_add, bind, init, uid_map, gid_map, command,
+                name, image, pool, hostname, memory, cpus, pids_max, network, bridge,
+                ip, gateway, seccomp, cap_add, bind, init, uid_map, gid_map, command,
             )?;
             spec.detach = detach;
             let mut client = client::Client::connect(cli.socket.as_deref())?;
 
             if detach {
-                // Detached mode — just print the response
                 let resp = client.request(&Request::Run(spec))?;
                 print_response(&resp);
             } else {
-                // Interactive mode — receive PTY fd and proxy I/O.
-                // Don't print "Started container" — container output is
-                // already flowing through the PTY. Matches docker run behavior.
                 let (resp, exit_code) = client.request_interactive(&Request::Run(spec))?;
                 if let Response::Error { .. } = &resp {
                     print_response(&resp);
@@ -269,35 +310,17 @@ fn main() -> anyhow::Result<()> {
         }
 
         Commands::Create {
-            name,
-            rootfs,
-            hostname,
-            memory,
-            cpus,
-            pids_max,
-            network,
-            bridge,
-            ip,
-            gateway,
-            seccomp,
-            cap_add,
-            bind,
-            init,
-            start,
-            detach,
-            uid_map,
-            gid_map,
-            command,
+            name, image, pool, hostname, memory, cpus, pids_max, network, bridge,
+            ip, gateway, seccomp, cap_add, bind, init, start, detach, uid_map, gid_map, command,
         } => {
             let spec = build_spec(
-                name, rootfs, hostname, memory, cpus, pids_max, network, bridge, ip, gateway,
-                seccomp, cap_add, bind, init, uid_map, gid_map, command,
+                name, image, pool, hostname, memory, cpus, pids_max, network, bridge,
+                ip, gateway, seccomp, cap_add, bind, init, uid_map, gid_map, command,
             )?;
             let mut client = client::Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Create(spec))?;
 
             if start {
-                // Create succeeded — immediately start the container
                 if let Response::Created { ref name } = resp {
                     let start_req = Request::Start {
                         name: name.clone(),
@@ -307,8 +330,7 @@ fn main() -> anyhow::Result<()> {
                         let resp = client.request(&start_req)?;
                         print_response(&resp);
                     } else {
-                        let (resp, exit_code) =
-                            client.request_interactive(&start_req)?;
+                        let (resp, exit_code) = client.request_interactive(&start_req)?;
                         if let Response::Error { .. } = &resp {
                             print_response(&resp);
                         }
@@ -317,7 +339,6 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 } else {
-                    // Create failed
                     print_response(&resp);
                 }
             } else {
@@ -326,11 +347,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         Commands::Start { name, command } => {
-            let cmd = if command.is_empty() {
-                None
-            } else {
-                Some(command)
-            };
+            let cmd = if command.is_empty() { None } else { Some(command) };
             let mut client = client::Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Start { name, command: cmd })?;
             print_response(&resp);
@@ -338,10 +355,7 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Stop { name, timeout } => {
             let mut client = client::Client::connect(cli.socket.as_deref())?;
-            let resp = client.request(&Request::Stop {
-                name,
-                timeout_secs: timeout,
-            })?;
+            let resp = client.request(&Request::Stop { name, timeout_secs: timeout })?;
             print_response(&resp);
         }
 
@@ -368,8 +382,7 @@ fn main() -> anyhow::Result<()> {
                                     format!("Stopped({exit_code})")
                                 }
                             };
-                            let pid_str = info
-                                .pid
+                            let pid_str = info.pid
                                 .map(|p| p.to_string())
                                 .unwrap_or_else(|| "-".to_string());
                             println!("{:<20} {:<15} {:<10}", info.name, state_str, pid_str);
@@ -384,6 +397,60 @@ fn main() -> anyhow::Result<()> {
             let mut client = client::Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Exec { name, command })?;
             print_response(&resp);
+        }
+
+        Commands::Image { action } => {
+            let mut client = client::Client::connect(cli.socket.as_deref())?;
+            match action {
+                ImageAction::Import { name, source, pool } => {
+                    let resp = client.request(&Request::ImageImport { name, source, pool })?;
+                    print_response(&resp);
+                }
+                ImageAction::List { pool } => {
+                    let resp = client.request(&Request::ImageList { pool })?;
+                    match &resp {
+                        Response::ImageList(images) => {
+                            if images.is_empty() {
+                                println!("No images");
+                            } else {
+                                println!("{:<20} {:<10} {:<15}", "NAME", "POOL", "SIZE");
+                                for img in images {
+                                    let size = format_size(img.size_bytes);
+                                    println!("{:<20} {:<10} {:<15}", img.name, img.pool, size);
+                                }
+                            }
+                        }
+                        _ => print_response(&resp),
+                    }
+                }
+                ImageAction::Rm { name, pool } => {
+                    let resp = client.request(&Request::ImageRemove { name, pool })?;
+                    print_response(&resp);
+                }
+            }
+        }
+
+        Commands::Pool { action } => {
+            let mut client = client::Client::connect(cli.socket.as_deref())?;
+            match action {
+                PoolAction::List => {
+                    let resp = client.request(&Request::PoolList)?;
+                    match &resp {
+                        Response::PoolList(pools) => {
+                            if pools.is_empty() {
+                                println!("No pools");
+                            } else {
+                                println!("{:<15} {:<12} {:<10}", "NAME", "FILESYSTEM", "SNAPSHOTS");
+                                for p in pools {
+                                    let snap = if p.supports_snapshots { "yes" } else { "no" };
+                                    println!("{:<15} {:<12} {:<10}", p.name, p.fs_type, snap);
+                                }
+                            }
+                        }
+                        _ => print_response(&resp),
+                    }
+                }
+            }
         }
     }
 
@@ -400,14 +467,19 @@ fn print_response(resp: &Response) {
         }
         Response::Destroyed { name } => println!("Destroyed container: {name}"),
         Response::ExecStarted { pid } => println!("Exec started (PID {pid})"),
-        Response::ContainerList(_) => {} // handled above
+        Response::ImageImported { name } => println!("Imported image: {name}"),
+        Response::ImageRemoved { name } => println!("Removed image: {name}"),
+        Response::ContainerList(_) => {}
+        Response::ImageList(_) => {}
+        Response::PoolList(_) => {}
         Response::Error { message } => eprintln!("Error: {message}"),
     }
 }
 
 fn build_spec(
     name: String,
-    rootfs: String,
+    image: String,
+    pool: Option<String>,
     hostname: Option<String>,
     memory: Option<String>,
     cpus: Option<f64>,
@@ -479,25 +551,16 @@ fn build_spec(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    // When no --uid-map/--gid-map is provided, send empty mappings.
-    // The daemon will build appropriate mappings from /etc/subuid and
-    // /etc/subgid based on its own context (root vs non-root).
     let uid_mappings = if uid_map.is_empty() {
         Vec::new()
     } else {
-        uid_map
-            .iter()
-            .map(|m| parse_id_mapping(m))
-            .collect::<anyhow::Result<Vec<_>>>()?
+        uid_map.iter().map(|m| parse_id_mapping(m)).collect::<anyhow::Result<Vec<_>>>()?
     };
 
     let gid_mappings = if gid_map.is_empty() {
         Vec::new()
     } else {
-        gid_map
-            .iter()
-            .map(|m| parse_id_mapping(m))
-            .collect::<anyhow::Result<Vec<_>>>()?
+        gid_map.iter().map(|m| parse_id_mapping(m)).collect::<anyhow::Result<Vec<_>>>()?
     };
 
     let cmd = if command.is_empty() {
@@ -508,7 +571,8 @@ fn build_spec(
 
     Ok(ContainerSpec {
         name,
-        rootfs,
+        image,
+        pool,
         command: cmd,
         hostname,
         uid_mappings,
@@ -552,15 +616,25 @@ fn parse_size(s: String) -> anyhow::Result<u64> {
 fn parse_id_mapping(s: &str) -> anyhow::Result<IdMapping> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 3 {
-        anyhow::bail!(
-            "invalid ID mapping: {s} (expected CONTAINER_ID:HOST_ID:COUNT)"
-        );
+        anyhow::bail!("invalid ID mapping: {s} (expected CONTAINER_ID:HOST_ID:COUNT)");
     }
     Ok(IdMapping {
         container_id: parts[0].parse()?,
         host_id: parts[1].parse()?,
         count: parts[2].parse()?,
     })
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1}K", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes}B")
+    }
 }
 
 #[cfg(test)]
@@ -581,5 +655,13 @@ mod tests {
         assert_eq!(m.container_id, 0);
         assert_eq!(m.host_id, 1000);
         assert_eq!(m.count, 1);
+    }
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0G");
+        assert_eq!(format_size(128 * 1024 * 1024), "128.0M");
+        assert_eq!(format_size(512 * 1024), "512.0K");
+        assert_eq!(format_size(100), "100B");
     }
 }

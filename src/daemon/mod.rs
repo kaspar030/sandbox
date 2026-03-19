@@ -9,6 +9,7 @@ pub mod manager;
 
 use sandbox::error::{Error, Result};
 use sandbox::protocol::{self, Request, Response};
+use sandbox::storage::StorageManager;
 use sandbox::sys::scm_rights;
 
 use async_io::Async;
@@ -18,15 +19,23 @@ use std::path::Path;
 use std::sync::Arc;
 
 const DEFAULT_SOCKET_PATH: &str = "/run/sandbox/sandbox.sock";
+const DEFAULT_DATA_DIR: &str = "/var/lib/sandbox";
+const MOUNTS_DIR: &str = "/run/sandbox/mounts";
 
 /// Start the daemon, listening on the given socket path.
-pub fn run_daemon(socket_path: Option<&str>, foreground: bool) -> Result<()> {
+pub fn run_daemon(socket_path: Option<&str>, foreground: bool, data_dir: Option<&str>) -> Result<()> {
     let socket_path = socket_path.unwrap_or(DEFAULT_SOCKET_PATH);
+    let data_dir = data_dir.unwrap_or(DEFAULT_DATA_DIR);
 
-    // Ensure parent directory exists
+    // Ensure directories exist
     if let Some(parent) = Path::new(socket_path).parent() {
         std::fs::create_dir_all(parent)?;
     }
+    std::fs::create_dir_all(MOUNTS_DIR)?;
+
+    // Initialize storage manager
+    let storage = StorageManager::init(Path::new(data_dir))?;
+    let storage = Arc::new(storage);
 
     // Remove stale socket
     let _ = std::fs::remove_file(socket_path);
@@ -38,12 +47,12 @@ pub fn run_daemon(socket_path: Option<&str>, foreground: bool) -> Result<()> {
     tracing::info!("sandbox daemon listening on {socket_path}");
 
     if !foreground {
-        // TODO: daemonize (fork, setsid, etc.)
-        // For now, always run in foreground
         tracing::info!("running in foreground");
     }
 
-    let mgr = Arc::new(smol::lock::Mutex::new(manager::ContainerManager::new()));
+    let mgr = Arc::new(smol::lock::Mutex::new(manager::ContainerManager::new(
+        Arc::clone(&storage),
+    )));
 
     smol::block_on(async {
         loop {

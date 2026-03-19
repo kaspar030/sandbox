@@ -12,11 +12,16 @@ pub struct ContainerBuilder {
 }
 
 impl ContainerBuilder {
-    pub fn new(name: impl Into<String>, rootfs: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, image: impl Into<String>) -> Self {
         let mut spec = ContainerSpec::default();
         spec.name = name.into();
-        spec.rootfs = rootfs.into();
+        spec.image = image.into();
         Self { spec }
+    }
+
+    pub fn pool(mut self, pool: impl Into<String>) -> Self {
+        self.spec.pool = Some(pool.into());
+        self
     }
 
     pub fn command(mut self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self {
@@ -166,9 +171,9 @@ mod tests {
 
     #[test]
     fn test_builder_defaults() {
-        let spec = ContainerBuilder::new("test", "/rootfs").build();
+        let spec = ContainerBuilder::new("test", "alpine").build();
         assert_eq!(spec.name, "test");
-        assert_eq!(spec.rootfs, "/rootfs");
+        assert_eq!(spec.image, "alpine");
         assert_eq!(spec.command, vec!["/bin/sh"]);
         assert!(spec.hostname.is_none());
         assert!(!spec.use_init);
@@ -179,7 +184,8 @@ mod tests {
 
     #[test]
     fn test_builder_full() {
-        let spec = ContainerBuilder::new("mybox", "/path/to/rootfs")
+        let spec = ContainerBuilder::new("mybox", "alpine")
+            .pool("fast-nvme")
             .command(["echo", "hello"])
             .hostname("testhost")
             .memory_max(128 * 1024 * 1024)

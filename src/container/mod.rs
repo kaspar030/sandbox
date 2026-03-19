@@ -19,7 +19,6 @@ use crate::sys::eventfd::EventFd;
 use crate::sys::pty;
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::path::PathBuf;
 
 /// A running or stopped container.
 pub struct Container {
@@ -39,6 +38,14 @@ pub struct Container {
     /// If true, the container is automatically removed from the daemon
     /// registry when it exits. Set for containers created via `run`.
     pub ephemeral: bool,
+    /// Path to the idmapped mount for this container (under /run/sandbox/mounts/).
+    /// Set by the daemon before start(). Cleaned up on destroy().
+    pub idmap_mount: Option<std::path::PathBuf>,
+    /// Path to the container's rootfs copy (under storage/<pool>/fs/<name>/).
+    /// Set by the daemon before start(). Cleaned up on destroy().
+    pub rootfs_path: Option<std::path::PathBuf>,
+    /// Storage pool name this container uses.
+    pub pool_name: Option<String>,
 }
 
 impl Container {
@@ -52,6 +59,9 @@ impl Container {
             cgroup: None,
             pty_master: None,
             ephemeral: false,
+            idmap_mount: None,
+            rootfs_path: None,
+            pool_name: None,
         }
     }
 
@@ -73,20 +83,10 @@ impl Container {
             });
         }
 
-        // 1. Resolve UID/GID mappings if not explicitly provided.
-        // When the spec has empty mappings, the daemon builds them from
-        // /etc/subuid and /etc/subgid based on its own context.
-        if self.spec.uid_mappings.is_empty() || self.spec.gid_mappings.is_empty() {
-            let (uid_maps, gid_maps) = namespace::user::build_id_mappings()?;
-            if self.spec.uid_mappings.is_empty() {
-                self.spec.uid_mappings = uid_maps;
-            }
-            if self.spec.gid_mappings.is_empty() {
-                self.spec.gid_mappings = gid_maps;
-            }
-        }
+        // UID/GID mappings and idmap mount must be set up by the daemon
+        // (via prepare_container_rootfs) before calling start().
 
-        // 2. Create cgroup and apply limits
+        // 1. Create cgroup and apply limits
         let cgroup = Cgroup::create(&self.spec.name)?;
         cgroup.apply_limits(&self.spec.cgroup)?;
         let cgroup_fd = cgroup.open_fd()?;
@@ -286,11 +286,14 @@ impl Container {
         }
 
         // Set up rootfs (mounts /dev, /proc, /sys, bind mounts, pivot_root).
-        // Device nodes are bind-mounted from host /dev paths which are still
-        // accessible since pivot_root hasn't happened yet.
-        // This must happen BEFORE PTY setup, because setsid() (called in
-        // setup_slave_pty) can interfere with mount operations in user namespaces.
-        let rootfs = PathBuf::from(&self.spec.rootfs);
+        // The rootfs path is the idmapped mount point set up by the daemon,
+        // or falls back to the container rootfs path.
+        let rootfs = self
+            .idmap_mount
+            .as_ref()
+            .or(self.rootfs_path.as_ref())
+            .ok_or_else(|| Error::Other("no rootfs path configured".to_string()))?
+            .clone();
         setup_rootfs(&rootfs, &self.spec.bind_mounts)?;
 
         // Set up PTY slave as controlling terminal and stdio.
@@ -410,10 +413,20 @@ impl Container {
             let _ = cgroup.destroy();
         }
 
+        // Unmount idmapped mount
+        if let Some(ref mount) = self.idmap_mount {
+            let _ = nix::mount::umount2(mount, nix::mount::MntFlags::MNT_DETACH);
+            let _ = std::fs::remove_dir(mount);
+        }
+
         self.pid = None;
         self.pidfd = None;
         self.cgroup = None;
         self.pty_master = None;
+        self.idmap_mount = None;
+
+        // Note: rootfs_path cleanup (rm -rf the container copy) is handled
+        // by the daemon via storage::container_fs::destroy_container_rootfs()
 
         Ok(())
     }

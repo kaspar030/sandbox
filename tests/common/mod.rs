@@ -56,13 +56,16 @@ pub fn sandbox_binary() -> PathBuf {
 pub struct TestDaemon {
     pub process: Child,
     pub socket_path: PathBuf,
+    pub data_dir: PathBuf,
 }
 
 #[allow(dead_code)]
 impl TestDaemon {
-    /// Start a sandbox daemon on a temporary socket.
+    /// Start a sandbox daemon on a temporary socket with a temporary data dir.
     pub fn start(socket_dir: &Path) -> Self {
         let socket_path = socket_dir.join("sandbox.sock");
+        let data_dir = socket_dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
 
         let binary = sandbox_binary();
         let process = Command::new(&binary)
@@ -72,6 +75,8 @@ impl TestDaemon {
                 "daemon",
                 "start",
                 "--foreground",
+                "--data-dir",
+                data_dir.to_str().unwrap(),
             ])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -81,6 +86,7 @@ impl TestDaemon {
         let daemon = Self {
             process,
             socket_path: socket_path.clone(),
+            data_dir,
         };
 
         // Wait for the socket to appear
@@ -111,6 +117,17 @@ impl TestDaemon {
             .args(args)
             .output()
             .expect("failed to run sandbox CLI")
+    }
+
+    /// Import a test image from a TempRootfs into the daemon's storage.
+    pub fn import_image(&self, name: &str, rootfs: &rootfs::TempRootfs) {
+        let output = self.run_cli(&["image", "import", name, rootfs.path().to_str().unwrap()]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "image import failed:\nstdout: {stdout}\nstderr: {stderr}"
+        );
     }
 
     /// Run a sandbox CLI command and return stdout as a string.

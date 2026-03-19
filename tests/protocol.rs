@@ -11,7 +11,8 @@ use sandbox::protocol::*;
 fn test_roundtrip_request_create() {
     let spec = ContainerSpec {
         name: "test".to_string(),
-        rootfs: "/rootfs".to_string(),
+        image: "alpine".to_string(),
+        pool: None,
         command: vec!["/bin/sh".to_string()],
         hostname: Some("myhost".to_string()),
         uid_mappings: vec![IdMapping {
@@ -53,7 +54,7 @@ fn test_roundtrip_request_create() {
     match decoded {
         Request::Create(s) => {
             assert_eq!(s.name, "test");
-            assert_eq!(s.rootfs, "/rootfs");
+            assert_eq!(s.image, "alpine");
             assert_eq!(s.hostname, Some("myhost".to_string()));
             assert_eq!(s.cgroup.memory_max, Some(128 * 1024 * 1024));
             assert_eq!(s.cgroup.pids_max, Some(64));

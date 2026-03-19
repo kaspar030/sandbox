@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Once;
 
-const BUSYBOX_URL: &str =
-    "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox";
+const BUSYBOX_URL: &str = "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox";
 
 static INIT_ROOTFS: Once = Once::new();
 

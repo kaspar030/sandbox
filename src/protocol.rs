@@ -11,7 +11,10 @@ use std::net::Ipv4Addr;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerSpec {
     pub name: String,
-    pub rootfs: String,
+    /// Image name (resolved by the daemon from the storage pool).
+    pub image: String,
+    /// Storage pool name (default: "main").
+    pub pool: Option<String>,
     pub command: Vec<String>,
     pub hostname: Option<String>,
     pub uid_mappings: Vec<IdMapping>,
@@ -31,19 +34,12 @@ impl Default for ContainerSpec {
     fn default() -> Self {
         Self {
             name: String::new(),
-            rootfs: String::new(),
+            image: String::new(),
+            pool: None,
             command: vec!["/bin/sh".to_string()],
             hostname: None,
-            uid_mappings: vec![IdMapping {
-                container_id: 0,
-                host_id: 1000,
-                count: 1,
-            }],
-            gid_mappings: vec![IdMapping {
-                container_id: 0,
-                host_id: 1000,
-                count: 1,
-            }],
+            uid_mappings: Vec::new(),
+            gid_mappings: Vec::new(),
             cgroup: CgroupSpec::default(),
             network: NetworkMode::Host,
             seccomp: SeccompMode::Default,
@@ -53,6 +49,22 @@ impl Default for ContainerSpec {
             detach: false,
         }
     }
+}
+
+/// Information about a stored image.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageInfo {
+    pub name: String,
+    pub pool: String,
+    pub size_bytes: u64,
+}
+
+/// Information about a storage pool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolInfo {
+    pub name: String,
+    pub fs_type: String,
+    pub supports_snapshots: bool,
 }
 
 /// UID/GID mapping entry.
@@ -162,6 +174,18 @@ pub enum Request {
     List,
     /// Execute a command in a running container's namespaces.
     Exec { name: String, command: Vec<String> },
+    /// Import an image from a path (directory or tar.gz).
+    ImageImport {
+        name: String,
+        source: String,
+        pool: Option<String>,
+    },
+    /// List images.
+    ImageList { pool: Option<String> },
+    /// Remove an image.
+    ImageRemove { name: String, pool: Option<String> },
+    /// List storage pools.
+    PoolList,
     /// Shut down the daemon.
     Shutdown,
 }
@@ -183,6 +207,14 @@ pub enum Response {
     Destroyed { name: String },
     /// Exec started. PTY fd follows via SCM_RIGHTS.
     ExecStarted { pid: u32 },
+    /// Image imported successfully.
+    ImageImported { name: String },
+    /// Image list.
+    ImageList(Vec<ImageInfo>),
+    /// Image removed.
+    ImageRemoved { name: String },
+    /// Pool list.
+    PoolList(Vec<PoolInfo>),
     /// Error response.
     Error { message: String },
 }

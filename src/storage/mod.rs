@@ -109,10 +109,9 @@ impl StorageManager {
 
                 if !fs_type.supports_idmap() {
                     tracing::warn!(
-                        "storage pool '{name}' is on {} which does not support idmapped mounts — skipping",
+                        "storage pool '{name}' is on {} which may not support idmapped mounts",
                         fs_type
                     );
-                    continue;
                 }
 
                 tracing::info!(

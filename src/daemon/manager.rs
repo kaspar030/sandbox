@@ -5,9 +5,16 @@
 
 use sandbox::container::Container;
 use sandbox::error::{Error, Result};
-use sandbox::protocol::{ContainerInfo, ContainerSpec, Request, Response};
+use sandbox::namespace::user;
+use sandbox::protocol::{ContainerInfo, ContainerSpec, ImageInfo, PoolInfo, Request, Response};
+use sandbox::storage::{self, StorageManager};
+use sandbox::sys::idmap;
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+const MOUNTS_DIR: &str = "/run/sandbox/mounts";
 
 /// Result of handling a request — includes the response and optionally
 /// a PTY master fd to send to the client via SCM_RIGHTS.
@@ -35,17 +42,18 @@ impl HandleResult {
 /// Manages the lifecycle of all containers.
 pub struct ContainerManager {
     containers: HashMap<String, Container>,
+    storage: Arc<StorageManager>,
 }
 
 impl ContainerManager {
-    pub fn new() -> Self {
+    pub fn new(storage: Arc<StorageManager>) -> Self {
         Self {
             containers: HashMap::new(),
+            storage,
         }
     }
 
     /// Take the pidfd out of a container for async monitoring.
-    /// Returns None if the container doesn't exist or has no pidfd.
     pub fn take_pidfd(&mut self, name: &str) -> Option<OwnedFd> {
         self.containers.get_mut(name)?.pidfd.take()
     }
@@ -84,9 +92,15 @@ impl ContainerManager {
         }
         container.cgroup = None;
 
-        // Auto-remove ephemeral containers (created via `run`)
+        // Auto-remove ephemeral containers
         if is_ephemeral {
             if let Some(mut c) = self.containers.remove(name) {
+                // Clean up storage (rootfs copy)
+                if let (Some(pool_name), Some(_)) = (&c.pool_name, &c.rootfs_path) {
+                    if let Some(pool) = self.storage.pool(pool_name) {
+                        let _ = storage::container_fs::destroy_container_rootfs(pool, name);
+                    }
+                }
                 let _ = c.destroy();
             }
             tracing::info!("ephemeral container {name} auto-removed");
@@ -103,9 +117,14 @@ impl ContainerManager {
             Request::Destroy { name } => self.handle_destroy(&name),
             Request::List => self.handle_list(),
             Request::Exec { name, command } => self.handle_exec(&name, command),
+            Request::ImageImport { name, source, pool } => {
+                self.handle_image_import(&name, &source, pool.as_deref())
+            }
+            Request::ImageList { pool } => self.handle_image_list(pool.as_deref()),
+            Request::ImageRemove { name, pool } => self.handle_image_remove(&name, pool.as_deref()),
+            Request::PoolList => self.handle_pool_list(),
             Request::Shutdown => {
                 tracing::info!("shutdown requested");
-                // Clean up all containers
                 let names: Vec<String> = self.containers.keys().cloned().collect();
                 for name in names {
                     let _ = self.handle_destroy(&name);
@@ -113,6 +132,52 @@ impl ContainerManager {
                 HandleResult::response_only(Response::Ok)
             }
         }
+    }
+
+    /// Prepare a container's rootfs: copy from image, set up idmapped mount.
+    fn prepare_container_rootfs(&self, container: &mut Container) -> Result<()> {
+        let pool = self.storage.resolve_pool(container.spec.pool.as_deref())?;
+        let pool_name = pool.name.clone();
+
+        // Create container rootfs from image (cp -a / snapshot)
+        let rootfs_path = storage::container_fs::create_container_rootfs(
+            pool,
+            &container.spec.image,
+            &container.spec.name,
+        )?;
+
+        // Resolve UID/GID mappings if not provided
+        if container.spec.uid_mappings.is_empty() || container.spec.gid_mappings.is_empty() {
+            let (uid_maps, gid_maps) = user::build_id_mappings()?;
+            if container.spec.uid_mappings.is_empty() {
+                container.spec.uid_mappings = uid_maps;
+            }
+            if container.spec.gid_mappings.is_empty() {
+                container.spec.gid_mappings = gid_maps;
+            }
+        }
+
+        // Set up idmapped mount
+        let mount_target = PathBuf::from(MOUNTS_DIR).join(&container.spec.name);
+        std::fs::create_dir_all(&mount_target).map_err(|e| {
+            Error::Other(format!(
+                "failed to create mount point {}: {e}",
+                mount_target.display()
+            ))
+        })?;
+
+        idmap::setup_idmapped_mount(
+            &rootfs_path,
+            &mount_target,
+            &container.spec.uid_mappings,
+            &container.spec.gid_mappings,
+        )?;
+
+        container.rootfs_path = Some(rootfs_path);
+        container.idmap_mount = Some(mount_target);
+        container.pool_name = Some(pool_name);
+
+        Ok(())
     }
 
     fn handle_create(&mut self, spec: ContainerSpec) -> HandleResult {
@@ -124,9 +189,16 @@ impl ContainerManager {
             });
         }
 
-        let container = Container::new(spec);
-        self.containers.insert(name.clone(), container);
+        let mut container = Container::new(spec);
 
+        // Prepare rootfs (copy image + idmap mount)
+        if let Err(e) = self.prepare_container_rootfs(&mut container) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("failed to prepare rootfs: {e}"),
+            });
+        }
+
+        self.containers.insert(name.clone(), container);
         HandleResult::response_only(Response::Created { name })
     }
 
@@ -140,7 +212,14 @@ impl ContainerManager {
         }
 
         let mut container = Container::new(spec);
-        container.ephemeral = true; // auto-remove on exit
+        container.ephemeral = true;
+
+        // Prepare rootfs (copy image + idmap mount)
+        if let Err(e) = self.prepare_container_rootfs(&mut container) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("failed to prepare rootfs: {e}"),
+            });
+        }
 
         match container.start() {
             Ok(()) => {
@@ -149,9 +228,21 @@ impl ContainerManager {
                 self.containers.insert(name.clone(), container);
                 HandleResult::with_pty(Response::Started { name, pid }, pty_master)
             }
-            Err(e) => HandleResult::response_only(Response::Error {
-                message: format!("failed to start container: {e}"),
-            }),
+            Err(e) => {
+                // Clean up on failure
+                let _ = container.destroy();
+                if let Some(pool_name) = &container.pool_name {
+                    if let Some(pool) = self.storage.pool(pool_name) {
+                        let _ = storage::container_fs::destroy_container_rootfs(
+                            pool,
+                            &container.spec.name,
+                        );
+                    }
+                }
+                HandleResult::response_only(Response::Error {
+                    message: format!("failed to start container: {e}"),
+                })
+            }
         }
     }
 
@@ -218,12 +309,18 @@ impl ContainerManager {
             }
         };
 
+        // Clean up storage (rootfs copy)
+        if let Some(ref pool_name) = container.pool_name {
+            if let Some(pool) = self.storage.pool(pool_name) {
+                let _ = storage::container_fs::destroy_container_rootfs(pool, name);
+            }
+        }
+
         match container.destroy() {
             Ok(()) => HandleResult::response_only(Response::Destroyed {
                 name: name.to_string(),
             }),
             Err(e) => {
-                // Put it back if destroy failed
                 self.containers.insert(name.to_string(), container);
                 HandleResult::response_only(Response::Error {
                     message: format!("failed to destroy container: {e}"),
@@ -271,7 +368,6 @@ impl ContainerManager {
             }
         };
 
-        // Exec into the container's namespaces
         match exec_in_container(pid, &command) {
             Ok(child_pid) => HandleResult::response_only(Response::ExecStarted {
                 pid: child_pid as u32,
@@ -281,14 +377,97 @@ impl ContainerManager {
             }),
         }
     }
+
+    // -- Image handlers --
+
+    fn handle_image_import(&self, name: &str, source: &str, pool: Option<&str>) -> HandleResult {
+        let pool = match self.storage.resolve_pool(pool) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                })
+            }
+        };
+
+        match storage::image::import(pool, name, std::path::Path::new(source)) {
+            Ok(()) => HandleResult::response_only(Response::ImageImported {
+                name: name.to_string(),
+            }),
+            Err(e) => HandleResult::response_only(Response::Error {
+                message: format!("image import failed: {e}"),
+            }),
+        }
+    }
+
+    fn handle_image_list(&self, pool: Option<&str>) -> HandleResult {
+        let pool = match self.storage.resolve_pool(pool) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                })
+            }
+        };
+
+        match storage::image::list_images(pool) {
+            Ok(images) => {
+                let infos: Vec<ImageInfo> = images
+                    .into_iter()
+                    .map(|i| ImageInfo {
+                        name: i.name,
+                        pool: i.pool,
+                        size_bytes: i.size_bytes,
+                    })
+                    .collect();
+                HandleResult::response_only(Response::ImageList(infos))
+            }
+            Err(e) => HandleResult::response_only(Response::Error {
+                message: format!("failed to list images: {e}"),
+            }),
+        }
+    }
+
+    fn handle_image_remove(&self, name: &str, pool: Option<&str>) -> HandleResult {
+        let pool = match self.storage.resolve_pool(pool) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                })
+            }
+        };
+
+        match storage::image::remove_image(pool, name) {
+            Ok(()) => HandleResult::response_only(Response::ImageRemoved {
+                name: name.to_string(),
+            }),
+            Err(e) => HandleResult::response_only(Response::Error {
+                message: format!("image remove failed: {e}"),
+            }),
+        }
+    }
+
+    fn handle_pool_list(&self) -> HandleResult {
+        let pools: Vec<PoolInfo> = self
+            .storage
+            .list_pools()
+            .into_iter()
+            .map(|p| PoolInfo {
+                name: p.name.clone(),
+                fs_type: p.fs_type.to_string(),
+                supports_snapshots: p.fs_type.supports_snapshots(),
+            })
+            .collect();
+
+        HandleResult::response_only(Response::PoolList(pools))
+    }
 }
 
 /// Execute a command inside an existing container's namespaces.
-/// This works like `nsenter` — fork, setns into all namespaces, then exec.
 fn exec_in_container(container_pid: libc::pid_t, command: &[String]) -> Result<libc::pid_t> {
     let namespaces = ["pid", "mnt", "net", "uts", "ipc", "user"];
 
-    // Open all namespace fds first
     let mut ns_fds: Vec<(String, std::fs::File)> = Vec::new();
     for ns in &namespaces {
         let path = format!("/proc/{container_pid}/ns/{ns}");
@@ -309,7 +488,6 @@ fn exec_in_container(container_pid: libc::pid_t, command: &[String]) -> Result<l
     }
 
     if child == 0 {
-        // Child: enter namespaces and exec
         for (ns_name, ns_fd) in &ns_fds {
             let flags = match ns_name.as_str() {
                 "pid" => nix::sched::CloneFlags::CLONE_NEWPID,
@@ -327,14 +505,12 @@ fn exec_in_container(container_pid: libc::pid_t, command: &[String]) -> Result<l
             }
         }
 
-        // Change root to the container's root
         if let Err(e) = nix::unistd::chroot("/") {
             eprintln!("chroot failed: {e}");
             std::process::exit(1);
         }
         let _ = std::env::set_current_dir("/");
 
-        // Exec
         if command.is_empty() {
             std::process::exit(1);
         }
