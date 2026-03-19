@@ -29,7 +29,16 @@ pub fn hot_bind_mount(
     // Step 1: Clone the source mount in the host namespace
     let tree_fd = mount_api::open_tree(source, true)?;
 
-    // Step 2: Set readonly if requested
+    // Step 2: Apply the container's idmap so file ownership is correct inside
+    // the container. Without this, files appear as nobody:nogroup.
+    let userns_path = format!("/proc/{container_pid}/ns/user");
+    let userns_fd = std::os::fd::OwnedFd::from(
+        std::fs::File::open(&userns_path)
+            .map_err(|e| Error::Other(format!("open {userns_path}: {e}")))?,
+    );
+    mount_api::set_idmap(&tree_fd, &userns_fd)?;
+
+    // Step 3: Set readonly if requested
     if readonly {
         mount_api::set_readonly(&tree_fd)?;
     }
