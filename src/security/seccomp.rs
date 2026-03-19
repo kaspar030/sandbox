@@ -247,6 +247,7 @@ const ALLOWED_SYSCALLS: &[i64] = &[
     libc::SYS_newfstatat,
     libc::SYS_unlinkat,
     libc::SYS_renameat,
+    libc::SYS_renameat2,
     libc::SYS_linkat,
     libc::SYS_symlinkat,
     libc::SYS_readlinkat,
@@ -296,4 +297,19 @@ const ALLOWED_SYSCALLS: &[i64] = &[
     libc::SYS_pidfd_open,
     libc::SYS_faccessat2,
     libc::SYS_getdents64,
+    // Extended attributes — needed by ls -la, dpkg, cp -a, tar, apt
+    libc::SYS_getxattr,
+    libc::SYS_lgetxattr,
+    libc::SYS_fgetxattr,
+    libc::SYS_setxattr,
+    libc::SYS_lsetxattr,
+    libc::SYS_fsetxattr,
+    libc::SYS_listxattr,
+    libc::SYS_llistxattr,
+    libc::SYS_flistxattr,
+    libc::SYS_removexattr,
+    libc::SYS_lremovexattr,
+    libc::SYS_fremovexattr,
+    // Modern syscalls (kernel 5.11+)
+    libc::SYS_epoll_pwait2,
 ];
