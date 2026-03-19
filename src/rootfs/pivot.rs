@@ -24,6 +24,18 @@ pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()> {
         return Err(Error::RootfsNotFound(rootfs.to_path_buf()));
     }
 
+    // Reject "/" as rootfs — pivot_root to the host root is nonsensical
+    // and breaks /dev setup (mounting tmpfs on /dev hides host devices).
+    let canonical = rootfs.canonicalize().map_err(|e| Error::Mount {
+        path: rootfs.to_path_buf(),
+        source: e,
+    })?;
+    if canonical == Path::new("/") {
+        return Err(Error::RootfsSetup(
+            "cannot use \"/\" as rootfs — provide a dedicated root filesystem directory".to_string(),
+        ));
+    }
+
     // Bind-mount rootfs onto itself (required for pivot_root)
     nix::mount::mount(
         Some(rootfs),
