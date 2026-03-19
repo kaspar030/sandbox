@@ -210,6 +210,8 @@ pub fn setup_dev(rootfs: &Path) -> Result<()> {
 }
 
 /// Mount /sys inside the container (read-only).
+/// Non-fatal: sysfs mount may be blocked by LSMs (e.g., Landlock) in
+/// user namespaces. The container can function without /sys.
 pub fn setup_sys(rootfs: &Path) -> Result<()> {
     let sys_path = rootfs.join("sys");
     std::fs::create_dir_all(&sys_path).map_err(|e| Error::Mount {
@@ -217,17 +219,15 @@ pub fn setup_sys(rootfs: &Path) -> Result<()> {
         source: e,
     })?;
 
-    nix::mount::mount(
+    if let Err(e) = nix::mount::mount(
         Some("sysfs"),
         &sys_path,
         Some("sysfs"),
         MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC | MsFlags::MS_RDONLY,
         None::<&str>,
-    )
-    .map_err(|e| Error::Mount {
-        path: sys_path,
-        source: std::io::Error::from_raw_os_error(e as i32),
-    })?;
+    ) {
+        tracing::warn!("sysfs mount on /sys failed: {e}");
+    }
 
     Ok(())
 }

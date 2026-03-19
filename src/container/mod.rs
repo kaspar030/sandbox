@@ -94,10 +94,26 @@ impl Container {
             None
         };
 
-        // 3. Create eventfd for parent-child sync
+        // 3. Create eventfd for parent-child sync (parent signals child)
         let sync_fd = EventFd::new()?;
 
-        // 4. Compute namespace flags
+        // 4. Create pipe for child to report setup result back to parent.
+        // Write end has O_CLOEXEC: on successful exec(), the write end closes
+        // and the parent reads EOF (0 bytes = success). On setup failure, the
+        // child writes an error message before exiting.
+        let (result_read, result_write) = {
+            let mut fds = [0i32; 2];
+            let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+            if ret != 0 {
+                return Err(Error::Io(std::io::Error::last_os_error()));
+            }
+            unsafe {
+                (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))
+            }
+        };
+        let result_write_raw = result_write.as_raw_fd();
+
+        // 5. Compute namespace flags
         let ns_config = NamespaceConfig::from_network_mode(&self.spec.network);
         let ns_flags = ns_config.to_flags();
 
@@ -105,7 +121,7 @@ impl Container {
         let master_raw = pty_fds.as_ref().map(|(m, _)| m.as_raw_fd()).unwrap_or(-1);
         let slave_raw = pty_fds.as_ref().map(|(_, s)| s.as_raw_fd()).unwrap_or(-1);
 
-        // 5. clone3
+        // 6. clone3
         let clone_result = clone3::clone3_with_pidfd(
             ns_flags.bits(),
             Some(cgroup_fd.as_raw_fd()),
@@ -119,7 +135,37 @@ impl Container {
                     drop(slave); // close slave in parent
                     self.pty_master = Some(master);
                 }
+                // Close write end of result pipe in parent
+                drop(result_write);
+
+                // Do parent setup (uid_map, network, signal child)
                 self.parent_setup(child_pid, &sync_fd, &ns_config)?;
+
+                // Wait for child to report setup result.
+                // EOF (0 bytes) = success (exec closed the O_CLOEXEC write end).
+                // Non-empty read = error message from child.
+                let mut err_buf = [0u8; 4096];
+                let n = unsafe {
+                    libc::read(
+                        result_read.as_raw_fd(),
+                        err_buf.as_mut_ptr() as *mut libc::c_void,
+                        err_buf.len(),
+                    )
+                };
+
+                if n > 0 {
+                    // Child reported an error
+                    let msg = String::from_utf8_lossy(&err_buf[..n as usize]);
+                    // Clean up: child already exited or will exit
+                    let mut status = 0i32;
+                    unsafe { libc::waitpid(child_pid, &mut status, 0) };
+                    cgroup.destroy().ok();
+                    return Err(Error::Other(format!(
+                        "container setup failed: {msg}"
+                    )));
+                }
+
+                // n == 0: EOF, exec succeeded
                 self.pid = Some(child_pid);
                 self.pidfd = Some(pidfd);
                 self.cgroup = Some(cgroup);
@@ -128,8 +174,10 @@ impl Container {
             }
             None => {
                 // === CHILD ===
+                // Close read end of result pipe
+                drop(result_read);
                 // This function never returns — it either execs or exits
-                self.child_setup(&sync_fd, slave_raw, master_raw);
+                self.child_setup(&sync_fd, slave_raw, master_raw, result_write_raw);
             }
         }
     }
@@ -168,13 +216,41 @@ impl Container {
     }
 
     /// Child-side setup after clone3. Never returns.
-    fn child_setup(&self, sync_fd: &EventFd, slave_raw: i32, master_raw: i32) -> ! {
+    ///
+    /// `result_pipe_fd` is the write end of a pipe (O_CLOEXEC). On successful
+    /// setup, exec() closes it automatically (parent reads EOF = success).
+    /// On failure, we write the error message to it before exiting.
+    fn child_setup(
+        &self,
+        sync_fd: &EventFd,
+        slave_raw: i32,
+        master_raw: i32,
+        result_pipe_fd: i32,
+    ) -> ! {
         let result = self.child_setup_inner(sync_fd, slave_raw, master_raw);
         if let Err(e) = result {
-            eprintln!("sandbox: child setup failed: {e}");
+            // Report error to parent via the result pipe
+            let msg = format!("{e}");
+            let _ = unsafe {
+                libc::write(
+                    result_pipe_fd,
+                    msg.as_ptr() as *const libc::c_void,
+                    msg.len(),
+                )
+            };
+            unsafe { libc::close(result_pipe_fd) };
             std::process::exit(1);
         }
         // If we get here, exec didn't happen (shouldn't be reachable)
+        let msg = b"exec returned unexpectedly";
+        let _ = unsafe {
+            libc::write(
+                result_pipe_fd,
+                msg.as_ptr() as *const libc::c_void,
+                msg.len(),
+            )
+        };
+        unsafe { libc::close(result_pipe_fd) };
         std::process::exit(1);
     }
 
