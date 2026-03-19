@@ -192,6 +192,10 @@ enum Commands {
         /// Force snapshot even if container is running on non-CoW filesystem
         #[arg(long)]
         force: bool,
+
+        /// Overwrite existing image, adding a new layer on CoW filesystems
+        #[arg(long)]
+        update: bool,
     },
 
     /// List all containers
@@ -497,12 +501,14 @@ fn main() -> anyhow::Result<()> {
             name,
             image_name,
             force,
+            update,
         } => {
             let mut client = Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Snapshot {
                 name,
                 image_name,
                 force,
+                update,
             })?;
             print_response(&resp);
         }

@@ -264,7 +264,10 @@ pub enum Request {
     Snapshot {
         name: String,
         image_name: String,
+        /// Skip non-CoW running container safety check.
         force: bool,
+        /// Overwrite existing image, adding a new layer on CoW filesystems.
+        update: bool,
     },
     /// List storage pools.
     PoolList,

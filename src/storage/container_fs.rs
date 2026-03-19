@@ -224,6 +224,7 @@ pub fn snapshot_container_to_image(
     pool: &StoragePool,
     container_name: &str,
     image_name: &str,
+    update: bool,
 ) -> Result<()> {
     let container_path = pool.container_path(container_name);
     if !container_path.is_dir() {
@@ -235,7 +236,24 @@ pub fn snapshot_container_to_image(
 
     let image_path = pool.image_path(image_name);
     if image_path.exists() {
-        return Err(Error::Other(format!("image '{image_name}' already exists")));
+        if !update {
+            return Err(Error::Other(format!(
+                "image '{image_name}' already exists (use --update to overwrite)"
+            )));
+        }
+        // Delete old image to replace with new snapshot
+        match pool.fs_type {
+            FsType::Btrfs => btrfs_subvolume_delete(&image_path)?,
+            FsType::Bcachefs => bcachefs_subvolume_delete(&image_path)?,
+            _ => {
+                fs::remove_dir_all(&image_path).map_err(|e| {
+                    Error::Other(format!(
+                        "failed to remove old image '{}': {e}",
+                        image_path.display()
+                    ))
+                })?;
+            }
+        }
     }
 
     match pool.fs_type {

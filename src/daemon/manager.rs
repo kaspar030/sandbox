@@ -421,7 +421,8 @@ impl ContainerManager {
                 name,
                 image_name,
                 force,
-            } => self.handle_snapshot(&name, &image_name, force),
+                update,
+            } => self.handle_snapshot(&name, &image_name, force, update),
             Request::List => self.handle_list(),
             Request::Exec {
                 name,
@@ -821,7 +822,13 @@ impl ContainerManager {
         HandleResult::response_only(Response::MountList(mounts))
     }
 
-    fn handle_snapshot(&self, name: &str, image_name: &str, force: bool) -> HandleResult {
+    fn handle_snapshot(
+        &self,
+        name: &str,
+        image_name: &str,
+        force: bool,
+        update: bool,
+    ) -> HandleResult {
         let container = match self.containers.get(name) {
             Some(c) => c,
             None => {
@@ -831,7 +838,6 @@ impl ContainerManager {
             }
         };
 
-        // Safety check: non-CoW filesystem + running container = potentially inconsistent snapshot
         let pool = match self.storage.resolve_pool(container.spec.pool.as_deref()) {
             Ok(p) => p,
             Err(e) => {
@@ -841,6 +847,7 @@ impl ContainerManager {
             }
         };
 
+        // Safety check: non-CoW filesystem + running container
         if container.state.is_running() && !pool.fs_type.supports_snapshots() && !force {
             return HandleResult::response_only(Response::Error {
                 message: format!(
@@ -851,20 +858,72 @@ impl ContainerManager {
             });
         }
 
-        // Perform the snapshot
-        if let Err(e) = storage::container_fs::snapshot_container_to_image(pool, name, image_name) {
+        let container_rootfs = match &container.rootfs_path {
+            Some(p) => p.clone(),
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {name} has no rootfs"),
+                });
+            }
+        };
+
+        // Check if this is an update to an existing image
+        let existing_meta = storage::layers::load_image_meta(pool, image_name);
+
+        if existing_meta.is_some() && !update {
+            return HandleResult::response_only(Response::Error {
+                message: format!("image '{image_name}' already exists (use --update to overwrite)"),
+            });
+        }
+
+        // Create or update layer metadata
+        let image_meta = if let Some(ref existing) = existing_meta {
+            // Update: add a new layer on top of the existing image
+            match storage::layers::update_snapshot_layer(
+                pool,
+                name,
+                image_name,
+                &container_rootfs,
+                existing,
+            ) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    return HandleResult::response_only(Response::Error {
+                        message: format!("snapshot layer creation failed: {e}"),
+                    });
+                }
+            }
+        } else {
+            // First snapshot: create initial layer, continuing chain from source image if possible
+            let source_meta = storage::layers::load_image_meta(pool, &container.spec.image);
+            match storage::layers::create_snapshot_layer(
+                pool,
+                name,
+                image_name,
+                &container_rootfs,
+                source_meta.as_ref(),
+            ) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    return HandleResult::response_only(Response::Error {
+                        message: format!("snapshot layer creation failed: {e}"),
+                    });
+                }
+            }
+        };
+
+        // Snapshot the container rootfs as the image (create or replace)
+        if let Err(e) =
+            storage::container_fs::snapshot_container_to_image(pool, name, image_name, update)
+        {
             return HandleResult::response_only(Response::Error {
                 message: format!("snapshot failed: {e}"),
             });
         }
 
-        // Copy image metadata from the source image (if the container was created from a pulled image)
-        if let Some(meta) = storage::layers::load_image_meta(pool, &container.spec.image) {
-            let mut new_meta = meta;
-            new_meta.reference = format!("snapshot:{name}");
-            if let Err(e) = storage::layers::write_image_meta_pub(pool, image_name, &new_meta) {
-                tracing::warn!("failed to copy image metadata for snapshot: {e}");
-            }
+        // Write image metadata
+        if let Err(e) = storage::layers::write_image_meta_pub(pool, image_name, &image_meta) {
+            tracing::warn!("failed to write image metadata: {e}");
         }
 
         HandleResult::response_only(Response::Snapshotted {

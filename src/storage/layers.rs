@@ -32,10 +32,25 @@ pub struct LayerMeta {
     pub images: Vec<String>,
 }
 
+/// How an image was created.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub enum ImageSource {
+    /// Pulled from an OCI registry.
+    #[default]
+    OciPull,
+    /// Imported from a local directory or tarball.
+    Import,
+    /// Snapshotted from a running/stopped container.
+    Snapshot { container: String },
+}
+
 /// Metadata about a pulled image (stored in `image_meta/<name>.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageMeta {
     pub reference: String,
+    /// How this image was created.
+    #[serde(default)]
+    pub source: ImageSource,
     pub manifest_digest: Option<String>,
     pub config: ImageConfigMeta,
     /// Chain IDs in order (one per layer).
@@ -290,6 +305,7 @@ pub fn create_image_from_pull(
     // Write image metadata
     let meta = ImageMeta {
         reference: pull_result.reference.to_string(),
+        source: ImageSource::OciPull,
         manifest_digest: None, // TODO: capture from manifest response
         config: ImageConfigMeta::from_oci_config(&pull_result.config),
         chain_ids: chain_ids.clone(),
@@ -458,4 +474,155 @@ fn remove_image_ref(pool: &StoragePool, chain_id: &str, image_name: &str) -> Res
         write_layer_meta(pool, chain_id, &meta)?;
     }
     Ok(())
+}
+
+// --- Snapshot layer creation ---
+
+/// Generate a synthetic diff_id for a snapshot (not a real OCI layer).
+fn snapshot_diff_id(container_name: &str) -> String {
+    use sha2::Digest;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let input = format!("snapshot:{container_name}:{now}");
+    let hash = hex::encode(sha2::Sha256::digest(input.as_bytes()));
+    format!("sha256:{hash}")
+}
+
+/// Create a snapshot layer for a container and build image metadata.
+///
+/// `source_image_meta`: metadata from the container's source image (if any),
+/// used to continue the chain ID sequence.
+///
+/// Returns the new `ImageMeta` to be written.
+pub fn create_snapshot_layer(
+    pool: &StoragePool,
+    container_name: &str,
+    image_name: &str,
+    container_rootfs: &Path,
+    source_image_meta: Option<&ImageMeta>,
+) -> Result<ImageMeta> {
+    ensure_dirs(pool)?;
+
+    let diff_id = snapshot_diff_id(container_name);
+
+    // Continue chain from source image if available
+    let (mut chain_ids, mut diff_ids, parent_chain_id) = if let Some(src) = source_image_meta {
+        (
+            src.chain_ids.clone(),
+            src.diff_ids.clone(),
+            Some(src.final_chain_id.clone()),
+        )
+    } else {
+        (Vec::new(), Vec::new(), None)
+    };
+
+    // Compute new chain ID
+    let new_chain_id = if let Some(ref parent) = parent_chain_id {
+        use sha2::Digest;
+        let input = format!("{parent} {diff_id}");
+        let hash = hex::encode(sha2::Sha256::digest(input.as_bytes()));
+        format!("sha256:{hash}")
+    } else {
+        diff_id.clone()
+    };
+
+    // Snapshot container rootfs as the layer subvolume
+    let layer_target = layer_path(pool, &new_chain_id);
+    if !layer_target.exists() {
+        snapshot_layer(pool, container_rootfs, &layer_target)?;
+
+        // Write layer metadata
+        let layer_meta = LayerMeta {
+            chain_id: new_chain_id.clone(),
+            diff_id: diff_id.clone(),
+            parent_chain_id,
+            images: vec![image_name.to_string()],
+        };
+        write_layer_meta(pool, &new_chain_id, &layer_meta)?;
+    } else {
+        // Layer already exists (unlikely for snapshots, but handle it)
+        add_image_ref(pool, &new_chain_id, image_name)?;
+    }
+
+    chain_ids.push(new_chain_id.clone());
+    diff_ids.push(diff_id);
+
+    // Build image metadata
+    let config = source_image_meta
+        .map(|m| m.config.clone())
+        .unwrap_or_default();
+
+    let meta = ImageMeta {
+        reference: format!("snapshot:{container_name}"),
+        source: ImageSource::Snapshot {
+            container: container_name.to_string(),
+        },
+        manifest_digest: None,
+        config,
+        chain_ids,
+        final_chain_id: new_chain_id,
+        diff_ids,
+    };
+
+    Ok(meta)
+}
+
+/// Update an existing snapshot image with a new layer.
+///
+/// Continues the chain from the existing image's final_chain_id.
+/// Returns the updated `ImageMeta`.
+pub fn update_snapshot_layer(
+    pool: &StoragePool,
+    container_name: &str,
+    image_name: &str,
+    container_rootfs: &Path,
+    existing_meta: &ImageMeta,
+) -> Result<ImageMeta> {
+    ensure_dirs(pool)?;
+
+    let diff_id = snapshot_diff_id(container_name);
+
+    // Chain from the existing image's final chain ID
+    let parent_chain_id = existing_meta.final_chain_id.clone();
+    let new_chain_id = {
+        use sha2::Digest;
+        let input = format!("{parent_chain_id} {diff_id}");
+        let hash = hex::encode(sha2::Sha256::digest(input.as_bytes()));
+        format!("sha256:{hash}")
+    };
+
+    // Snapshot container rootfs as the new layer subvolume
+    let layer_target = layer_path(pool, &new_chain_id);
+    snapshot_layer(pool, container_rootfs, &layer_target)?;
+
+    // Write layer metadata
+    let layer_meta = LayerMeta {
+        chain_id: new_chain_id.clone(),
+        diff_id: diff_id.clone(),
+        parent_chain_id: Some(parent_chain_id),
+        images: vec![image_name.to_string()],
+    };
+    write_layer_meta(pool, &new_chain_id, &layer_meta)?;
+
+    // Build updated image metadata
+    let mut chain_ids = existing_meta.chain_ids.clone();
+    chain_ids.push(new_chain_id.clone());
+    let mut diff_ids = existing_meta.diff_ids.clone();
+    diff_ids.push(diff_id);
+
+    let meta = ImageMeta {
+        reference: format!("snapshot:{container_name}"),
+        source: ImageSource::Snapshot {
+            container: container_name.to_string(),
+        },
+        manifest_digest: None,
+        config: existing_meta.config.clone(),
+        chain_ids,
+        final_chain_id: new_chain_id,
+        diff_ids,
+    };
+
+    Ok(meta)
 }
