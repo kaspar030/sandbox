@@ -114,6 +114,14 @@ impl StorageManager {
                     );
                 }
 
+                if fs_type.supports_snapshots() && !container_fs::check_snapshot_tool(&fs_type) {
+                    tracing::warn!(
+                        "storage pool '{name}' is on {} but snapshot tool not found — \
+                         falling back to cp -a for container rootfs",
+                        fs_type
+                    );
+                }
+
                 tracing::info!(
                     "storage pool '{name}' on {} (snapshots: {}, idmap: {})",
                     fs_type,

@@ -3,8 +3,13 @@
 //! An image is a rootfs directory stored under a storage pool's images/ directory.
 //! Images can be imported from directories or .tar.gz archives.
 //! Images are never mounted directly by containers — a copy/snapshot is made first.
+//!
+//! On btrfs/bcachefs pools, images are stored as subvolumes so that container
+//! rootfs creation can use instant CoW snapshots.
 
 use crate::error::{Error, Result};
+use crate::storage::container_fs;
+use crate::storage::fs_detect::FsType;
 use crate::storage::StoragePool;
 use std::fs;
 use std::path::Path;
@@ -18,8 +23,11 @@ pub struct ImageInfo {
     pub size_bytes: u64,
 }
 
-/// Import an image from a directory (recursive copy preserving ownership).
-pub fn import_from_dir(pool: &StoragePool, name: &str, source: &Path) -> Result<()> {
+/// Import an image from a directory.
+///
+/// On btrfs/bcachefs: creates a subvolume, then copies contents into it.
+/// On other filesystems: cp -a.
+fn import_from_dir(pool: &StoragePool, name: &str, source: &Path) -> Result<()> {
     if !source.is_dir() {
         return Err(Error::Other(format!(
             "source is not a directory: {}",
@@ -35,28 +43,66 @@ pub fn import_from_dir(pool: &StoragePool, name: &str, source: &Path) -> Result<
         )));
     }
 
-    // Use cp -a for correct ownership/permissions/symlinks
-    let status = Command::new("cp")
-        .args(["-a", "--"])
-        .arg(source)
-        .arg(&target)
-        .status()
-        .map_err(|e| Error::Other(format!("failed to run cp: {e}")))?;
-
-    if !status.success() {
-        // Clean up partial copy
-        let _ = fs::remove_dir_all(&target);
-        return Err(Error::Other(format!(
-            "cp failed with exit code {:?}",
-            status.code()
-        )));
+    match pool.fs_type {
+        FsType::Btrfs => {
+            // Create subvolume, then copy contents into it
+            container_fs::btrfs_subvolume_create(&target)?;
+            let status = Command::new("cp")
+                .args(["-a", "--reflink=auto", "-T", "--"])
+                .arg(source)
+                .arg(&target)
+                .status()
+                .map_err(|e| Error::Other(format!("failed to run cp: {e}")))?;
+            if !status.success() {
+                let _ = container_fs::btrfs_subvolume_delete(&target);
+                return Err(Error::Other(format!(
+                    "cp into btrfs subvolume failed with exit code {:?}",
+                    status.code()
+                )));
+            }
+        }
+        FsType::Bcachefs => {
+            container_fs::bcachefs_subvolume_create(&target)?;
+            let status = Command::new("cp")
+                .args(["-a", "--reflink=auto", "-T", "--"])
+                .arg(source)
+                .arg(&target)
+                .status()
+                .map_err(|e| Error::Other(format!("failed to run cp: {e}")))?;
+            if !status.success() {
+                let _ = container_fs::bcachefs_subvolume_delete(&target);
+                return Err(Error::Other(format!(
+                    "cp into bcachefs subvolume failed with exit code {:?}",
+                    status.code()
+                )));
+            }
+        }
+        _ => {
+            // Regular cp -a
+            let status = Command::new("cp")
+                .args(["-a", "--"])
+                .arg(source)
+                .arg(&target)
+                .status()
+                .map_err(|e| Error::Other(format!("failed to run cp: {e}")))?;
+            if !status.success() {
+                let _ = fs::remove_dir_all(&target);
+                return Err(Error::Other(format!(
+                    "cp failed with exit code {:?}",
+                    status.code()
+                )));
+            }
+        }
     }
 
     Ok(())
 }
 
 /// Import an image from a .tar.gz archive.
-pub fn import_from_tar(pool: &StoragePool, name: &str, source: &Path) -> Result<()> {
+///
+/// On btrfs/bcachefs: creates a subvolume, then extracts into it.
+/// On other filesystems: creates a directory, then extracts.
+fn import_from_tar(pool: &StoragePool, name: &str, source: &Path) -> Result<()> {
     if !source.is_file() {
         return Err(Error::Other(format!(
             "source is not a file: {}",
@@ -72,12 +118,33 @@ pub fn import_from_tar(pool: &StoragePool, name: &str, source: &Path) -> Result<
         )));
     }
 
-    fs::create_dir_all(&target)
-        .map_err(|e| Error::Other(format!("failed to create {}: {e}", target.display())))?;
+    // Create the target as a subvolume (btrfs/bcachefs) or directory (other)
+    match pool.fs_type {
+        FsType::Btrfs => container_fs::btrfs_subvolume_create(&target)?,
+        FsType::Bcachefs => container_fs::bcachefs_subvolume_create(&target)?,
+        _ => {
+            fs::create_dir_all(&target)
+                .map_err(|e| Error::Other(format!("failed to create {}: {e}", target.display())))?;
+        }
+    }
 
-    // Extract tar.gz — use tar with --same-owner to preserve ownership
+    // Determine tar flags based on file extension
+    let tar_flag = if let Some(name) = source.file_name().and_then(|n| n.to_str()) {
+        if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+            "xzf"
+        } else if name.ends_with(".tar.xz") {
+            "xJf"
+        } else if name.ends_with(".tar.bz2") {
+            "xjf"
+        } else {
+            "xf"
+        }
+    } else {
+        "xf"
+    };
+
     let status = Command::new("tar")
-        .args(["xzf"])
+        .arg(tar_flag)
         .arg(source)
         .arg("-C")
         .arg(&target)
@@ -86,7 +153,18 @@ pub fn import_from_tar(pool: &StoragePool, name: &str, source: &Path) -> Result<
         .map_err(|e| Error::Other(format!("failed to run tar: {e}")))?;
 
     if !status.success() {
-        let _ = fs::remove_dir_all(&target);
+        // Clean up on failure
+        match pool.fs_type {
+            FsType::Btrfs => {
+                let _ = container_fs::btrfs_subvolume_delete(&target);
+            }
+            FsType::Bcachefs => {
+                let _ = container_fs::bcachefs_subvolume_delete(&target);
+            }
+            _ => {
+                let _ = fs::remove_dir_all(&target);
+            }
+        }
         return Err(Error::Other(format!(
             "tar extraction failed with exit code {:?}",
             status.code()
@@ -148,6 +226,9 @@ pub fn list_images(pool: &StoragePool) -> Result<Vec<ImageInfo>> {
 }
 
 /// Remove an image.
+///
+/// On btrfs/bcachefs: uses subvolume delete.
+/// On other filesystems: rm -rf.
 pub fn remove_image(pool: &StoragePool, name: &str) -> Result<()> {
     let path = pool.image_path(name);
     if !path.exists() {
@@ -157,8 +238,14 @@ pub fn remove_image(pool: &StoragePool, name: &str) -> Result<()> {
         )));
     }
 
-    fs::remove_dir_all(&path)
-        .map_err(|e| Error::Other(format!("failed to remove image '{name}': {e}")))?;
+    match pool.fs_type {
+        FsType::Btrfs => container_fs::btrfs_subvolume_delete(&path)?,
+        FsType::Bcachefs => container_fs::bcachefs_subvolume_delete(&path)?,
+        _ => {
+            fs::remove_dir_all(&path)
+                .map_err(|e| Error::Other(format!("failed to remove image '{name}': {e}")))?;
+        }
+    }
 
     Ok(())
 }
