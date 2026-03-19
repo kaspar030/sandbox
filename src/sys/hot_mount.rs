@@ -97,35 +97,39 @@ pub fn hot_unmount(container_pid: i32, target: &str) -> Result<()> {
 
 /// Enter the container's user + mount namespaces, chroot into container root.
 fn enter_container_ns(container_pid: i32) -> bool {
-    // setns(CLONE_NEWUSER)
-    let user_ns = format!("/proc/{container_pid}/ns/user");
-    let ns_fd = match std::fs::File::open(&user_ns) {
+    // Open BOTH namespace fds BEFORE any setns. After setns(CLONE_NEWUSER),
+    // we lose privileges in the initial user namespace and can't open
+    // /proc/<pid>/ns/mnt anymore.
+    let user_ns_path = format!("/proc/{container_pid}/ns/user");
+    let mnt_ns_path = format!("/proc/{container_pid}/ns/mnt");
+
+    let user_ns_fd = match std::fs::File::open(&user_ns_path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("hot_mount: open {user_ns}: {e}");
+            eprintln!("hot_mount: open {user_ns_path}: {e}");
             return false;
         }
     };
-    if let Err(e) = nix::sched::setns(&ns_fd, nix::sched::CloneFlags::CLONE_NEWUSER) {
+    let mnt_ns_fd = match std::fs::File::open(&mnt_ns_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("hot_mount: open {mnt_ns_path}: {e}");
+            return false;
+        }
+    };
+
+    // Now enter the namespaces
+    if let Err(e) = nix::sched::setns(&user_ns_fd, nix::sched::CloneFlags::CLONE_NEWUSER) {
         eprintln!("hot_mount: setns(CLONE_NEWUSER): {e}");
         return false;
     }
-    drop(ns_fd);
+    drop(user_ns_fd);
 
-    // setns(CLONE_NEWNS)
-    let mnt_ns = format!("/proc/{container_pid}/ns/mnt");
-    let ns_fd = match std::fs::File::open(&mnt_ns) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("hot_mount: open {mnt_ns}: {e}");
-            return false;
-        }
-    };
-    if let Err(e) = nix::sched::setns(&ns_fd, nix::sched::CloneFlags::CLONE_NEWNS) {
+    if let Err(e) = nix::sched::setns(&mnt_ns_fd, nix::sched::CloneFlags::CLONE_NEWNS) {
         eprintln!("hot_mount: setns(CLONE_NEWNS): {e}");
         return false;
     }
-    drop(ns_fd);
+    drop(mnt_ns_fd);
 
     // Become container root. After setns(CLONE_NEWUSER), the process is uid 65534
     // (overflow/nobody) because host uid 0 is not mapped in the container's user

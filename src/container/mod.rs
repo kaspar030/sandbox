@@ -125,13 +125,14 @@ impl Container {
         // 3. Create eventfd for parent-child sync (parent signals child)
         let sync_fd = EventFd::new()?;
 
-        // 3b. Create eventfd for bind mount sync (child signals "ready", parent
-        // applies bind mounts via hot_bind_mount, then signals "done").
-        // Only used when there are bind mounts to apply.
-        let mount_fd = if !self.spec.bind_mounts.is_empty() {
-            Some(EventFd::new()?)
+        // 3b. Create eventfds for bind mount sync.
+        // Two separate eventfds because a single eventfd can't do bidirectional
+        // signaling (writer reads back its own signal).
+        // Only created when there are bind mounts to apply.
+        let (mount_ready, mount_done) = if !self.spec.bind_mounts.is_empty() {
+            (Some(EventFd::new()?), Some(EventFd::new()?))
         } else {
-            None
+            (None, None)
         };
 
         // 4. Create pipe for child to report setup result back to parent.
@@ -149,8 +150,12 @@ impl Container {
         // Store raw fd values for the child to use after clone3.
         let master_raw = pty_fds.as_ref().map(|(m, _)| m.as_raw_fd()).unwrap_or(-1);
         let slave_raw = pty_fds.as_ref().map(|(_, s)| s.as_raw_fd()).unwrap_or(-1);
-        let mount_fd_raw = match &mount_fd {
-            Some(mfd) => mfd.dup_for_child()?,
+        let mount_ready_raw = match &mount_ready {
+            Some(fd) => fd.dup_for_child()?,
+            None => -1,
+        };
+        let mount_done_raw = match &mount_done {
+            Some(fd) => fd.dup_for_child()?,
             None => -1,
         };
 
@@ -167,6 +172,13 @@ impl Container {
                 }
                 // Close write end of result pipe in parent
                 drop(result_write);
+                // Close the dup'd mount fds in the parent (child uses these)
+                if mount_ready_raw >= 0 {
+                    let _ = nix::unistd::close(mount_ready_raw);
+                }
+                if mount_done_raw >= 0 {
+                    let _ = nix::unistd::close(mount_done_raw);
+                }
 
                 // Do parent setup (uid_map, network, signal child)
                 self.parent_setup(child_pid, &sync_fd, &ns_config)?;
@@ -189,10 +201,10 @@ impl Container {
                 // n == 0: EOF, child setup succeeded (pivot_root done)
 
                 // Apply bind mounts from the daemon side (host root privileges).
-                // The child is waiting on mount_fd for us to finish.
-                if let Some(ref mfd) = mount_fd {
+                // The child is waiting on mount_done for us to finish.
+                if let (Some(ready_fd), Some(done_fd)) = (&mount_ready, &mount_done) {
                     // Wait for child to signal "ready" (pivot_root done)
-                    mfd.wait()?;
+                    ready_fd.wait()?;
 
                     // Apply all bind mounts via hot_bind_mount
                     for bm in &self.spec.bind_mounts {
@@ -203,7 +215,7 @@ impl Container {
                             bm.readonly,
                         ) {
                             // Signal child before returning error so it doesn't hang
-                            let _ = mfd.signal();
+                            let _ = done_fd.signal();
                             cgroup.destroy().ok();
                             return Err(Error::Other(format!(
                                 "bind mount {} → {} failed: {e}",
@@ -213,7 +225,7 @@ impl Container {
                     }
 
                     // Signal child "mounts done"
-                    mfd.signal()?;
+                    done_fd.signal()?;
                 }
 
                 self.pid = Some(child_pid);
@@ -228,13 +240,27 @@ impl Container {
                 // === CHILD ===
                 // Close read end of result pipe
                 drop(result_read);
+                // Close the original eventfds (CLOEXEC copies) in the child.
+                // The child uses the dup'd raw fds instead. Without this,
+                // the child has two fds per eventfd and could read its own signals.
+                if let Some(fd) = mount_ready {
+                    let raw = fd.as_raw_fd();
+                    std::mem::forget(fd);
+                    let _ = nix::unistd::close(raw);
+                }
+                if let Some(fd) = mount_done {
+                    let raw = fd.as_raw_fd();
+                    std::mem::forget(fd);
+                    let _ = nix::unistd::close(raw);
+                }
                 // This function never returns — it either execs or exits
                 self.child_setup(
                     &sync_fd,
                     slave_raw,
                     master_raw,
                     result_write_raw,
-                    mount_fd_raw,
+                    mount_ready_raw,
+                    mount_done_raw,
                 );
             }
         }
@@ -285,12 +311,19 @@ impl Container {
         slave_raw: i32,
         master_raw: i32,
         result_pipe_fd: i32,
-        mount_fd_raw: i32,
+        mount_ready_raw: i32,
+        mount_done_raw: i32,
     ) -> ! {
         // SAFETY: result_pipe_fd is a valid fd from pipe2, and we own it in the child.
         let pipe_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(result_pipe_fd) };
-        let result =
-            self.child_setup_inner(sync_fd, slave_raw, master_raw, result_pipe_fd, mount_fd_raw);
+        let result = self.child_setup_inner(
+            sync_fd,
+            slave_raw,
+            master_raw,
+            result_pipe_fd,
+            mount_ready_raw,
+            mount_done_raw,
+        );
         if let Err(e) = result {
             // Report error to parent via the result pipe
             let msg = format!("{e}");
@@ -310,7 +343,8 @@ impl Container {
         slave_raw: i32,
         master_raw: i32,
         result_pipe_fd: i32,
-        mount_fd_raw: i32,
+        mount_ready_raw: i32,
+        mount_done_raw: i32,
     ) -> Result<()> {
         // Die if the daemon (our parent) crashes — ensures no orphan containers
         nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL)
@@ -358,6 +392,20 @@ impl Container {
         let has_own_netns = !matches!(self.spec.network, NetworkMode::Host);
         setup_rootfs(&rootfs, has_own_netns)?;
 
+        // Close result pipe to signal success to parent. The parent reads
+        // EOF and knows the child completed rootfs setup (pivot_root done).
+        let _ = nix::unistd::close(result_pipe_fd);
+
+        // Wait for daemon to apply bind mounts (if any).
+        // Two eventfds: mount_ready (child→parent "ready") and mount_done (parent→child "done").
+        // This must happen BEFORE PTY setup and exec so mounts are in place.
+        if mount_ready_raw >= 0 && mount_done_raw >= 0 {
+            let ready_fd = unsafe { EventFd::from_raw_fd(mount_ready_raw) };
+            let done_fd = unsafe { EventFd::from_raw_fd(mount_done_raw) };
+            ready_fd.signal()?; // "I'm ready for mounts"
+            done_fd.wait()?; // wait for "mounts done"
+        }
+
         // Set up PTY slave as controlling terminal and stdio.
         // Must be after pivot_root (rootfs setup) so that setsid() doesn't
         // interfere with mount operations.
@@ -395,19 +443,6 @@ impl Container {
         // Set working directory (after pivot_root so container paths work)
         if !self.spec.working_dir.is_empty() && self.spec.working_dir != "/" {
             let _ = std::env::set_current_dir(&self.spec.working_dir);
-        }
-
-        // Close result pipe to signal success to parent. The parent reads
-        // EOF and knows the child completed rootfs setup (pivot_root done).
-        let _ = nix::unistd::close(result_pipe_fd);
-
-        // Wait for daemon to apply bind mounts (if any).
-        // The daemon uses hot_bind_mount to inject mounts into our namespace.
-        if mount_fd_raw >= 0 {
-            // SAFETY: mount_fd_raw is a valid fd from dup_for_child, inherited across clone3.
-            let mount_fd = unsafe { EventFd::from_raw_fd(mount_fd_raw) };
-            mount_fd.signal()?; // "I'm ready for mounts"
-            mount_fd.wait()?; // wait for "mounts done"
         }
 
         // Apply seccomp filter
