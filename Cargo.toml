@@ -6,6 +6,14 @@ description = "A minimal Linux container manager using kernel namespaces"
 license = "MIT"
 rust-version = "1.85"
 
+[lib]
+name = "sandbox"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sandbox"
+path = "src/main.rs"
+
 [dependencies]
 # Syscall wrappers
 nix = { version = "0.30", features = ["sched", "mount", "signal", "hostname", "user", "process", "fs", "net", "ioctl", "event", "term", "ptrace"] }

@@ -1,7 +1,7 @@
 //! CLI client — connects to the daemon over a Unix socket.
 
-use crate::error::{Error, Result};
-use crate::protocol::{self, Request, Response};
+use sandbox::error::{Error, Result};
+use sandbox::protocol::{self, Request, Response};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 

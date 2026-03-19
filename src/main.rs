@@ -1,19 +1,10 @@
-mod cgroup;
 mod client;
-mod container;
 mod daemon;
-mod error;
-mod namespace;
-mod net;
-mod protocol;
-mod rootfs;
-mod security;
-mod sys;
 
 use clap::{Parser, Subcommand};
-use protocol::{
-    BindMount, CgroupSpec, ContainerSpec, IdMapping, NetworkMode, Request, Response, SeccompMode,
-    CapabilitySpec,
+use sandbox::protocol::{
+    self, BindMount, CgroupSpec, ContainerSpec, IdMapping, NetworkMode, Request, Response,
+    SeccompMode, CapabilitySpec,
 };
 
 #[derive(Parser)]

@@ -7,8 +7,8 @@
 
 pub mod manager;
 
-use crate::error::{Error, Result};
-use crate::protocol::{self, Request};
+use sandbox::error::{Error, Result};
+use sandbox::protocol::{self, Request};
 
 use async_io::Async;
 use smol::io::{AsyncReadExt, AsyncWriteExt};
