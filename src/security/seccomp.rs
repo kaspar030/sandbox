@@ -10,9 +10,8 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 /// Cached default seccomp BPF program.
-static DEFAULT_FILTER: LazyLock<BpfProgram> = LazyLock::new(|| {
-    build_default_filter().expect("failed to build default seccomp filter")
-});
+static DEFAULT_FILTER: LazyLock<BpfProgram> =
+    LazyLock::new(|| build_default_filter().expect("failed to build default seccomp filter"));
 
 /// Apply the seccomp filter based on the configured mode.
 /// This must be called in the child, after all other setup but before exec.

@@ -19,8 +19,8 @@ nix::ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, libc::winsize);
 ///
 /// Returns (master, slave). The master fd has CLOEXEC set by default.
 pub fn allocate_pty() -> Result<(OwnedFd, OwnedFd)> {
-    let OpenptyResult { master, slave } = openpty(None, None)
-        .map_err(|e| Error::Other(format!("openpty failed: {e}")))?;
+    let OpenptyResult { master, slave } =
+        openpty(None, None).map_err(|e| Error::Other(format!("openpty failed: {e}")))?;
     Ok((master, slave))
 }
 
@@ -32,8 +32,8 @@ pub fn allocate_pty_with_size(rows: u16, cols: u16) -> Result<(OwnedFd, OwnedFd)
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    let OpenptyResult { master, slave } = openpty(Some(&ws), None)
-        .map_err(|e| Error::Other(format!("openpty failed: {e}")))?;
+    let OpenptyResult { master, slave } =
+        openpty(Some(&ws), None).map_err(|e| Error::Other(format!("openpty failed: {e}")))?;
     Ok((master, slave))
 }
 

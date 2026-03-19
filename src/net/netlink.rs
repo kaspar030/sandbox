@@ -160,7 +160,10 @@ impl NetlinkSocket {
 
     /// Create a veth pair.
     pub fn create_veth(&mut self, name: &str, peer_name: &str) -> Result<()> {
-        let mut msg = NetlinkMsg::new(RTM_NEWLINK, NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL);
+        let mut msg = NetlinkMsg::new(
+            RTM_NEWLINK,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
         msg.seq = self.seq;
         self.seq += 1;
 
@@ -258,7 +261,10 @@ impl NetlinkSocket {
 
     /// Create a bridge interface.
     pub fn create_bridge(&mut self, name: &str) -> Result<()> {
-        let mut msg = NetlinkMsg::new(RTM_NEWLINK, NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL);
+        let mut msg = NetlinkMsg::new(
+            RTM_NEWLINK,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
         msg.seq = self.seq;
         self.seq += 1;
 
@@ -301,16 +307,19 @@ impl NetlinkSocket {
         addr: std::net::Ipv4Addr,
         prefix_len: u8,
     ) -> Result<()> {
-        let mut msg = NetlinkMsg::new(RTM_NEWADDR, NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL);
+        let mut msg = NetlinkMsg::new(
+            RTM_NEWADDR,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
         msg.seq = self.seq;
         self.seq += 1;
 
         // ifaddrmsg (8 bytes)
         let mut ifaddr = [0u8; 8];
         ifaddr[0] = libc::AF_INET as u8; // ifa_family
-        ifaddr[1] = prefix_len;           // ifa_prefixlen
-        ifaddr[2] = 0;                    // ifa_flags
-        ifaddr[3] = 0;                    // ifa_scope (RT_SCOPE_UNIVERSE)
+        ifaddr[1] = prefix_len; // ifa_prefixlen
+        ifaddr[2] = 0; // ifa_flags
+        ifaddr[3] = 0; // ifa_scope (RT_SCOPE_UNIVERSE)
         ifaddr[4..8].copy_from_slice(&(iface_idx as i32).to_ne_bytes()); // ifa_index
         msg.extend_payload(&ifaddr);
 
@@ -324,20 +333,23 @@ impl NetlinkSocket {
 
     /// Add a default route via a gateway.
     pub fn add_default_route(&mut self, gateway: std::net::Ipv4Addr, oif: u32) -> Result<()> {
-        let mut msg = NetlinkMsg::new(RTM_NEWROUTE, NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL);
+        let mut msg = NetlinkMsg::new(
+            RTM_NEWROUTE,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
         msg.seq = self.seq;
         self.seq += 1;
 
         // rtmsg (12 bytes)
         let mut rtmsg = [0u8; 12];
-        rtmsg[0] = libc::AF_INET as u8;  // rtm_family
-        rtmsg[1] = 0;                     // rtm_dst_len (0 = default route)
-        rtmsg[2] = 0;                     // rtm_src_len
-        rtmsg[3] = 0;                     // rtm_tos
+        rtmsg[0] = libc::AF_INET as u8; // rtm_family
+        rtmsg[1] = 0; // rtm_dst_len (0 = default route)
+        rtmsg[2] = 0; // rtm_src_len
+        rtmsg[3] = 0; // rtm_tos
         rtmsg[4] = libc::RT_TABLE_MAIN as u8; // rtm_table
-        rtmsg[5] = libc::RTPROT_BOOT as u8;   // rtm_protocol
+        rtmsg[5] = libc::RTPROT_BOOT as u8; // rtm_protocol
         rtmsg[6] = libc::RT_SCOPE_UNIVERSE as u8; // rtm_scope
-        rtmsg[7] = libc::RTN_UNICAST as u8;       // rtm_type
+        rtmsg[7] = libc::RTN_UNICAST as u8; // rtm_type
         rtmsg[8..12].copy_from_slice(&0u32.to_ne_bytes()); // rtm_flags
         msg.extend_payload(&rtmsg);
 

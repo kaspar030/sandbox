@@ -22,13 +22,7 @@ pub fn setup_network(mode: &NetworkMode, child_pid: libc::pid_t) -> Result<()> {
             prefix_len,
         } => {
             // Set up veth pair + bridge using raw netlink
-            crate::net::setup_container_network(
-                child_pid,
-                bridge,
-                *address,
-                *gateway,
-                *prefix_len,
-            )
+            crate::net::setup_container_network(child_pid, bridge, *address, *gateway, *prefix_len)
         }
         NetworkMode::None => {
             // Network namespace was created but leave it unconfigured.

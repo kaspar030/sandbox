@@ -3,8 +3,6 @@
 //! These files define which host UID/GID ranges a user is allowed to
 //! map into user namespaces. Format: `name_or_uid:start:count` per line.
 
-
-
 /// A subordinate ID range.
 #[derive(Debug, Clone)]
 pub struct SubIdRange {

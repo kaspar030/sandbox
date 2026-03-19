@@ -23,7 +23,9 @@ pub fn mount_proc(new_root: &Path) -> Result<()> {
         Some("proc"),
         &proc_path,
         Some("proc"),
-        nix::mount::MsFlags::MS_NOSUID | nix::mount::MsFlags::MS_NODEV | nix::mount::MsFlags::MS_NOEXEC,
+        nix::mount::MsFlags::MS_NOSUID
+            | nix::mount::MsFlags::MS_NODEV
+            | nix::mount::MsFlags::MS_NOEXEC,
         None::<&str>,
     )
     .map_err(|e| Error::Mount {

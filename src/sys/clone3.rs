@@ -23,7 +23,7 @@ pub const CLONE_INTO_CGROUP: u64 = 0x200000000;
 #[derive(Default)]
 pub struct CloneArgs {
     pub flags: u64,
-    pub pidfd: u64,       // pointer to pidfd output (when CLONE_PIDFD)
+    pub pidfd: u64, // pointer to pidfd output (when CLONE_PIDFD)
     pub child_tid: u64,
     pub parent_tid: u64,
     pub exit_signal: u64,
@@ -32,7 +32,7 @@ pub struct CloneArgs {
     pub tls: u64,
     pub set_tid: u64,
     pub set_tid_size: u64,
-    pub cgroup: u64,      // cgroup fd (when CLONE_INTO_CGROUP)
+    pub cgroup: u64, // cgroup fd (when CLONE_INTO_CGROUP)
 }
 
 /// Result of a successful clone3 call in the parent.

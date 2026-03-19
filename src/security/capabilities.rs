@@ -62,10 +62,7 @@ pub fn resolve_capability(name: &str) -> Option<u32> {
     } else {
         format!("CAP_{upper}")
     };
-    ALL_CAPS
-        .iter()
-        .find(|(_, n)| *n == lookup)
-        .map(|(v, _)| *v)
+    ALL_CAPS.iter().find(|(_, n)| *n == lookup).map(|(v, _)| *v)
 }
 
 /// Drop all capabilities except those specified in the keep list.

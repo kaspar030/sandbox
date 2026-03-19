@@ -11,10 +11,7 @@ pub fn set_hostname(hostname: &str) -> Result<()> {
 pub fn set_domainname(domainname: &str) -> Result<()> {
     // setdomainname is not wrapped by nix, use libc directly
     let ret = unsafe {
-        libc::setdomainname(
-            domainname.as_ptr() as *const libc::c_char,
-            domainname.len(),
-        )
+        libc::setdomainname(domainname.as_ptr() as *const libc::c_char, domainname.len())
     };
     if ret != 0 {
         return Err(Error::SetHostname(nix::Error::last()));

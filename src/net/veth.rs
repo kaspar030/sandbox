@@ -47,11 +47,10 @@ pub fn configure_in_netns(
         .map_err(|e| Error::NetworkSetup(format!("failed to open own netns: {e}")))?;
 
     // Enter child's network namespace
-    nix::sched::setns(&ns_fd, nix::sched::CloneFlags::CLONE_NEWNET)
-        .map_err(|e| Error::SetNs {
-            ns: "net".to_string(),
-            source: e,
-        })?;
+    nix::sched::setns(&ns_fd, nix::sched::CloneFlags::CLONE_NEWNET).map_err(|e| Error::SetNs {
+        ns: "net".to_string(),
+        source: e,
+    })?;
 
     // Now we're in the child's netns — configure the interface
     let result = (|| -> Result<()> {
@@ -88,11 +87,10 @@ pub fn configure_in_netns(
     })();
 
     // Restore our network namespace
-    nix::sched::setns(&my_ns, nix::sched::CloneFlags::CLONE_NEWNET)
-        .map_err(|e| Error::SetNs {
-            ns: "net (restore)".to_string(),
-            source: e,
-        })?;
+    nix::sched::setns(&my_ns, nix::sched::CloneFlags::CLONE_NEWNET).map_err(|e| Error::SetNs {
+        ns: "net (restore)".to_string(),
+        source: e,
+    })?;
 
     result
 }

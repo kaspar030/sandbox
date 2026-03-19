@@ -14,4 +14,5 @@ pub mod net;
 pub mod protocol;
 pub mod rootfs;
 pub mod security;
+pub mod storage;
 pub mod sys;

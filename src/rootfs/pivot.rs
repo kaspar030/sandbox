@@ -35,7 +35,8 @@ pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()> {
     // and breaks /dev setup (mounting tmpfs on /dev hides host devices).
     if rootfs == Path::new("/") {
         return Err(Error::RootfsSetup(
-            "cannot use \"/\" as rootfs — provide a dedicated root filesystem directory".to_string(),
+            "cannot use \"/\" as rootfs — provide a dedicated root filesystem directory"
+                .to_string(),
         ));
     }
 
@@ -68,19 +69,19 @@ pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()> {
     })?;
 
     // pivot_root: swap root filesystem
-    nix::unistd::pivot_root(&rootfs, &old_root).map_err(|e| {
-        Error::PivotRoot(std::io::Error::from_raw_os_error(e as i32))
-    })?;
+    nix::unistd::pivot_root(&rootfs, &old_root)
+        .map_err(|e| Error::PivotRoot(std::io::Error::from_raw_os_error(e as i32)))?;
 
     // Change to new root
     std::env::set_current_dir("/").map_err(Error::PivotRoot)?;
 
     // Unmount old root (lazily, in case things are still using it)
-    nix::mount::umount2("/old_root", nix::mount::MntFlags::MNT_DETACH)
-        .map_err(|e| Error::Mount {
+    nix::mount::umount2("/old_root", nix::mount::MntFlags::MNT_DETACH).map_err(|e| {
+        Error::Mount {
             path: "/old_root".into(),
             source: std::io::Error::from_raw_os_error(e as i32),
-        })?;
+        }
+    })?;
 
     // Remove old_root directory
     std::fs::remove_dir("/old_root").map_err(|e| Error::Mount {

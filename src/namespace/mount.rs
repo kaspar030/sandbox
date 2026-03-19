@@ -89,9 +89,7 @@ pub fn setup_bind_mounts(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()>
 }
 
 /// Device nodes to bind-mount from the host into the container's /dev.
-const HOST_DEV_NODES: &[&str] = &[
-    "null", "zero", "full", "random", "urandom", "tty",
-];
+const HOST_DEV_NODES: &[&str] = &["null", "zero", "full", "random", "urandom", "tty"];
 
 /// Mount /dev with minimal device nodes.
 ///

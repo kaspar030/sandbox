@@ -4,9 +4,7 @@
 //! after a container is started.
 
 use crate::error::{Error, Result};
-use nix::sys::socket::{
-    recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags,
-};
+use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
 use std::io::{IoSlice, IoSliceMut};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
@@ -19,14 +17,8 @@ pub fn send_fd(socket: &impl AsRawFd, fd: &impl AsRawFd) -> Result<()> {
     let cmsg = ControlMessage::ScmRights(&fds);
     let iov = [IoSlice::new(&[0u8])]; // 1 byte of payload
 
-    sendmsg::<()>(
-        socket.as_raw_fd(),
-        &iov,
-        &[cmsg],
-        MsgFlags::empty(),
-        None,
-    )
-    .map_err(|e| Error::Other(format!("sendmsg SCM_RIGHTS failed: {e}")))?;
+    sendmsg::<()>(socket.as_raw_fd(), &iov, &[cmsg], MsgFlags::empty(), None)
+        .map_err(|e| Error::Other(format!("sendmsg SCM_RIGHTS failed: {e}")))?;
 
     Ok(())
 }
