@@ -92,7 +92,13 @@ impl ContainerManager {
                 if nix::sys::signal::kill(pid, None).is_ok() {
                     tracing::info!("killing orphaned container process {name} (pid {})", record.pid);
                     let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
-                    let _ = nix::sys::wait::waitpid(pid, None);
+                    // Poll until the process dies (can't waitpid — not our child after restart)
+                    for _ in 0..20 {
+                        if nix::sys::signal::kill(pid, None).is_err() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
                 }
             }
 
@@ -180,7 +186,7 @@ impl ContainerManager {
             }
         }
 
-        // Scan for stale .cleanup-* directories in all pools
+        // Scan for stale .cleanup-* directories and orphaned container rootfs in all pools
         for pool in self.storage.list_pools() {
             let fs_dir = pool.path.join("fs");
             if let Ok(entries) = std::fs::read_dir(&fs_dir) {
@@ -189,6 +195,28 @@ impl ContainerManager {
                     let name_str = name.to_string_lossy();
                     if name_str.starts_with(".cleanup-") {
                         tracing::debug!("finishing stale cleanup {}", entry.path().display());
+                        let fs_type = pool.fs_type.clone();
+                        self.spawn_deferred_cleanup(
+                            entry.path(),
+                            fs_type,
+                            name_str.to_string(),
+                        );
+                    } else if !self.containers.contains_key(name_str.as_ref())
+                        && !known_names.contains(name_str.as_ref())
+                    {
+                        // Orphaned container rootfs (e.g., ephemeral container
+                        // whose daemon crashed before cleanup)
+                        tracing::info!("cleaning up orphaned container rootfs: {name_str}");
+                        // Unmount any stale idmap mount
+                        let mount_path =
+                            std::path::Path::new(MOUNTS_DIR).join(name_str.as_ref());
+                        if mount_path.exists() {
+                            let _ = nix::mount::umount2(
+                                &mount_path,
+                                nix::mount::MntFlags::MNT_DETACH,
+                            );
+                            let _ = std::fs::remove_dir(&mount_path);
+                        }
                         let fs_type = pool.fs_type.clone();
                         self.spawn_deferred_cleanup(
                             entry.path(),
@@ -254,6 +282,48 @@ impl ContainerManager {
     /// Take the pidfd out of a container for async monitoring.
     pub fn take_pidfd(&mut self, name: &str) -> Option<OwnedFd> {
         self.containers.get_mut(name)?.pidfd.take()
+    }
+
+    /// Get all running containers as (name, pid) pairs.
+    pub fn running_containers(&self) -> Vec<(String, i32)> {
+        self.containers
+            .iter()
+            .filter(|(_, c)| c.state.is_running())
+            .filter_map(|(name, c)| c.pid.map(|pid| (name.clone(), pid)))
+            .collect()
+    }
+
+    /// Initiate an async stop: send SIGTERM and return pid + pidfd.
+    /// Returns Err(Response) if the container doesn't exist or isn't running.
+    pub fn initiate_stop(&mut self, name: &str) -> std::result::Result<(i32, Option<OwnedFd>), Response> {
+        let container = match self.containers.get_mut(name) {
+            Some(c) => c,
+            None => {
+                return Err(Response::Error {
+                    message: format!("container {name} not found"),
+                });
+            }
+        };
+
+        if !container.state.is_running() {
+            return Err(Response::Error {
+                message: format!("container {name} is not running"),
+            });
+        }
+
+        let pid = container.pid.unwrap_or(0);
+
+        // Send SIGTERM
+        if let Err(e) = container.signal(libc::SIGTERM) {
+            return Err(Response::Error {
+                message: format!("failed to signal container: {e}"),
+            });
+        }
+
+        // Take pidfd for async monitoring
+        let pidfd = container.pidfd.take();
+
+        Ok((pid, pidfd))
     }
 
     /// Persist a non-ephemeral container's state to disk.
@@ -344,7 +414,13 @@ impl ContainerManager {
             Request::Create(spec) => self.handle_create(spec),
             Request::Run(spec) => self.handle_run(spec),
             Request::Start { name, command } => self.handle_start(&name, command),
-            Request::Stop { name, timeout_secs } => self.handle_stop(&name, timeout_secs),
+            Request::Stop { .. } => {
+                // Stop is handled asynchronously in handle_client via handle_stop_async.
+                // This branch should not be reached.
+                HandleResult::response_only(Response::Error {
+                    message: "internal error: Stop should be handled async".to_string(),
+                })
+            }
             Request::Destroy { name } => self.handle_destroy(&name),
             Request::List => self.handle_list(),
             Request::Exec { name, command, detach } => self.handle_exec(&name, command, detach),
@@ -583,26 +659,6 @@ impl ContainerManager {
         }
     }
 
-    fn handle_stop(&mut self, name: &str, timeout_secs: u32) -> HandleResult {
-        let container = match self.containers.get_mut(name) {
-            Some(c) => c,
-            None => {
-                return HandleResult::response_only(Response::Error {
-                    message: format!("container {name} not found"),
-                })
-            }
-        };
-
-        match container.stop(timeout_secs) {
-            Ok(exit_code) => HandleResult::response_only(Response::Stopped {
-                name: name.to_string(),
-                exit_code,
-            }),
-            Err(e) => HandleResult::response_only(Response::Error {
-                message: format!("failed to stop container: {e}"),
-            }),
-        }
-    }
 
     fn handle_destroy(&mut self, name: &str) -> HandleResult {
         let mut container = match self.containers.remove(name) {
