@@ -238,7 +238,7 @@ impl Container {
     ) -> ! {
         // SAFETY: result_pipe_fd is a valid fd from pipe2, and we own it in the child.
         let pipe_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(result_pipe_fd) };
-        let result = self.child_setup_inner(sync_fd, slave_raw, master_raw);
+        let result = self.child_setup_inner(sync_fd, slave_raw, master_raw, result_pipe_fd);
         if let Err(e) = result {
             // Report error to parent via the result pipe
             let msg = format!("{e}");
@@ -252,7 +252,13 @@ impl Container {
         std::process::exit(1);
     }
 
-    fn child_setup_inner(&self, sync_fd: &EventFd, slave_raw: i32, master_raw: i32) -> Result<()> {
+    fn child_setup_inner(
+        &self,
+        sync_fd: &EventFd,
+        slave_raw: i32,
+        master_raw: i32,
+        result_pipe_fd: i32,
+    ) -> Result<()> {
         // Die if the daemon (our parent) crashes — ensures no orphan containers
         nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL)
             .map_err(|e| Error::Other(format!("set_pdeathsig failed: {e}")))?;
@@ -343,6 +349,11 @@ impl Container {
 
         // Drop capabilities (must be after seccomp to avoid blocking prctl)
         capabilities::drop_capabilities(&self.spec.capabilities)?;
+
+        // Close result pipe to signal success to parent. For exec_command,
+        // O_CLOEXEC would handle this, but run_init never execs (it forks
+        // instead), so the pipe must be closed explicitly before entering init.
+        let _ = nix::unistd::close(result_pipe_fd);
 
         // Merge entrypoint + command for exec
         let exec_args = if self.spec.entrypoint.is_empty() {
