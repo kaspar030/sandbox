@@ -1,0 +1,45 @@
+[package]
+name = "sandbox"
+version = "0.1.0"
+edition = "2024"
+description = "A minimal Linux container manager using kernel namespaces"
+license = "MIT"
+rust-version = "1.85"
+
+[dependencies]
+# Syscall wrappers
+nix = { version = "0.30", features = ["sched", "mount", "signal", "hostname", "user", "process", "fs", "net", "ioctl", "event", "term", "ptrace"] }
+libc = "0.2"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Security
+seccompiler = "0.5"
+
+# Async runtime (daemon)
+smol = "2"
+async-io = "2"
+
+# Serialization / wire protocol
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+sha2 = "0.10"
+hex = "0.4"
+ureq = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
