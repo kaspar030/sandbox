@@ -5,8 +5,8 @@
 
 mod common;
 
-use common::rootfs::TempRootfs;
 use common::TestDaemon;
+use common::rootfs::TempRootfs;
 
 #[test]
 fn test_daemon_starts_and_stops() {

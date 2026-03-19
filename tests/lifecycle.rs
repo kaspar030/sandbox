@@ -5,8 +5,8 @@
 
 mod common;
 
-use common::rootfs::TempRootfs;
 use common::TestDaemon;
+use common::rootfs::TempRootfs;
 
 /// Helper to skip test if not root.
 fn skip_if_not_root() -> bool {

@@ -10,11 +10,11 @@
 //! they share the same chain ID subvolumes.
 
 use crate::error::{Error, Result};
+use crate::storage::StoragePool;
 use crate::storage::container_fs;
 use crate::storage::fs_detect::FsType;
 use crate::storage::oci::{ImageConfig, PullResult};
 use crate::storage::unpack;
-use crate::storage::StoragePool;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;

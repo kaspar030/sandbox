@@ -14,8 +14,8 @@ use sandbox::sys::idmap;
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MOUNTS_DIR: &str = "/run/sandbox/mounts";
 
@@ -90,7 +90,10 @@ impl ContainerManager {
             if record.pid > 0 {
                 let pid = nix::unistd::Pid::from_raw(record.pid);
                 if nix::sys::signal::kill(pid, None).is_ok() {
-                    tracing::info!("killing orphaned container process {name} (pid {})", record.pid);
+                    tracing::info!(
+                        "killing orphaned container process {name} (pid {})",
+                        record.pid
+                    );
                     let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
                     // Poll until the process dies (can't waitpid — not our child after restart)
                     for _ in 0..20 {
@@ -123,11 +126,7 @@ impl ContainerManager {
                     if let Some(ref pool_name) = record.pool_name {
                         if let Some(pool) = self.storage.pool(pool_name) {
                             let fs_type = pool.fs_type.clone();
-                            self.spawn_deferred_cleanup(
-                                rootfs_path.clone(),
-                                fs_type,
-                                name.clone(),
-                            );
+                            self.spawn_deferred_cleanup(rootfs_path.clone(), fs_type, name.clone());
                         }
                     }
                 }
@@ -135,10 +134,7 @@ impl ContainerManager {
                 tracing::info!("cleaned up ephemeral container {name}");
             } else {
                 // Non-ephemeral: keep rootfs, re-register as Created
-                let rootfs_exists = record
-                    .rootfs_path
-                    .as_ref()
-                    .is_some_and(|p| p.exists());
+                let rootfs_exists = record.rootfs_path.as_ref().is_some_and(|p| p.exists());
 
                 if rootfs_exists {
                     let container = Container::from_recovered(
@@ -165,7 +161,10 @@ impl ContainerManager {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if !known_names.contains(name.as_ref()) && !self.containers.contains_key(name.as_ref()) && entry.path().is_dir() {
+                if !known_names.contains(name.as_ref())
+                    && !self.containers.contains_key(name.as_ref())
+                    && entry.path().is_dir()
+                {
                     tracing::debug!("removing orphaned cgroup /sys/fs/cgroup/sandbox/{name}");
                     let _ = std::fs::remove_dir(entry.path());
                 }
@@ -178,7 +177,10 @@ impl ContainerManager {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if !known_names.contains(name.as_ref()) && !self.containers.contains_key(name.as_ref()) && entry.path().is_dir() {
+                if !known_names.contains(name.as_ref())
+                    && !self.containers.contains_key(name.as_ref())
+                    && entry.path().is_dir()
+                {
                     tracing::debug!("unmounting orphaned mount {}", entry.path().display());
                     let _ = nix::mount::umount2(&entry.path(), nix::mount::MntFlags::MNT_DETACH);
                     let _ = std::fs::remove_dir(entry.path());
@@ -196,11 +198,7 @@ impl ContainerManager {
                     if name_str.starts_with(".cleanup-") {
                         tracing::debug!("finishing stale cleanup {}", entry.path().display());
                         let fs_type = pool.fs_type.clone();
-                        self.spawn_deferred_cleanup(
-                            entry.path(),
-                            fs_type,
-                            name_str.to_string(),
-                        );
+                        self.spawn_deferred_cleanup(entry.path(), fs_type, name_str.to_string());
                     } else if !self.containers.contains_key(name_str.as_ref())
                         && !known_names.contains(name_str.as_ref())
                     {
@@ -208,21 +206,14 @@ impl ContainerManager {
                         // whose daemon crashed before cleanup)
                         tracing::info!("cleaning up orphaned container rootfs: {name_str}");
                         // Unmount any stale idmap mount
-                        let mount_path =
-                            std::path::Path::new(MOUNTS_DIR).join(name_str.as_ref());
+                        let mount_path = std::path::Path::new(MOUNTS_DIR).join(name_str.as_ref());
                         if mount_path.exists() {
-                            let _ = nix::mount::umount2(
-                                &mount_path,
-                                nix::mount::MntFlags::MNT_DETACH,
-                            );
+                            let _ =
+                                nix::mount::umount2(&mount_path, nix::mount::MntFlags::MNT_DETACH);
                             let _ = std::fs::remove_dir(&mount_path);
                         }
                         let fs_type = pool.fs_type.clone();
-                        self.spawn_deferred_cleanup(
-                            entry.path(),
-                            fs_type,
-                            name_str.to_string(),
-                        );
+                        self.spawn_deferred_cleanup(entry.path(), fs_type, name_str.to_string());
                     }
                 }
             }
@@ -295,7 +286,10 @@ impl ContainerManager {
 
     /// Initiate an async stop: send SIGTERM and return pid + pidfd.
     /// Returns Err(Response) if the container doesn't exist or isn't running.
-    pub fn initiate_stop(&mut self, name: &str) -> std::result::Result<(i32, Option<OwnedFd>), Response> {
+    pub fn initiate_stop(
+        &mut self,
+        name: &str,
+    ) -> std::result::Result<(i32, Option<OwnedFd>), Response> {
         let container = match self.containers.get_mut(name) {
             Some(c) => c,
             None => {
@@ -359,7 +353,7 @@ impl ContainerManager {
         }
 
         let exit_code = if let Some(pid) = container.pid {
-            use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+            use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
             match waitpid(nix::unistd::Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::Exited(_, code)) => code,
                 Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
@@ -424,18 +418,27 @@ impl ContainerManager {
             }
             Request::Destroy { name } => self.handle_destroy(&name),
             Request::List => self.handle_list(),
-            Request::Exec { name, command, detach } => self.handle_exec(&name, command, detach),
+            Request::Exec {
+                name,
+                command,
+                detach,
+            } => self.handle_exec(&name, command, detach),
             Request::ImageImport { name, source, pool } => {
                 self.handle_image_import(&name, &source, pool.as_deref())
             }
-            Request::ImagePull { reference, name, pool } => {
-                self.handle_image_pull(&reference, name.as_deref(), pool.as_deref())
-            }
+            Request::ImagePull {
+                reference,
+                name,
+                pool,
+            } => self.handle_image_pull(&reference, name.as_deref(), pool.as_deref()),
             Request::ImageList { pool } => self.handle_image_list(pool.as_deref()),
             Request::ImageRemove { name, pool } => self.handle_image_remove(&name, pool.as_deref()),
-            Request::MountAdd { name, source, target, readonly } => {
-                self.handle_mount_add(&name, &source, &target, readonly)
-            }
+            Request::MountAdd {
+                name,
+                source,
+                target,
+                readonly,
+            } => self.handle_mount_add(&name, &source, &target, readonly),
             Request::MountRemove { name, target } => self.handle_mount_remove(&name, &target),
             Request::MountList { name } => self.handle_mount_list(&name),
             Request::PoolList => self.handle_pool_list(),
@@ -633,7 +636,7 @@ impl ContainerManager {
             None => {
                 return HandleResult::response_only(Response::Error {
                     message: format!("container {name} not found"),
-                })
+                });
             }
         };
 
@@ -669,7 +672,6 @@ impl ContainerManager {
         }
     }
 
-
     fn handle_mount_add(
         &mut self,
         name: &str,
@@ -682,7 +684,7 @@ impl ContainerManager {
             None => {
                 return HandleResult::response_only(Response::Error {
                     message: format!("container {name} not found"),
-                })
+                });
             }
         };
 
@@ -697,7 +699,7 @@ impl ContainerManager {
             None => {
                 return HandleResult::response_only(Response::Error {
                     message: "container has no PID".to_string(),
-                })
+                });
             }
         };
 
@@ -717,11 +719,14 @@ impl ContainerManager {
         }
 
         // Add to bind_mounts so it persists across restart
-        container.spec.bind_mounts.push(sandbox::protocol::BindMount {
-            source: source.to_string(),
-            target: target.to_string(),
-            readonly,
-        });
+        container
+            .spec
+            .bind_mounts
+            .push(sandbox::protocol::BindMount {
+                source: source.to_string(),
+                target: target.to_string(),
+                readonly,
+            });
 
         // Persist updated state
         Self::persist_container(name, container);
@@ -737,7 +742,7 @@ impl ContainerManager {
             None => {
                 return HandleResult::response_only(Response::Error {
                     message: format!("container {name} not found"),
-                })
+                });
             }
         };
 
@@ -752,7 +757,7 @@ impl ContainerManager {
             None => {
                 return HandleResult::response_only(Response::Error {
                     message: "container has no PID".to_string(),
-                })
+                });
             }
         };
 
@@ -792,7 +797,7 @@ impl ContainerManager {
             None => {
                 return HandleResult::response_only(Response::Error {
                     message: format!("container {name} not found"),
-                })
+                });
             }
         };
 
@@ -816,7 +821,7 @@ impl ContainerManager {
             None => {
                 return HandleResult::response_only(Response::Error {
                     message: format!("container {name} not found"),
-                })
+                });
             }
         };
 
@@ -865,7 +870,7 @@ impl ContainerManager {
             None => {
                 return HandleResult::response_only(Response::Error {
                     message: format!("container {name} not found"),
-                })
+                });
             }
         };
 
@@ -880,7 +885,7 @@ impl ContainerManager {
             None => {
                 return HandleResult::response_only(Response::Error {
                     message: "container has no PID".to_string(),
-                })
+                });
             }
         };
 
@@ -914,7 +919,7 @@ impl ContainerManager {
             Err(e) => {
                 return HandleResult::response_only(Response::Error {
                     message: format!("{e}"),
-                })
+                });
             }
         };
 
@@ -924,7 +929,7 @@ impl ContainerManager {
             Err(e) => {
                 return HandleResult::response_only(Response::Error {
                     message: format!("invalid reference: {e}"),
-                })
+                });
             }
         };
 
@@ -941,7 +946,7 @@ impl ContainerManager {
                 Err(e) => {
                     return HandleResult::response_only(Response::Error {
                         message: format!("pull failed: {e}"),
-                    })
+                    });
                 }
             };
 
@@ -958,18 +963,12 @@ impl ContainerManager {
         if num_cached == chain_ids.len() {
             tracing::info!("all {} layers cached", chain_ids.len());
         } else if num_cached > 0 {
-            tracing::info!(
-                "{} of {} layers cached",
-                num_cached,
-                chain_ids.len()
-            );
+            tracing::info!("{} of {} layers cached", num_cached, chain_ids.len());
         }
 
         // Create image from pulled layers
         match storage::layers::create_image_from_pull(pool, &pull_result, &image_name) {
-            Ok(()) => HandleResult::response_only(Response::ImagePulled {
-                name: image_name,
-            }),
+            Ok(()) => HandleResult::response_only(Response::ImagePulled { name: image_name }),
             Err(e) => HandleResult::response_only(Response::Error {
                 message: format!("image creation failed: {e}"),
             }),
@@ -982,7 +981,7 @@ impl ContainerManager {
             Err(e) => {
                 return HandleResult::response_only(Response::Error {
                     message: format!("{e}"),
-                })
+                });
             }
         };
 
@@ -1002,7 +1001,7 @@ impl ContainerManager {
             Err(e) => {
                 return HandleResult::response_only(Response::Error {
                     message: format!("{e}"),
-                })
+                });
             }
         };
 
@@ -1030,7 +1029,7 @@ impl ContainerManager {
             Err(e) => {
                 return HandleResult::response_only(Response::Error {
                     message: format!("{e}"),
-                })
+                });
             }
         };
 

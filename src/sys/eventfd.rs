@@ -8,7 +8,7 @@
 //! 5. Child proceeds with namespace setup (pivot_root, seccomp, etc.)
 
 use crate::error::{Error, Result};
-use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 use nix::sys::eventfd::{EfdFlags, EventFd as NixEventFd};
 use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 

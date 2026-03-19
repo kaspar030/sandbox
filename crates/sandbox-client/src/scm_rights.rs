@@ -1,6 +1,6 @@
 //! SCM_RIGHTS — receiving file descriptors over Unix domain sockets.
 
-use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
+use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
 use std::io::IoSliceMut;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 

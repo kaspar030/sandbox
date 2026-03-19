@@ -9,8 +9,8 @@
 //! when the filesystem supports reflinks).
 
 use crate::error::{Error, Result};
-use crate::storage::fs_detect::FsType;
 use crate::storage::StoragePool;
+use crate::storage::fs_detect::FsType;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

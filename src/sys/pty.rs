@@ -5,7 +5,7 @@
 //! set up as stdin/stdout/stderr in the container child process.
 
 use crate::error::{Error, Result};
-use nix::pty::{openpty, OpenptyResult, Winsize};
+use nix::pty::{OpenptyResult, Winsize, openpty};
 
 use nix::unistd::{dup2_stderr, dup2_stdin, dup2_stdout, setsid};
 use std::os::fd::{AsRawFd, OwnedFd};

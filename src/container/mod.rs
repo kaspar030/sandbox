@@ -401,7 +401,7 @@ impl Container {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(timeout_secs as u64);
 
-        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+        use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 
         let pid = nix::unistd::Pid::from_raw(self.pid.unwrap_or(0));
 

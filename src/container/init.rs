@@ -31,7 +31,7 @@ pub fn run_init(command: &[String]) -> ! {
     setup_signal_forwarding(child_pid);
 
     // Main loop: wait for children
-    use nix::sys::wait::{waitpid, WaitStatus};
+    use nix::sys::wait::{WaitStatus, waitpid};
 
     let child = nix::unistd::Pid::from_raw(child_pid);
 

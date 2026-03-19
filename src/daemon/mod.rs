@@ -73,8 +73,8 @@ pub fn run_daemon(
 
     smol::block_on(async {
         // Register signal handlers for graceful shutdown
-        let mut signals = Signals::new([SIGTERM, SIGINT])
-            .expect("failed to register signal handlers");
+        let mut signals =
+            Signals::new([SIGTERM, SIGINT]).expect("failed to register signal handlers");
 
         // Shutdown channel: signal handler or Request::Shutdown sends on this
         let (shutdown_tx, shutdown_rx) = smol::channel::bounded::<()>(1);
@@ -105,14 +105,12 @@ pub fn run_daemon(
 
         // Accept loop: race accept() vs shutdown signal
         loop {
-            let accept_result = smol::future::race(
-                async { Some(listener.accept().await) },
-                async {
+            let accept_result =
+                smol::future::race(async { Some(listener.accept().await) }, async {
                     let _ = shutdown_rx.recv().await;
                     None
-                },
-            )
-            .await;
+                })
+                .await;
 
             match accept_result {
                 Some(Ok((stream, _addr))) => {
@@ -295,11 +293,8 @@ async fn handle_client(
             if has_pty {
                 // Interactive mode: keep connection alive, send exit code after container exits
                 let exit_code = await_pidfd_and_reap(pidfd, &name, mgr_clone).await;
-                let _ = write_async_message(
-                    &mut stream,
-                    &Response::ContainerExited { exit_code },
-                )
-                .await;
+                let _ = write_async_message(&mut stream, &Response::ContainerExited { exit_code })
+                    .await;
             } else {
                 // Detached mode: monitor in background
                 smol::spawn(async move {
@@ -317,8 +312,7 @@ async fn handle_client(
             if has_pty {
                 // Interactive exec: keep connection alive, send exit code
                 let exit_code = await_exec_pidfd(exec_pidfd, pid as i32).await;
-                let _ =
-                    write_async_message(&mut stream, &Response::ExecExited { exit_code }).await;
+                let _ = write_async_message(&mut stream, &Response::ExecExited { exit_code }).await;
             } else {
                 // Detached exec: just reap in background
                 smol::spawn(async move {
@@ -421,7 +415,7 @@ async fn await_exec_pidfd(pidfd: std::os::fd::OwnedFd, child_pid: i32) -> i32 {
         let _ = async_fd.readable().await;
     }
     // Reap the specific exec child
-    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
     match waitpid(
         nix::unistd::Pid::from_raw(child_pid),
         Some(WaitPidFlag::WNOHANG),
@@ -462,10 +456,7 @@ async fn write_async_message<T: serde::Serialize>(
     msg: &T,
 ) -> Result<()> {
     let data = protocol::encode_message(msg)?;
-    stream
-        .write_all(&data)
-        .await
-        .map_err(Error::Connection)?;
+    stream.write_all(&data).await.map_err(Error::Connection)?;
     stream.flush().await.map_err(Error::Connection)?;
     Ok(())
 }

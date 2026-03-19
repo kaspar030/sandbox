@@ -8,9 +8,9 @@
 //! rootfs creation can use instant CoW snapshots.
 
 use crate::error::{Error, Result};
+use crate::storage::StoragePool;
 use crate::storage::container_fs;
 use crate::storage::fs_detect::FsType;
-use crate::storage::StoragePool;
 use std::fs;
 use std::path::Path;
 use std::process::Command;

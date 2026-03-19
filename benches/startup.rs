@@ -9,7 +9,7 @@
 //! The benchmark measures end-to-end wall-clock time for:
 //! - `sandbox run --image alpine -- /bin/true` (full lifecycle: create, start, exec, exit, cleanup)
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;

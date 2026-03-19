@@ -3,7 +3,7 @@ mod daemon;
 use clap::{Parser, Subcommand};
 use sandbox_client::Client;
 use sandbox_proto::{
-    BindMount, CgroupSpec, ContainerSpec, CapabilitySpec, IdMapping, NetworkMode, Request,
+    BindMount, CapabilitySpec, CgroupSpec, ContainerSpec, IdMapping, NetworkMode, Request,
     Response, SeccompMode,
 };
 
@@ -325,7 +325,10 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Daemon { action } => match action {
-            DaemonAction::Start { foreground, data_dir } => {
+            DaemonAction::Start {
+                foreground,
+                data_dir,
+            } => {
                 daemon::run_daemon(cli.socket.as_deref(), foreground, data_dir.as_deref())?;
             }
             DaemonAction::Stop => {
@@ -336,12 +339,29 @@ fn main() -> anyhow::Result<()> {
         },
 
         Commands::Run {
-            name, image, pool, hostname, memory, cpus, pids_max, network, bridge,
-            ip, gateway, seccomp, cap_add, bind, init, detach, uid_map, gid_map, command,
+            name,
+            image,
+            pool,
+            hostname,
+            memory,
+            cpus,
+            pids_max,
+            network,
+            bridge,
+            ip,
+            gateway,
+            seccomp,
+            cap_add,
+            bind,
+            init,
+            detach,
+            uid_map,
+            gid_map,
+            command,
         } => {
             let mut spec = build_spec(
-                name, image, pool, hostname, memory, cpus, pids_max, network, bridge,
-                ip, gateway, seccomp, cap_add, bind, init, uid_map, gid_map, command,
+                name, image, pool, hostname, memory, cpus, pids_max, network, bridge, ip, gateway,
+                seccomp, cap_add, bind, init, uid_map, gid_map, command,
             )?;
             spec.detach = detach;
             let mut client = Client::connect(cli.socket.as_deref())?;
@@ -367,12 +387,30 @@ fn main() -> anyhow::Result<()> {
         }
 
         Commands::Create {
-            name, image, pool, hostname, memory, cpus, pids_max, network, bridge,
-            ip, gateway, seccomp, cap_add, bind, init, start, detach, uid_map, gid_map, command,
+            name,
+            image,
+            pool,
+            hostname,
+            memory,
+            cpus,
+            pids_max,
+            network,
+            bridge,
+            ip,
+            gateway,
+            seccomp,
+            cap_add,
+            bind,
+            init,
+            start,
+            detach,
+            uid_map,
+            gid_map,
+            command,
         } => {
             let spec = build_spec(
-                name, image, pool, hostname, memory, cpus, pids_max, network, bridge,
-                ip, gateway, seccomp, cap_add, bind, init, uid_map, gid_map, command,
+                name, image, pool, hostname, memory, cpus, pids_max, network, bridge, ip, gateway,
+                seccomp, cap_add, bind, init, uid_map, gid_map, command,
             )?;
             let mut client = Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Create(spec))?;
@@ -410,7 +448,11 @@ fn main() -> anyhow::Result<()> {
         }
 
         Commands::Start { name, command } => {
-            let cmd = if command.is_empty() { None } else { Some(command) };
+            let cmd = if command.is_empty() {
+                None
+            } else {
+                Some(command)
+            };
             let mut client = Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Start { name, command: cmd })?;
             print_response(&resp);
@@ -418,7 +460,10 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Stop { name, timeout } => {
             let mut client = Client::connect(cli.socket.as_deref())?;
-            let resp = client.request(&Request::Stop { name, timeout_secs: timeout })?;
+            let resp = client.request(&Request::Stop {
+                name,
+                timeout_secs: timeout,
+            })?;
             print_response(&resp);
         }
 
@@ -445,7 +490,8 @@ fn main() -> anyhow::Result<()> {
                                     format!("Stopped({exit_code})")
                                 }
                             };
-                            let pid_str = info.pid
+                            let pid_str = info
+                                .pid
                                 .map(|p| p.to_string())
                                 .unwrap_or_else(|| "-".to_string());
                             println!("{:<20} {:<15} {:<10}", info.name, state_str, pid_str);
@@ -456,13 +502,25 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Commands::Exec { name, command, detach } => {
+        Commands::Exec {
+            name,
+            command,
+            detach,
+        } => {
             let mut client = Client::connect(cli.socket.as_deref())?;
             if detach {
-                let resp = client.request(&Request::Exec { name, command, detach: true })?;
+                let resp = client.request(&Request::Exec {
+                    name,
+                    command,
+                    detach: true,
+                })?;
                 print_response(&resp);
             } else {
-                let (resp, pty_fd) = client.request_with_fd(&Request::Exec { name, command, detach: false })?;
+                let (resp, pty_fd) = client.request_with_fd(&Request::Exec {
+                    name,
+                    command,
+                    detach: false,
+                })?;
                 if let Response::Error { .. } = &resp {
                     print_response(&resp);
                 } else if let Some(fd) = pty_fd {
@@ -506,8 +564,16 @@ fn main() -> anyhow::Result<()> {
                     let resp = client.request(&Request::ImageRemove { name, pool })?;
                     print_response(&resp);
                 }
-                ImageAction::Pull { reference, name, pool } => {
-                    let resp = client.request(&Request::ImagePull { reference, name, pool })?;
+                ImageAction::Pull {
+                    reference,
+                    name,
+                    pool,
+                } => {
+                    let resp = client.request(&Request::ImagePull {
+                        reference,
+                        name,
+                        pool,
+                    })?;
                     print_response(&resp);
                 }
             }
@@ -679,7 +745,9 @@ fn build_spec(
                     target: parts[1].to_string(),
                     readonly: parts[2] == "ro",
                 }),
-                _ => anyhow::bail!("invalid bind mount format: {b} (expected SRC:DST or SRC:DST:ro)"),
+                _ => {
+                    anyhow::bail!("invalid bind mount format: {b} (expected SRC:DST or SRC:DST:ro)")
+                }
             }
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -687,13 +755,19 @@ fn build_spec(
     let uid_mappings = if uid_map.is_empty() {
         Vec::new()
     } else {
-        uid_map.iter().map(|m| parse_id_mapping(m)).collect::<anyhow::Result<Vec<_>>>()?
+        uid_map
+            .iter()
+            .map(|m| parse_id_mapping(m))
+            .collect::<anyhow::Result<Vec<_>>>()?
     };
 
     let gid_mappings = if gid_map.is_empty() {
         Vec::new()
     } else {
-        gid_map.iter().map(|m| parse_id_mapping(m)).collect::<anyhow::Result<Vec<_>>>()?
+        gid_map
+            .iter()
+            .map(|m| parse_id_mapping(m))
+            .collect::<anyhow::Result<Vec<_>>>()?
     };
 
     let cmd = if command.is_empty() {
@@ -758,7 +832,8 @@ fn parse_size(s: String) -> anyhow::Result<u64> {
         anyhow::bail!("empty size");
     }
 
-    let (num_str, multiplier) = if let Some(n) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
+    let (num_str, multiplier) = if let Some(n) = s.strip_suffix('G').or_else(|| s.strip_suffix('g'))
+    {
         (n, 1024 * 1024 * 1024u64)
     } else if let Some(n) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
         (n, 1024 * 1024u64)
@@ -787,7 +862,7 @@ fn parse_id_mapping(s: &str) -> anyhow::Result<IdMapping> {
 /// Run an interactive session, proxying between the local terminal and
 /// a PTY master fd received from the daemon.
 fn interactive_session(pty_master: std::os::fd::OwnedFd) -> anyhow::Result<()> {
-    use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
+    use nix::sys::termios::{SetArg, cfmakeraw, tcgetattr, tcsetattr};
     use std::io::{Read, Write};
     use std::os::fd::{AsFd, AsRawFd};
 
@@ -809,11 +884,8 @@ fn interactive_session(pty_master: std::os::fd::OwnedFd) -> anyhow::Result<()> {
         fn drop(&mut self) {
             if let Some(ref orig) = self.original {
                 let stdin = std::io::stdin();
-                let _ = nix::sys::termios::tcsetattr(
-                    &stdin,
-                    nix::sys::termios::SetArg::TCSANOW,
-                    orig,
-                );
+                let _ =
+                    nix::sys::termios::tcsetattr(&stdin, nix::sys::termios::SetArg::TCSANOW, orig);
             }
         }
     }
