@@ -28,9 +28,9 @@ enum Commands {
 
     /// Create and start a container (ephemeral — auto-removed on exit)
     Run {
-        /// Container name
+        /// Container name (auto-generated if omitted)
         #[arg(long)]
-        name: String,
+        name: Option<String>,
 
         /// Image to use as the root filesystem
         #[arg(long)]
@@ -107,8 +107,9 @@ enum Commands {
 
     /// Create a container (persistent — needs explicit destroy)
     Create {
+        /// Container name (auto-generated if omitted)
         #[arg(long)]
-        name: String,
+        name: Option<String>,
         #[arg(long)]
         image: String,
         #[arg(long)]
@@ -359,6 +360,7 @@ fn main() -> anyhow::Result<()> {
             gid_map,
             command,
         } => {
+            let name = name.unwrap_or_else(|| petname::petname(2, "-").unwrap());
             let mut spec = build_spec(
                 name, image, pool, hostname, memory, cpus, pids_max, network, bridge, ip, gateway,
                 seccomp, cap_add, bind, init, uid_map, gid_map, command,
@@ -408,6 +410,7 @@ fn main() -> anyhow::Result<()> {
             gid_map,
             command,
         } => {
+            let name = name.unwrap_or_else(|| petname::petname(2, "-").unwrap());
             let spec = build_spec(
                 name, image, pool, hostname, memory, cpus, pids_max, network, bridge, ip, gateway,
                 seccomp, cap_add, bind, init, uid_map, gid_map, command,
