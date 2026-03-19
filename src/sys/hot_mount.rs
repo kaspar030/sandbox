@@ -1,59 +1,182 @@
 //! Hot bind mount support — add/remove bind mounts to running containers.
 //!
-//! Uses /proc/<pid>/root/ to access the container's filesystem and the
-//! new mount API (open_tree + move_mount) to inject mounts without needing
-//! fork + setns.
+//! Approach (Variant A from testing):
+//! 1. Parent: open_tree(source) in host ns — creates detached mount clone
+//! 2. Parent: if readonly, set_readonly(tree_fd)
+//! 3. Fork helper that inherits tree_fd:
+//!    a. setns(CLONE_NEWUSER) — enter container's user namespace
+//!    b. setns(CLONE_NEWNS) — enter container's mount namespace
+//!    c. chroot("/") + chdir("/") — now / is the container's rootfs
+//!    d. mkdir -p <target>
+//!    e. move_mount(tree_fd, <target>) — attach the detached mount
+//!
+//! This works because open_tree creates an "unowned" detached mount that
+//! can be moved into a different mount namespace via move_mount, even from
+//! a different user namespace context.
 
 use crate::error::{Error, Result};
 use crate::sys::mount_api;
-use std::path::{Path, PathBuf};
-
-/// Resolve a target path inside a running container via procfs.
-fn container_path(container_pid: i32, target: &str) -> PathBuf {
-    PathBuf::from(format!("/proc/{container_pid}/root")).join(target.trim_start_matches('/'))
-}
+use std::os::fd::AsRawFd;
+use std::path::Path;
 
 /// Add a bind mount to a running container.
-///
-/// Uses open_tree(OPEN_TREE_CLONE) to create a detached mount clone of the
-/// source, then move_mount() to attach it at /proc/<pid>/root/<target>,
-/// which places it inside the container's mount namespace.
 pub fn hot_bind_mount(
     container_pid: i32,
     source: &Path,
     target: &str,
     readonly: bool,
 ) -> Result<()> {
+    // Step 1: Clone the source mount in the host namespace
     let tree_fd = mount_api::open_tree(source, true)?;
 
+    // Step 2: Set readonly if requested
     if readonly {
         mount_api::set_readonly(&tree_fd)?;
     }
 
-    let container_target = container_path(container_pid, target);
+    // Step 3: Fork helper to enter container namespaces and attach the mount
+    let tree_raw = tree_fd.as_raw_fd();
+    let is_file = source.is_file();
+    let target = target.to_string();
 
-    // Create mount point — file or directory depending on source type
-    if source.is_file() {
-        if let Some(parent) = container_target.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| Error::Other(format!("mkdir -p {}: {e}", parent.display())))?;
+    match unsafe { nix::unistd::fork() } {
+        Err(e) => Err(Error::Other(format!("fork failed: {e}"))),
+        Ok(nix::unistd::ForkResult::Parent { child }) => {
+            drop(tree_fd); // child inherited the fd
+            match nix::sys::wait::waitpid(child, None) {
+                Ok(nix::sys::wait::WaitStatus::Exited(_, 0)) => Ok(()),
+                Ok(nix::sys::wait::WaitStatus::Exited(_, code)) => Err(Error::Other(format!(
+                    "hot mount helper exited with code {code}"
+                ))),
+                Ok(status) => Err(Error::Other(format!(
+                    "hot mount helper unexpected status: {status:?}"
+                ))),
+                Err(e) => Err(Error::Other(format!("waitpid failed: {e}"))),
+            }
         }
-        if !container_target.exists() {
-            std::fs::File::create(&container_target)
-                .map_err(|e| Error::Other(format!("touch {}: {e}", container_target.display())))?;
+        Ok(nix::unistd::ForkResult::Child) => {
+            let _ = nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL);
+            child_do_mount(container_pid, tree_raw, &target, is_file);
         }
-    } else {
-        std::fs::create_dir_all(&container_target)
-            .map_err(|e| Error::Other(format!("mkdir -p {}: {e}", container_target.display())))?;
     }
-
-    mount_api::move_mount(&tree_fd, &container_target)
 }
 
 /// Remove a bind mount from a running container.
 pub fn hot_unmount(container_pid: i32, target: &str) -> Result<()> {
-    let container_target = container_path(container_pid, target);
+    let target = target.to_string();
 
-    nix::mount::umount2(&container_target, nix::mount::MntFlags::MNT_DETACH)
-        .map_err(|e| Error::Other(format!("umount {}: {e}", container_target.display())))
+    match unsafe { nix::unistd::fork() } {
+        Err(e) => Err(Error::Other(format!("fork failed: {e}"))),
+        Ok(nix::unistd::ForkResult::Parent { child }) => {
+            match nix::sys::wait::waitpid(child, None) {
+                Ok(nix::sys::wait::WaitStatus::Exited(_, 0)) => Ok(()),
+                Ok(nix::sys::wait::WaitStatus::Exited(_, code)) => Err(Error::Other(format!(
+                    "hot unmount helper exited with code {code}"
+                ))),
+                Ok(status) => Err(Error::Other(format!(
+                    "hot unmount helper unexpected status: {status:?}"
+                ))),
+                Err(e) => Err(Error::Other(format!("waitpid failed: {e}"))),
+            }
+        }
+        Ok(nix::unistd::ForkResult::Child) => {
+            let _ = nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL);
+            child_do_unmount(container_pid, &target);
+        }
+    }
 }
+
+/// Enter the container's user + mount namespaces, chroot into container root.
+fn enter_container_ns(container_pid: i32) -> bool {
+    // setns(CLONE_NEWUSER)
+    let user_ns = format!("/proc/{container_pid}/ns/user");
+    let ns_fd = match std::fs::File::open(&user_ns) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("hot_mount: open {user_ns}: {e}");
+            return false;
+        }
+    };
+    if let Err(e) = nix::sched::setns(&ns_fd, nix::sched::CloneFlags::CLONE_NEWUSER) {
+        eprintln!("hot_mount: setns(CLONE_NEWUSER): {e}");
+        return false;
+    }
+    drop(ns_fd);
+
+    // setns(CLONE_NEWNS)
+    let mnt_ns = format!("/proc/{container_pid}/ns/mnt");
+    let ns_fd = match std::fs::File::open(&mnt_ns) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("hot_mount: open {mnt_ns}: {e}");
+            return false;
+        }
+    };
+    if let Err(e) = nix::sched::setns(&ns_fd, nix::sched::CloneFlags::CLONE_NEWNS) {
+        eprintln!("hot_mount: setns(CLONE_NEWNS): {e}");
+        return false;
+    }
+    drop(ns_fd);
+
+    // chroot + chdir into the container's root
+    if nix::unistd::chroot("/").is_err() || std::env::set_current_dir("/").is_err() {
+        eprintln!("hot_mount: chroot/chdir failed");
+        return false;
+    }
+
+    true
+}
+
+/// Child process: enter container ns, mkdir target, move_mount.
+fn child_do_mount(container_pid: i32, tree_raw: i32, target: &str, is_file: bool) -> ! {
+    if !enter_container_ns(container_pid) {
+        std::process::exit(1);
+    }
+
+    // Create mount point
+    let target_path = Path::new(target);
+    if is_file {
+        if let Some(parent) = target_path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                eprintln!("hot_mount: mkdir -p {}: failed", parent.display());
+                std::process::exit(1);
+            }
+        }
+        if !target_path.exists() {
+            if std::fs::File::create(target_path).is_err() {
+                eprintln!("hot_mount: touch {target}: failed");
+                std::process::exit(1);
+            }
+        }
+    } else if std::fs::create_dir_all(target_path).is_err() {
+        eprintln!("hot_mount: mkdir -p {target}: failed");
+        std::process::exit(1);
+    }
+
+    // Reconstruct OwnedFd from inherited raw fd
+    let tree_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(tree_raw) };
+
+    if let Err(e) = mount_api::move_mount(&tree_fd, target_path) {
+        eprintln!("hot_mount: move_mount: {e}");
+        std::process::exit(1);
+    }
+
+    std::process::exit(0);
+}
+
+/// Child process: enter container ns, umount target.
+fn child_do_unmount(container_pid: i32, target: &str) -> ! {
+    if !enter_container_ns(container_pid) {
+        std::process::exit(1);
+    }
+
+    let target_path = Path::new(target);
+    if let Err(e) = nix::mount::umount2(target_path, nix::mount::MntFlags::MNT_DETACH) {
+        eprintln!("hot_unmount: umount {target}: {e}");
+        std::process::exit(1);
+    }
+
+    std::process::exit(0);
+}
+
+use std::os::fd::FromRawFd;
