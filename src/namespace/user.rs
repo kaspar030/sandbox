@@ -26,11 +26,19 @@ pub fn write_gid_map(child_pid: libc::pid_t, mappings: &[IdMapping]) -> Result<(
     Ok(())
 }
 
-/// Write "deny" to /proc/<pid>/setgroups.
-/// This is required before writing gid_map in a user namespace.
-pub fn deny_setgroups(child_pid: libc::pid_t) -> Result<()> {
+/// Configure /proc/<pid>/setgroups for the user namespace.
+///
+/// When the daemon runs as root (euid 0), we write "allow" so that
+/// setgroups() works inside the container (needed by apt, pip, etc.).
+/// When unprivileged, we must write "deny" before writing gid_map.
+fn configure_setgroups(child_pid: libc::pid_t) -> Result<()> {
     let path = format!("/proc/{child_pid}/setgroups");
-    fs::write(&path, "deny").map_err(Error::SetGroups)?;
+    let value = if nix::unistd::geteuid().is_root() {
+        "allow"
+    } else {
+        "deny"
+    };
+    fs::write(&path, value).map_err(Error::SetGroups)?;
     Ok(())
 }
 
@@ -41,9 +49,9 @@ pub fn setup_user_namespace(
     uid_mappings: &[IdMapping],
     gid_mappings: &[IdMapping],
 ) -> Result<()> {
-    // Order matters: deny setgroups, then write gid_map, then uid_map.
+    // Order matters: configure setgroups, then write gid_map, then uid_map.
     // (gid_map before uid_map avoids needing CAP_SETGID in some cases.)
-    deny_setgroups(child_pid)?;
+    configure_setgroups(child_pid)?;
     write_gid_map(child_pid, gid_mappings)?;
     write_uid_map(child_pid, uid_mappings)?;
     Ok(())

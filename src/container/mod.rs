@@ -289,10 +289,9 @@ impl Container {
         // Make mounts private
         namespace::mount::make_mounts_private()?;
 
-        // Set hostname
-        if let Some(ref hostname) = self.spec.hostname {
-            namespace::uts::set_hostname(hostname)?;
-        }
+        // Set hostname (fall back to container name if not explicitly set)
+        let hostname = self.spec.hostname.as_deref().unwrap_or(&self.spec.name);
+        namespace::uts::set_hostname(hostname)?;
 
         // Set up rootfs (mounts /dev, /proc, /sys, bind mounts, pivot_root).
         // The rootfs path is the idmapped mount point set up by the daemon,
