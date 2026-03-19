@@ -65,10 +65,10 @@ pub fn setup_slave_pty(slave_fd: &OwnedFd, master_fd_raw: i32) -> Result<()> {
     if slave_raw > 2 {
         // Don't close via OwnedFd drop — we've already dup2'd it.
         // Just close the raw fd directly.
-        unsafe { libc::close(slave_raw) };
+        let _ = nix::unistd::close(slave_raw);
     }
     if master_fd_raw >= 0 {
-        unsafe { libc::close(master_fd_raw) };
+        let _ = nix::unistd::close(master_fd_raw);
     }
 
     Ok(())

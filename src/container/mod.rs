@@ -105,14 +105,8 @@ impl Container {
         // Write end has O_CLOEXEC: on successful exec(), the write end closes
         // and the parent reads EOF (0 bytes = success). On setup failure, the
         // child writes an error message before exiting.
-        let (result_read, result_write) = {
-            let mut fds = [0i32; 2];
-            let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-            if ret != 0 {
-                return Err(Error::Io(std::io::Error::last_os_error()));
-            }
-            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
-        };
+        let (result_read, result_write) =
+            nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(|e| Error::Io(e.into()))?;
         let result_write_raw = result_write.as_raw_fd();
 
         // 5. Compute namespace flags
@@ -144,20 +138,13 @@ impl Container {
                 // EOF (0 bytes) = success (exec closed the O_CLOEXEC write end).
                 // Non-empty read = error message from child.
                 let mut err_buf = [0u8; 4096];
-                let n = unsafe {
-                    libc::read(
-                        result_read.as_raw_fd(),
-                        err_buf.as_mut_ptr() as *mut libc::c_void,
-                        err_buf.len(),
-                    )
-                };
+                let n = nix::unistd::read(&result_read, &mut err_buf).unwrap_or(0) as isize;
 
                 if n > 0 {
                     // Child reported an error
                     let msg = String::from_utf8_lossy(&err_buf[..n as usize]);
                     // Clean up: child already exited or will exit
-                    let mut status = 0i32;
-                    unsafe { libc::waitpid(child_pid, &mut status, 0) };
+                    let _ = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(child_pid), None);
                     cgroup.destroy().ok();
                     return Err(Error::Other(format!("container setup failed: {msg}")));
                 }
@@ -226,30 +213,19 @@ impl Container {
         master_raw: i32,
         result_pipe_fd: i32,
     ) -> ! {
+        // SAFETY: result_pipe_fd is a valid fd from pipe2, and we own it in the child.
+        let pipe_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(result_pipe_fd) };
         let result = self.child_setup_inner(sync_fd, slave_raw, master_raw);
         if let Err(e) = result {
             // Report error to parent via the result pipe
             let msg = format!("{e}");
-            let _ = unsafe {
-                libc::write(
-                    result_pipe_fd,
-                    msg.as_ptr() as *const libc::c_void,
-                    msg.len(),
-                )
-            };
-            unsafe { libc::close(result_pipe_fd) };
+            let _ = nix::unistd::write(pipe_fd, msg.as_bytes());
+            let _ = nix::unistd::close(result_pipe_fd);
             std::process::exit(1);
         }
         // If we get here, exec didn't happen (shouldn't be reachable)
-        let msg = b"exec returned unexpectedly";
-        let _ = unsafe {
-            libc::write(
-                result_pipe_fd,
-                msg.as_ptr() as *const libc::c_void,
-                msg.len(),
-            )
-        };
-        unsafe { libc::close(result_pipe_fd) };
+        let _ = nix::unistd::write(pipe_fd, b"exec returned unexpectedly");
+        let _ = nix::unistd::close(result_pipe_fd);
         std::process::exit(1);
     }
 
@@ -327,10 +303,9 @@ impl Container {
     /// Send a signal to the container's init process.
     pub fn signal(&self, sig: libc::c_int) -> Result<()> {
         if let Some(pid) = self.pid {
-            let ret = unsafe { libc::kill(pid, sig) };
-            if ret != 0 {
-                return Err(Error::Kill(nix::Error::last()));
-            }
+            let signal = nix::sys::signal::Signal::try_from(sig)
+                .map_err(|e| Error::Kill(nix::Error::from(e)))?;
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal).map_err(Error::Kill)?;
         }
         Ok(())
     }
@@ -352,37 +327,38 @@ impl Container {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(timeout_secs as u64);
 
-        loop {
-            let mut status: i32 = 0;
-            let ret = unsafe { libc::waitpid(self.pid.unwrap_or(0), &mut status, libc::WNOHANG) };
+        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 
-            if ret > 0 {
-                let exit_code = if libc::WIFEXITED(status) {
-                    libc::WEXITSTATUS(status)
-                } else if libc::WIFSIGNALED(status) {
-                    128 + libc::WTERMSIG(status)
-                } else {
-                    1
-                };
-                self.state
-                    .stop(exit_code)
-                    .map_err(|e| Error::Other(e.to_string()))?;
-                return Ok(exit_code);
+        let pid = nix::unistd::Pid::from_raw(self.pid.unwrap_or(0));
+
+        loop {
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::Exited(_, code)) => {
+                    self.state
+                        .stop(code)
+                        .map_err(|e| Error::Other(e.to_string()))?;
+                    return Ok(code);
+                }
+                Ok(WaitStatus::Signaled(_, sig, _)) => {
+                    let exit_code = 128 + sig as i32;
+                    self.state
+                        .stop(exit_code)
+                        .map_err(|e| Error::Other(e.to_string()))?;
+                    return Ok(exit_code);
+                }
+                Ok(WaitStatus::StillAlive) => {}
+                Ok(_) => {}
+                Err(_) => {}
             }
 
             if start.elapsed() > timeout {
                 // Force kill
                 self.signal(libc::SIGKILL)?;
                 // Wait indefinitely for SIGKILL
-                let ret = unsafe { libc::waitpid(self.pid.unwrap_or(0), &mut status, 0) };
-                let exit_code = if ret > 0 {
-                    if libc::WIFEXITED(status) {
-                        libc::WEXITSTATUS(status)
-                    } else {
-                        137 // 128 + SIGKILL(9)
-                    }
-                } else {
-                    137
+                let exit_code = match waitpid(pid, None) {
+                    Ok(WaitStatus::Exited(_, code)) => code,
+                    Ok(WaitStatus::Signaled(_, _, _)) => 137,
+                    _ => 137,
                 };
                 self.state
                     .stop(exit_code)
@@ -449,16 +425,8 @@ fn exec_command(command: &[String]) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let c_arg_ptrs: Vec<*const libc::c_char> = c_args
-        .iter()
-        .map(|a| a.as_ptr())
-        .chain(std::iter::once(std::ptr::null()))
-        .collect();
+    // nix::unistd::execvp only returns on error (Ok is Infallible)
+    nix::unistd::execvp(&c_program, &c_args).map_err(Error::Exec)?;
 
-    unsafe {
-        libc::execvp(c_program.as_ptr(), c_arg_ptrs.as_ptr());
-    }
-
-    // execvp only returns on error
-    Err(Error::Exec(std::io::Error::last_os_error()))
+    unreachable!()
 }

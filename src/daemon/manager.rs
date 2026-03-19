@@ -7,11 +7,13 @@ use sandbox::container::Container;
 use sandbox::error::{Error, Result};
 use sandbox::namespace::user;
 use sandbox::protocol::{ContainerInfo, ContainerSpec, ImageInfo, PoolInfo, Request, Response};
+use sandbox::storage::fs_detect::FsType;
 use sandbox::storage::{self, StorageManager};
 use sandbox::sys::idmap;
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 const MOUNTS_DIR: &str = "/run/sandbox/mounts";
@@ -43,6 +45,8 @@ impl HandleResult {
 pub struct ContainerManager {
     containers: HashMap<String, Container>,
     storage: Arc<StorageManager>,
+    /// Number of background rootfs deletions currently in flight.
+    pending_cleanups: Arc<AtomicUsize>,
 }
 
 impl ContainerManager {
@@ -50,7 +54,58 @@ impl ContainerManager {
         Self {
             containers: HashMap::new(),
             storage,
+            pending_cleanups: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Number of background rootfs deletions currently in flight.
+    pub fn pending_cleanup_count(&self) -> usize {
+        self.pending_cleanups.load(Ordering::Relaxed)
+    }
+
+    /// Spawn a background task to destroy a container's rootfs.
+    ///
+    /// The container rootfs is first renamed to a `.cleanup-*` path (instant
+    /// metadata operation) so the original path is immediately available for
+    /// reuse. The blocking `subvolume delete` / `rm -rf` then runs on smol's
+    /// thread pool against the renamed path.
+    fn spawn_deferred_cleanup(&self, container_path: PathBuf, fs_type: FsType, name: String) {
+        // Rename to a unique cleanup path — instant metadata operation that
+        // frees the original path for immediate reuse by the next container.
+        let cleanup_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let cleanup_path = container_path
+            .parent()
+            .expect("container path must have parent")
+            .join(format!(".cleanup-{name}-{cleanup_id}"));
+
+        if let Err(e) = std::fs::rename(&container_path, &cleanup_path) {
+            tracing::warn!("rename for deferred cleanup of '{name}' failed: {e}");
+            return;
+        }
+        tracing::debug!(
+            "renamed '{name}' rootfs to {} for deferred cleanup",
+            cleanup_path.display()
+        );
+
+        let pending = Arc::clone(&self.pending_cleanups);
+        pending.fetch_add(1, Ordering::Relaxed);
+        smol::spawn(async move {
+            let path_display = cleanup_path.display().to_string();
+            let result = smol::unblock(move || {
+                storage::container_fs::destroy_container_rootfs_by_path(cleanup_path, fs_type)
+            })
+            .await;
+            if let Err(e) = result {
+                tracing::warn!("deferred rootfs cleanup for '{name}' ({path_display}) failed: {e}");
+            } else {
+                tracing::debug!("deferred rootfs cleanup for '{name}' complete");
+            }
+            pending.fetch_sub(1, Ordering::Relaxed);
+        })
+        .detach();
     }
 
     /// Take the pidfd out of a container for async monitoring.
@@ -69,15 +124,13 @@ impl ContainerManager {
             return;
         }
 
-        let mut status = 0i32;
-        if let Some(pid) = container.pid {
-            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        }
-
-        let exit_code = if libc::WIFEXITED(status) {
-            libc::WEXITSTATUS(status)
-        } else if libc::WIFSIGNALED(status) {
-            128 + libc::WTERMSIG(status)
+        let exit_code = if let Some(pid) = container.pid {
+            use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+            match waitpid(nix::unistd::Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::Exited(_, code)) => code,
+                Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
+                _ => 1,
+            }
         } else {
             1
         };
@@ -95,10 +148,13 @@ impl ContainerManager {
         // Auto-remove ephemeral containers
         if is_ephemeral {
             if let Some(mut c) = self.containers.remove(name) {
-                // Clean up storage (rootfs copy)
-                if let (Some(pool_name), Some(_)) = (&c.pool_name, &c.rootfs_path) {
+                // Defer rootfs deletion to a background task so we release
+                // the manager mutex quickly.
+                if let Some(pool_name) = &c.pool_name {
                     if let Some(pool) = self.storage.pool(pool_name) {
-                        let _ = storage::container_fs::destroy_container_rootfs(pool, name);
+                        let container_path = pool.container_path(name);
+                        let fs_type = pool.fs_type.clone();
+                        self.spawn_deferred_cleanup(container_path, fs_type, name.to_string());
                     }
                 }
                 let _ = c.destroy();
@@ -128,6 +184,12 @@ impl ContainerManager {
                 let names: Vec<String> = self.containers.keys().cloned().collect();
                 for name in names {
                     let _ = self.handle_destroy(&name);
+                }
+                let pending = self.pending_cleanup_count();
+                if pending > 0 {
+                    tracing::info!(
+                        "shutdown: {pending} background rootfs cleanup(s) still in progress"
+                    );
                 }
                 HandleResult::response_only(Response::Ok)
             }
@@ -229,13 +291,16 @@ impl ContainerManager {
                 HandleResult::with_pty(Response::Started { name, pid }, pty_master)
             }
             Err(e) => {
-                // Clean up on failure
+                // Clean up on failure — defer rootfs deletion.
                 let _ = container.destroy();
                 if let Some(pool_name) = &container.pool_name {
                     if let Some(pool) = self.storage.pool(pool_name) {
-                        let _ = storage::container_fs::destroy_container_rootfs(
-                            pool,
-                            &container.spec.name,
+                        let container_path = pool.container_path(&container.spec.name);
+                        let fs_type = pool.fs_type.clone();
+                        self.spawn_deferred_cleanup(
+                            container_path,
+                            fs_type,
+                            container.spec.name.clone(),
                         );
                     }
                 }
@@ -309,10 +374,12 @@ impl ContainerManager {
             }
         };
 
-        // Clean up storage (rootfs copy)
+        // Defer rootfs deletion to a background task.
         if let Some(ref pool_name) = container.pool_name {
             if let Some(pool) = self.storage.pool(pool_name) {
-                let _ = storage::container_fs::destroy_container_rootfs(pool, name);
+                let container_path = pool.container_path(name);
+                let fs_type = pool.fs_type.clone();
+                self.spawn_deferred_cleanup(container_path, fs_type, name.to_string());
             }
         }
 
@@ -479,15 +546,18 @@ fn exec_in_container(container_pid: libc::pid_t, command: &[String]) -> Result<l
         }
     }
 
-    let child = unsafe { libc::fork() };
-    if child < 0 {
-        return Err(Error::Other(format!(
-            "fork failed: {}",
-            std::io::Error::last_os_error()
-        )));
+    match unsafe { nix::unistd::fork() } {
+        Err(e) => {
+            return Err(Error::Other(format!("fork failed: {e}")));
+        }
+        Ok(nix::unistd::ForkResult::Parent { child }) => {
+            return Ok(child.as_raw());
+        }
+        Ok(nix::unistd::ForkResult::Child) => {}
     }
 
-    if child == 0 {
+    // === CHILD ===
+    {
         for (ns_name, ns_fd) in &ns_fds {
             let flags = match ns_name.as_str() {
                 "pid" => nix::sched::CloneFlags::CLONE_NEWPID,
@@ -520,18 +590,9 @@ fn exec_in_container(container_pid: libc::pid_t, command: &[String]) -> Result<l
             .iter()
             .map(|a| std::ffi::CString::new(a.as_str()).unwrap())
             .collect();
-        let c_ptrs: Vec<*const libc::c_char> = c_args
-            .iter()
-            .map(|a| a.as_ptr())
-            .chain(std::iter::once(std::ptr::null()))
-            .collect();
 
-        unsafe {
-            libc::execvp(c_prog.as_ptr(), c_ptrs.as_ptr());
-        }
-        eprintln!("exec failed: {}", std::io::Error::last_os_error());
+        let err = nix::unistd::execvp(&c_prog, &c_args).unwrap_err();
+        eprintln!("exec failed: {err}");
         std::process::exit(1);
     }
-
-    Ok(child)
 }

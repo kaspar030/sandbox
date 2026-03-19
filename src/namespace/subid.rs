@@ -77,13 +77,11 @@ pub fn current_username() -> Option<String> {
     }
 
     // Fall back to getpwuid
-    let uid = unsafe { libc::getuid() };
-    let pw = unsafe { libc::getpwuid(uid) };
-    if pw.is_null() {
-        return None;
-    }
-    let name = unsafe { std::ffi::CStr::from_ptr((*pw).pw_name) };
-    name.to_str().ok().map(|s| s.to_string())
+    let uid = nix::unistd::getuid();
+    nix::unistd::User::from_uid(uid)
+        .ok()
+        .flatten()
+        .map(|u| u.name)
 }
 
 #[cfg(test)]

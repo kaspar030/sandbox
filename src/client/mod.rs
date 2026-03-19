@@ -8,7 +8,7 @@ use sandbox::error::{Error, Result};
 use sandbox::protocol::{self, Request, Response};
 use sandbox::sys::scm_rights;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
@@ -93,14 +93,11 @@ fn interactive_session(pty_master: OwnedFd) -> Result<i32> {
     use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
 
     let stdin_fd = std::io::stdin();
-    let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
+    let is_tty = nix::unistd::isatty(std::io::stdin().as_fd()).unwrap_or(false);
 
     // Save original terminal settings
     let original_termios = if is_tty {
-        Some(
-            tcgetattr(&stdin_fd)
-                .map_err(|e| Error::Other(format!("tcgetattr failed: {e}")))?,
-        )
+        Some(tcgetattr(&stdin_fd).map_err(|e| Error::Other(format!("tcgetattr failed: {e}")))?)
     } else {
         None
     };
@@ -129,20 +126,15 @@ fn interactive_session(pty_master: OwnedFd) -> Result<i32> {
 
     // Thread 1: stdin → PTY master (forward keystrokes to container)
     let _stdin_handle = std::thread::spawn(move || {
+        // SAFETY: master_raw is a valid fd kept alive by pty_master in the main thread.
+        let master_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(master_raw) };
         let mut stdin = std::io::stdin().lock();
         let mut buf = [0u8; 4096];
         loop {
             match stdin.read(&mut buf) {
-                Ok(0) => break,   // EOF
+                Ok(0) => break, // EOF
                 Ok(n) => {
-                    let written = unsafe {
-                        libc::write(
-                            master_raw,
-                            buf.as_ptr() as *const libc::c_void,
-                            n,
-                        )
-                    };
-                    if written <= 0 {
+                    if nix::unistd::write(master_fd, &buf[..n]).is_err() {
                         break;
                     }
                 }
@@ -156,24 +148,16 @@ fn interactive_session(pty_master: OwnedFd) -> Result<i32> {
     let mut stdout = std::io::stdout().lock();
     let mut buf = [0u8; 4096];
     loop {
-        let n = unsafe {
-            libc::read(
-                pty_master.as_raw_fd(),
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-            )
-        };
-
-        if n <= 0 {
-            // EOF or error — container closed the PTY
-            break;
-        }
-
-        if stdout.write_all(&buf[..n as usize]).is_err() {
-            break;
-        }
-        if stdout.flush().is_err() {
-            break;
+        match nix::unistd::read(&pty_master, &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if stdout.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+                if stdout.flush().is_err() {
+                    break;
+                }
+            }
         }
     }
 
@@ -197,11 +181,7 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         if let Some(ref orig) = self.original {
             let stdin = std::io::stdin();
-            let _ = nix::sys::termios::tcsetattr(
-                &stdin,
-                nix::sys::termios::SetArg::TCSANOW,
-                orig,
-            );
+            let _ = nix::sys::termios::tcsetattr(&stdin, nix::sys::termios::SetArg::TCSANOW, orig);
         }
     }
 }

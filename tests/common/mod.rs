@@ -13,7 +13,7 @@ use std::time::Duration;
 /// Check if the current user has root privileges.
 #[allow(dead_code)]
 pub fn is_root() -> bool {
-    unsafe { libc::geteuid() == 0 }
+    nix::unistd::geteuid().is_root()
 }
 
 /// Check if unprivileged user namespaces are available.

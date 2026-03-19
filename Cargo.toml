@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Syscall wrappers
-nix = { version = "0.30", features = ["sched", "mount", "signal", "hostname", "user", "process", "fs", "net", "ioctl", "event", "term", "ptrace"] }
+nix = { version = "0.31", features = ["sched", "mount", "signal", "hostname", "user", "process", "fs", "net", "ioctl", "event", "term", "ptrace"] }
 libc = "0.2"
 
 # Error handling

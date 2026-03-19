@@ -58,8 +58,8 @@ pub fn setup_user_namespace(
 /// When running as non-root: maps container uid 0 to the current uid,
 /// plus any subordinate ranges from /etc/subuid.
 pub fn build_id_mappings() -> Result<(Vec<IdMapping>, Vec<IdMapping>)> {
-    let uid = unsafe { libc::getuid() };
-    let gid = unsafe { libc::getgid() };
+    let uid = nix::unistd::getuid().as_raw();
+    let gid = nix::unistd::getgid().as_raw();
     let username = subid::current_username().unwrap_or_else(|| uid.to_string());
 
     let uid_ranges = subid::read_subuid(&username, uid);

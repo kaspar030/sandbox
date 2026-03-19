@@ -14,19 +14,16 @@
 /// - Exits with the child's exit code
 pub fn run_init(command: &[String]) -> ! {
     // Set up signal forwarding
-    let child_pid = match unsafe { libc::fork() } {
-        -1 => {
-            eprintln!(
-                "sandbox-init: fork failed: {}",
-                std::io::Error::last_os_error()
-            );
-            std::process::exit(1);
-        }
-        0 => {
+    let child_pid = match unsafe { nix::unistd::fork() } {
+        Ok(nix::unistd::ForkResult::Child) => {
             // Child: exec the actual command
             exec_command(command);
         }
-        pid => pid,
+        Ok(nix::unistd::ForkResult::Parent { child }) => child.as_raw(),
+        Err(e) => {
+            eprintln!("sandbox-init: fork failed: {e}");
+            std::process::exit(1);
+        }
     };
 
     // Parent: PID 1 init process
@@ -34,34 +31,29 @@ pub fn run_init(command: &[String]) -> ! {
     setup_signal_forwarding(child_pid);
 
     // Main loop: wait for children
-    loop {
-        let mut status: i32 = 0;
-        let waited = unsafe { libc::waitpid(-1, &mut status, 0) };
+    use nix::sys::wait::{waitpid, WaitStatus};
 
-        if waited < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::ECHILD) {
-                // No more children — our main child must have exited
-                // This shouldn't happen if we're properly tracking, but exit cleanly
+    let child = nix::unistd::Pid::from_raw(child_pid);
+
+    loop {
+        // Wait for any child (pid -1)
+        match waitpid(None, None) {
+            Ok(WaitStatus::Exited(pid, code)) if pid == child => {
+                std::process::exit(code);
+            }
+            Ok(WaitStatus::Signaled(pid, sig, _)) if pid == child => {
+                std::process::exit(128 + sig as i32);
+            }
+            Ok(_) => {
+                // Some other child (zombie) was reaped — continue waiting
+            }
+            Err(nix::Error::ECHILD) => {
+                // No more children
                 std::process::exit(0);
             }
-            // EINTR is expected when signals arrive
-            continue;
+            Err(nix::Error::EINTR) => continue,
+            Err(_) => continue,
         }
-
-        if waited == child_pid {
-            // Our main child exited
-            let exit_code = if libc::WIFEXITED(status) {
-                libc::WEXITSTATUS(status)
-            } else if libc::WIFSIGNALED(status) {
-                128 + libc::WTERMSIG(status)
-            } else {
-                1
-            };
-            std::process::exit(exit_code);
-        }
-
-        // Some other child (zombie) was reaped — continue waiting
     }
 }
 
@@ -111,20 +103,9 @@ fn exec_command(command: &[String]) -> ! {
         .iter()
         .map(|a| std::ffi::CString::new(a.as_str()).unwrap())
         .collect();
-    let c_arg_ptrs: Vec<*const libc::c_char> = c_args
-        .iter()
-        .map(|a| a.as_ptr())
-        .chain(std::iter::once(std::ptr::null()))
-        .collect();
 
-    unsafe {
-        libc::execvp(c_program.as_ptr(), c_arg_ptrs.as_ptr());
-    }
-
-    // If execvp returns, it failed
-    eprintln!(
-        "sandbox-init: exec failed: {}",
-        std::io::Error::last_os_error()
-    );
+    // nix::unistd::execvp only returns on error
+    let err = nix::unistd::execvp(&c_program, &c_args).unwrap_err();
+    eprintln!("sandbox-init: exec failed: {err}");
     std::process::exit(1);
 }

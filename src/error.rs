@@ -8,7 +8,7 @@ pub enum Error {
     Clone3(std::io::Error),
 
     #[error("eventfd failed: {0}")]
-    EventFd(std::io::Error),
+    EventFd(nix::Error),
 
     #[error("mount failed on {path}: {source}")]
     Mount {
@@ -35,7 +35,7 @@ pub enum Error {
     Kill(nix::Error),
 
     #[error("exec failed: {0}")]
-    Exec(std::io::Error),
+    Exec(nix::Error),
 
     #[error("prctl failed: {0}")]
     Prctl(nix::Error),

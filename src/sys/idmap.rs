@@ -152,11 +152,11 @@ pub fn create_idmap_userns(
         None => {
             // === CHILD ===
             // Set parent-death signal so we're killed if parent dies
-            unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
+            let _ = nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL);
             // Just sleep until killed — we're only here so the parent can
             // open our /proc/<pid>/ns/user
             loop {
-                unsafe { libc::pause() };
+                nix::unistd::pause();
             }
         }
         Some(clone3::CloneResult {
@@ -177,10 +177,9 @@ pub fn create_idmap_userns(
             })();
 
             // Kill the child regardless of success/failure
-            unsafe {
-                libc::kill(child_pid, libc::SIGKILL);
-                libc::waitpid(child_pid, std::ptr::null_mut(), 0);
-            }
+            let child = nix::unistd::Pid::from_raw(child_pid);
+            let _ = nix::sys::signal::kill(child, nix::sys::signal::Signal::SIGKILL);
+            let _ = nix::sys::wait::waitpid(child, None);
 
             setup_result
         }

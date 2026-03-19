@@ -10,7 +10,7 @@ pub mod pids;
 use crate::error::{Error, Result};
 use crate::protocol::CgroupSpec;
 use std::fs;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
@@ -82,24 +82,18 @@ impl Cgroup {
 
     /// Open the cgroup directory as an fd for CLONE_INTO_CGROUP.
     pub fn open_fd(&self) -> Result<OwnedFd> {
-        let fd = unsafe {
-            libc::open(
-                std::ffi::CString::new(self.path.to_str().unwrap_or(""))
-                    .map_err(|e| Error::Cgroup {
-                        path: self.path.clone(),
-                        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, e),
-                    })?
-                    .as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(Error::Cgroup {
-                path: self.path.clone(),
-                source: std::io::Error::last_os_error(),
-            });
-        }
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        use nix::fcntl::OFlag;
+        use nix::sys::stat::Mode;
+
+        nix::fcntl::open(
+            &self.path,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| Error::Cgroup {
+            path: self.path.clone(),
+            source: e.into(),
+        })
     }
 
     /// Get the cgroup path.

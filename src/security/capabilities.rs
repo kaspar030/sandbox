@@ -87,17 +87,13 @@ pub fn drop_capabilities(spec: &CapabilitySpec) -> Result<()> {
         .collect();
 
     // Set no_new_privs first — this prevents gaining capabilities through exec
-    let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
-    if ret != 0 {
-        return Err(Error::Prctl(nix::Error::last()));
-    }
+    nix::sys::prctl::set_no_new_privs().map_err(Error::Prctl)?;
 
     // Drop capabilities from the bounding set
     for &(cap_num, _) in ALL_CAPS {
         if !keep_set.contains(&cap_num) {
-            let ret = unsafe { libc::prctl(libc::PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0, 0) };
-            // Ignore errors on ambient clear (might not be supported)
-            let _ = ret;
+            // Clear ambient capabilities (ignore errors — might not be supported)
+            let _ = unsafe { libc::prctl(libc::PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0, 0) };
 
             let ret = unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap_num as u64, 0, 0, 0) };
             if ret != 0 {
