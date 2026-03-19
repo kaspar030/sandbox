@@ -52,7 +52,6 @@ pub fn setup_container_network(
 }
 
 /// Bring up the loopback interface inside the current network namespace.
-#[allow(dead_code)]
 pub fn bring_up_loopback() -> Result<()> {
     let mut sock = netlink::NetlinkSocket::new()?;
     let lo_index = sock.get_link_index("lo")?;

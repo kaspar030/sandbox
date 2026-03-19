@@ -13,7 +13,6 @@ pub struct State {
     current: ContainerState,
 }
 
-#[allow(dead_code)]
 impl State {
     pub fn new() -> Self {
         Self {

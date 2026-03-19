@@ -29,7 +29,6 @@ pub fn add_to_bridge(bridge_name: &str, iface_name: &str) -> Result<()> {
 }
 
 /// Remove (delete) a bridge interface.
-#[allow(dead_code)]
 pub fn delete_bridge(name: &str) -> Result<()> {
     let mut sock = NetlinkSocket::new()?;
     sock.delete_link(name)

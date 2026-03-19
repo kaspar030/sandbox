@@ -9,7 +9,6 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 // Netlink message types (from linux/rtnetlink.h)
 const RTM_NEWLINK: u16 = 16;
 const RTM_DELLINK: u16 = 17;
-#[allow(dead_code)]
 const RTM_GETLINK: u16 = 18;
 const RTM_NEWADDR: u16 = 20;
 const RTM_NEWROUTE: u16 = 24;
@@ -31,7 +30,6 @@ const IFLA_NET_NS_PID: u16 = 19;
 const IFLA_LINKINFO: u16 = 18;
 const IFLA_INFO_KIND: u16 = 1;
 const IFLA_INFO_DATA: u16 = 2;
-#[allow(dead_code)]
 const IFLA_LINK: u16 = 5;
 const IFLA_MASTER: u16 = 10;
 

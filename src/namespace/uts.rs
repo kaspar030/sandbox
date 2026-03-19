@@ -8,7 +8,6 @@ pub fn set_hostname(hostname: &str) -> Result<()> {
 }
 
 /// Set the domainname inside the UTS namespace.
-#[allow(dead_code)]
 pub fn set_domainname(domainname: &str) -> Result<()> {
     // setdomainname is not wrapped by nix, use libc directly
     let ret = unsafe {

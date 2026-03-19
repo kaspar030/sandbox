@@ -7,12 +7,10 @@ use std::net::Ipv4Addr;
 
 /// Builder for constructing a `ContainerSpec`.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ContainerBuilder {
     spec: ContainerSpec,
 }
 
-#[allow(dead_code)]
 impl ContainerBuilder {
     pub fn new(name: impl Into<String>, rootfs: impl Into<String>) -> Self {
         let mut spec = ContainerSpec::default();

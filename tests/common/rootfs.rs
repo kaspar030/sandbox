@@ -12,21 +12,14 @@ use std::sync::Once;
 const BUSYBOX_URL: &str =
     "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox";
 
-// SHA256 of the busybox 1.35.0 x86_64 musl static binary
-// We verify this to ensure reproducibility and prevent supply chain attacks.
-// If this hash doesn't match, we skip hash verification but warn about it.
-const BUSYBOX_EXPECTED_SHA256: &str =
-    ""; // Will be populated on first download
-
 static INIT_ROOTFS: Once = Once::new();
 
 /// Get the path to the cached base rootfs directory.
 /// Downloads busybox on first call, then reuses the cache.
 fn base_rootfs_dir() -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
-        .join("test-rootfs");
-    dir
+        .join("test-rootfs")
 }
 
 /// Ensure the base rootfs exists (download busybox if needed).
@@ -80,7 +73,6 @@ pub fn ensure_base_rootfs() -> PathBuf {
 /// Download busybox binary.
 fn download_busybox(target: &Path) {
     // Try using ureq (already a dev-dependency)
-    // If that fails, try curl
     match download_with_ureq(target) {
         Ok(()) => return,
         Err(e) => {
@@ -160,6 +152,7 @@ impl TempRootfs {
     }
 
     /// Write a file inside the rootfs.
+    #[allow(dead_code)]
     pub fn write_file(&self, relative_path: &str, content: &str) {
         let path = self.dir.path().join(relative_path.trim_start_matches('/'));
         if let Some(parent) = path.parent() {
@@ -171,12 +164,14 @@ impl TempRootfs {
     }
 
     /// Read a file from inside the rootfs.
+    #[allow(dead_code)]
     pub fn read_file(&self, relative_path: &str) -> Option<String> {
         let path = self.dir.path().join(relative_path.trim_start_matches('/'));
         fs::read_to_string(&path).ok()
     }
 
     /// Create a directory inside the rootfs.
+    #[allow(dead_code)]
     pub fn mkdir(&self, relative_path: &str) {
         let path = self.dir.path().join(relative_path.trim_start_matches('/'));
         fs::create_dir_all(&path).unwrap();

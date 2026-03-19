@@ -18,7 +18,6 @@ pub struct EventFd {
     fd: OwnedFd,
 }
 
-#[allow(dead_code)]
 impl EventFd {
     /// Create a new eventfd with initial value 0.
     pub fn new() -> Result<Self> {

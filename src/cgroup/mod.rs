@@ -17,7 +17,6 @@ const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const SANDBOX_CGROUP_PREFIX: &str = "sandbox";
 
 /// Manages a cgroup for a container.
-#[allow(dead_code)]
 pub struct Cgroup {
     /// Full path to the cgroup directory.
     path: PathBuf,
@@ -25,7 +24,6 @@ pub struct Cgroup {
     name: String,
 }
 
-#[allow(dead_code)]
 impl Cgroup {
     /// Create a new cgroup for the given container.
     pub fn create(container_name: &str) -> Result<Self> {

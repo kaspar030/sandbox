@@ -40,7 +40,6 @@ pub fn setup_network(mode: &NetworkMode, child_pid: libc::pid_t) -> Result<()> {
 
 /// Bring up the loopback interface inside the container.
 /// Called from the child after entering the network namespace.
-#[allow(dead_code)]
 pub fn setup_loopback() -> Result<()> {
     crate::net::bring_up_loopback().map_err(|e| Error::NetworkSetup(format!("loopback: {e}")))
 }

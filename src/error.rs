@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 /// All errors that can occur in sandbox operations.
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum Error {
     // -- Syscall / OS errors --
     #[error("clone3 failed: {0}")]

@@ -2,6 +2,7 @@
 //!
 //! These tests verify the postcard wire format is correct.
 
+#[allow(dead_code)]
 mod common;
 
 use sandbox::protocol::*;

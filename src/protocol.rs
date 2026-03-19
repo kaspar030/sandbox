@@ -195,7 +195,6 @@ pub fn encode_message<T: Serialize>(msg: &T) -> crate::error::Result<Vec<u8>> {
 }
 
 /// Decode a length-prefixed message. Returns the message and remaining bytes.
-#[allow(dead_code)]
 pub fn decode_message<'a, T: Deserialize<'a>>(buf: &'a [u8]) -> crate::error::Result<(T, &'a [u8])> {
     if buf.len() < 4 {
         return Err(crate::error::Error::Protocol(

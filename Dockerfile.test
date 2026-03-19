@@ -1,0 +1,25 @@
+# Dockerfile for running privileged container tests.
+# Usage:
+#   docker build -f Dockerfile.test -t sandbox-test .
+#   docker run --privileged --rm sandbox-test
+
+FROM rust:1.85-slim-bookworm
+
+# Install dependencies needed for container operations
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    iproute2 \
+    iptables \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create working directory
+WORKDIR /build
+
+# Copy source
+COPY . .
+
+# Build everything (tests + binary)
+RUN cargo build --tests --release 2>&1
+
+# Run all tests (including privileged ones since we'll use --privileged)
+CMD ["cargo", "test", "--release", "--", "--include-ignored"]

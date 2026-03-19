@@ -11,11 +11,13 @@ use std::process::{Child, Command};
 use std::time::Duration;
 
 /// Check if the current user has root privileges.
+#[allow(dead_code)]
 pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
 /// Check if unprivileged user namespaces are available.
+#[allow(dead_code)]
 pub fn has_unprivileged_userns() -> bool {
     let path = "/proc/sys/kernel/unprivileged_userns_clone";
     if let Ok(content) = std::fs::read_to_string(path) {
@@ -30,6 +32,7 @@ pub fn has_unprivileged_userns() -> bool {
 }
 
 /// Skip test if not running as root.
+#[allow(dead_code)]
 pub fn require_root() {
     if !is_root() {
         eprintln!("SKIP: test requires root privileges");
@@ -38,6 +41,7 @@ pub fn require_root() {
 }
 
 /// Path to the sandbox binary (built by cargo).
+#[allow(dead_code)]
 pub fn sandbox_binary() -> PathBuf {
     // Find the binary in the target directory
     let mut path = std::env::current_exe().unwrap();
@@ -48,11 +52,13 @@ pub fn sandbox_binary() -> PathBuf {
 }
 
 /// A running daemon instance for testing.
+#[allow(dead_code)]
 pub struct TestDaemon {
     pub process: Child,
     pub socket_path: PathBuf,
 }
 
+#[allow(dead_code)]
 impl TestDaemon {
     /// Start a sandbox daemon on a temporary socket.
     pub fn start(socket_dir: &Path) -> Self {
