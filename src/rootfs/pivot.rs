@@ -18,7 +18,7 @@ use std::path::Path;
 ///
 /// This must be called from the child process after namespaces are configured
 /// and the parent has signaled via eventfd.
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, level = "debug")]
 pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()> {
     // Verify rootfs exists
     if !rootfs.exists() {

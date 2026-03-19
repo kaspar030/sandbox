@@ -72,7 +72,7 @@ pub fn create_idmap_userns(
 /// 4. Attaches at the target path (move_mount)
 ///
 /// The target directory must already exist.
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, level = "debug")]
 pub fn setup_idmapped_mount(
     source: &Path,
     target: &Path,

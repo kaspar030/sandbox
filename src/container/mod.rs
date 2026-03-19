@@ -97,7 +97,7 @@ impl Container {
     /// 4. clone3 with namespace flags + CLONE_PIDFD + CLONE_INTO_CGROUP
     /// 5. Parent: write uid/gid maps, set up network, signal child, close slave
     /// 6. Child: set up PTY slave, pivot_root, mount, apply security, exec
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, level = "debug")]
     pub fn start(&mut self) -> Result<()> {
         if !self.state.is_created() {
             return Err(Error::InvalidState {
@@ -199,7 +199,7 @@ impl Container {
     }
 
     /// Parent-side setup after clone3.
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, level = "debug")]
     fn parent_setup(
         &self,
         child_pid: libc::pid_t,
