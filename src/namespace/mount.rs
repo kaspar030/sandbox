@@ -88,8 +88,39 @@ pub fn setup_bind_mounts(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()>
     Ok(())
 }
 
+/// Device nodes to populate in /dev, with their host paths.
+pub const HOST_DEV_NODES: &[&str] = &[
+    "null", "zero", "full", "random", "urandom", "tty",
+];
+
+/// Open host device nodes before clone3 (while /dev is still accessible).
+/// Returns a list of (name, OwnedFd) pairs.
+pub fn open_host_devices() -> Result<Vec<(String, std::os::fd::OwnedFd)>> {
+    use std::os::fd::OwnedFd;
+    let mut fds = Vec::with_capacity(HOST_DEV_NODES.len());
+    for name in HOST_DEV_NODES {
+        let path = format!("/dev/{name}");
+        let fd = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| Error::Mount {
+                path: path.into(),
+                source: e,
+            })?;
+        fds.push((name.to_string(), OwnedFd::from(fd)));
+    }
+    Ok(fds)
+}
+
 /// Mount /dev with minimal device nodes.
-pub fn setup_dev(rootfs: &Path) -> Result<()> {
+///
+/// `dev_fds` are pre-opened host device fds (from `open_host_devices`).
+/// Device nodes are bind-mounted into the container via `/proc/self/fd/<N>`,
+/// which works inside user namespaces where mknod is blocked.
+pub fn setup_dev(rootfs: &Path, dev_fds: &[(String, std::os::fd::OwnedFd)]) -> Result<()> {
+    use std::os::fd::AsRawFd;
+
     let dev_path = rootfs.join("dev");
     std::fs::create_dir_all(&dev_path).map_err(|e| Error::Mount {
         path: dev_path.clone(),
@@ -109,54 +140,61 @@ pub fn setup_dev(rootfs: &Path) -> Result<()> {
         source: std::io::Error::from_raw_os_error(e as i32),
     })?;
 
-    // Create essential device nodes via mknod.
-    // Faster than bind-mounting from host (~1-5 μs vs ~10-50 μs per node)
-    // and avoids issues when rootfs overlaps with host paths.
-    //
-    // Well-known major/minor numbers (stable across Linux versions):
-    //   name      major  minor
-    let devices: &[(&str, u64, u64)] = &[
-        ("null",    1, 3),
-        ("zero",    1, 5),
-        ("full",    1, 7),
-        ("random",  1, 8),
-        ("urandom", 1, 9),
-        ("tty",     5, 0),
-    ];
-
-    for &(name, major, minor) in devices {
+    // Bind-mount device nodes from pre-opened host fds via /proc/self/fd/<N>.
+    // This works in user namespaces where mknod is blocked, because we're
+    // bind-mounting an existing device node rather than creating a new one.
+    for (name, fd) in dev_fds {
         let dev_node = dev_path.join(name);
-        let dev = nix::sys::stat::makedev(major, minor);
-        let mode = nix::sys::stat::Mode::from_bits_truncate(0o666);
-        let sflag = nix::sys::stat::SFlag::S_IFCHR;
+        let proc_fd_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
 
-        // mknod may fail in some user namespace configs — not fatal
-        match nix::sys::stat::mknod(&dev_node, sflag, mode, dev) {
-            Ok(()) => {}
-            Err(e) => {
-                tracing::warn!("mknod {name} failed: {e}, skipping");
-            }
-        }
+        // Create empty file to mount onto
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&dev_node)
+            .map_err(|e| Error::Mount {
+                path: dev_node.clone(),
+                source: e,
+            })?;
+
+        nix::mount::mount(
+            Some(proc_fd_path.as_str()),
+            &dev_node,
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>,
+        )
+        .map_err(|e| Error::Mount {
+            path: dev_node,
+            source: std::io::Error::from_raw_os_error(e as i32),
+        })?;
     }
 
-    // Create /dev/pts
+    // Create /dev/pts — use newinstance for user namespace compatibility.
+    // Non-fatal if it fails (some user namespace configs block devpts).
     let pts_path = dev_path.join("pts");
     std::fs::create_dir_all(&pts_path).map_err(|e| Error::Mount {
         path: pts_path.clone(),
         source: e,
     })?;
 
-    nix::mount::mount(
+    match nix::mount::mount(
         Some("devpts"),
         &pts_path,
         Some("devpts"),
         MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
         Some("newinstance,ptmxmode=0666,mode=620"),
-    )
-    .map_err(|e| Error::Mount {
-        path: pts_path,
-        source: std::io::Error::from_raw_os_error(e as i32),
-    })?;
+    ) {
+        Ok(()) => {
+            // Create /dev/ptmx symlink to /dev/pts/ptmx
+            let ptmx = dev_path.join("ptmx");
+            let _ = std::os::unix::fs::symlink("pts/ptmx", &ptmx);
+        }
+        Err(e) => {
+            tracing::warn!("devpts mount failed (expected in some user namespace configs): {e}");
+        }
+    }
 
     // Create /dev/shm
     let shm_path = dev_path.join("shm");
