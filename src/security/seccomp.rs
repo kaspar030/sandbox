@@ -5,7 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::protocol::SeccompMode;
-use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetArch};
+use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch};
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
@@ -31,11 +31,13 @@ pub fn apply_seccomp(mode: &SeccompMode) -> Result<()> {
 /// Build the default deny-by-default seccomp filter.
 /// Allows a curated set of ~260 common syscalls needed for typical workloads.
 fn build_default_filter() -> std::result::Result<BpfProgram, seccompiler::Error> {
-    let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
+    let mut rules: BTreeMap<i64, Vec<seccompiler::SeccompRule>> = BTreeMap::new();
 
-    // Allow all these syscalls unconditionally
+    // Allow all these syscalls unconditionally.
+    // An empty Vec<SeccompRule> means "allow with no argument filtering" —
+    // this is the seccompiler API's intended way to express unconditional allow.
     for &syscall in ALLOWED_SYSCALLS {
-        rules.insert(syscall, vec![SeccompRule::new(vec![])?]);
+        rules.insert(syscall, vec![]);
     }
 
     let filter = SeccompFilter::new(
