@@ -275,6 +275,27 @@ enum ImageAction {
         /// Storage pool (default: main)
         #[arg(long)]
         pool: Option<String>,
+
+        /// Show image sizes (slower — walks directory tree)
+        #[arg(long)]
+        size: bool,
+
+        /// Show exclusive size on btrfs (requires btrfs quotas enabled)
+        #[arg(long)]
+        exclusive: bool,
+
+        /// Show layer tree for each image
+        #[arg(long)]
+        layers: bool,
+    },
+    /// Show detailed image information
+    Inspect {
+        /// Image name
+        name: String,
+
+        /// Storage pool (default: main)
+        #[arg(long)]
+        pool: Option<String>,
     },
     /// Remove an image
     Rm {
@@ -587,19 +608,34 @@ fn main() -> anyhow::Result<()> {
                     let resp = client.request(&Request::ImageImport { name, source, pool })?;
                     print_response(&resp);
                 }
-                ImageAction::List { pool } => {
-                    let resp = client.request(&Request::ImageList { pool })?;
+                ImageAction::List {
+                    pool,
+                    size,
+                    exclusive,
+                    layers,
+                } => {
+                    let resp = client.request(&Request::ImageList {
+                        pool,
+                        show_size: size,
+                        show_exclusive: exclusive,
+                        show_layers: layers,
+                    })?;
                     match &resp {
                         Response::ImageList(images) => {
                             if images.is_empty() {
                                 println!("No images");
                             } else {
-                                println!("{:<20} {:<10} {:<15}", "NAME", "POOL", "SIZE");
-                                for img in images {
-                                    let size = format_size(img.size_bytes);
-                                    println!("{:<20} {:<10} {:<15}", img.name, img.pool, size);
-                                }
+                                print_image_list(images, size, exclusive);
                             }
+                        }
+                        _ => print_response(&resp),
+                    }
+                }
+                ImageAction::Inspect { name, pool } => {
+                    let resp = client.request(&Request::ImageInspect { name, pool })?;
+                    match &resp {
+                        Response::ImageInspect(detail) => {
+                            print_image_inspect(detail);
                         }
                         _ => print_response(&resp),
                     }
@@ -708,6 +744,7 @@ fn print_response(resp: &Response) {
         Response::ExecExited { exit_code } => println!("Exec exited with code {exit_code}"),
         Response::ImagePulled { name } => println!("Pulled image: {name}"),
         Response::Snapshotted { image_name } => println!("Snapshotted as image: {image_name}"),
+        Response::ImageInspect(detail) => print_image_inspect(detail),
         Response::MountAdded { target } => println!("Mount added: {target}"),
         Response::MountRemoved { target } => println!("Mount removed: {target}"),
         Response::MountList(mounts) => {
@@ -1008,6 +1045,119 @@ fn interactive_session(pty_master: std::os::fd::OwnedFd) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_image_list(images: &[sandbox_proto::ImageInfo], show_size: bool, show_exclusive: bool) {
+    // Header
+    let mut header = format!("{:<25} {:<8} ", "NAME", "POOL");
+    if show_size {
+        header += &format!("{:<12} ", "SIZE");
+    }
+    if show_exclusive {
+        header += &format!("{:<12} ", "EXCLUSIVE");
+    }
+    header += &format!("{:<8} {}", "LAYERS", "SOURCE");
+    println!("{header}");
+
+    for img in images {
+        // Image row
+        let mut row = format!("{:<25} {:<8} ", img.name, img.pool);
+        if show_size {
+            let size = img
+                .size_bytes
+                .map(format_size)
+                .unwrap_or_else(|| "-".to_string());
+            row += &format!("{:<12} ", size);
+        }
+        if show_exclusive {
+            let excl = img
+                .exclusive_bytes
+                .map(format_size)
+                .unwrap_or_else(|| "N/A".to_string());
+            row += &format!("{:<12} ", excl);
+        }
+        row += &format!("{:<8} {}", img.layer_count, img.source);
+        println!("{row}");
+
+        // Layer tree (if --layers)
+        if !img.layers.is_empty() {
+            let last_idx = img.layers.len() - 1;
+            for (i, layer) in img.layers.iter().enumerate() {
+                let connector = if i == last_idx {
+                    "└── "
+                } else {
+                    "├── "
+                };
+                let short_id = if layer.chain_id.len() > 19 {
+                    &layer.chain_id[..19]
+                } else {
+                    &layer.chain_id
+                };
+
+                let mut line = format!("{connector}{short_id}");
+
+                if show_size {
+                    if let Some(size) = layer.size_bytes {
+                        line += &format!("  {}", format_size(size));
+                    }
+                }
+
+                if !layer.shared_with.is_empty() {
+                    line += &format!("  (shared with: {})", layer.shared_with.join(", "));
+                }
+
+                println!("{line}");
+            }
+            println!();
+        }
+    }
+}
+
+fn print_image_inspect(detail: &sandbox_proto::ImageDetail) {
+    println!("Name: {}", detail.name);
+    println!("Source: {}", detail.source);
+    println!("Pool: {}", detail.pool);
+    println!("Size: {}", format_size(detail.size_bytes));
+    println!("Reference: {}", detail.reference);
+    println!("Config:");
+    if detail.config.entrypoint.is_empty() {
+        println!("  Entrypoint: []");
+    } else {
+        println!("  Entrypoint: {:?}", detail.config.entrypoint);
+    }
+    if detail.config.cmd.is_empty() {
+        println!("  Cmd: []");
+    } else {
+        println!("  Cmd: {:?}", detail.config.cmd);
+    }
+    if detail.config.env.is_empty() {
+        println!("  Env: []");
+    } else {
+        println!("  Env:");
+        for e in &detail.config.env {
+            println!("    {e}");
+        }
+    }
+    println!("  WorkingDir: {}", detail.config.working_dir);
+    println!("Layers: {}", detail.layers.len());
+    let last_idx = detail.layers.len().saturating_sub(1);
+    for (i, layer) in detail.layers.iter().enumerate() {
+        let connector = if i == last_idx {
+            "└── "
+        } else {
+            "├── "
+        };
+        let short_id = if layer.chain_id.len() > 19 {
+            &layer.chain_id[..19]
+        } else {
+            &layer.chain_id
+        };
+        let mut line = format!("{connector}{short_id}  {}", format_size(layer.size_bytes));
+        if !layer.shared_with.is_empty() {
+            line += &format!("  (shared with: {})", layer.shared_with.join(", "));
+        }
+        println!("{line}");
+    }
 }
 
 fn format_size(bytes: u64) -> String {

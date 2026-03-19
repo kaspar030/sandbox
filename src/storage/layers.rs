@@ -115,6 +115,23 @@ fn safe_name(s: &str) -> String {
     s.replace([':', '/'], "_")
 }
 
+/// Public wrapper for safe_name (used by image.rs for layer path resolution).
+pub fn safe_name_pub(s: &str) -> String {
+    safe_name(s)
+}
+
+/// Get the list of other images sharing a layer (excluding the given image).
+pub fn layer_shared_with(pool: &StoragePool, chain_id: &str, exclude_image: &str) -> Vec<String> {
+    load_layer_meta(pool, chain_id)
+        .map(|meta| {
+            meta.images
+                .into_iter()
+                .filter(|name| name != exclude_image)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 // --- Chain ID computation ---
 
 /// Compute OCI chain IDs from diff_ids.

@@ -76,12 +76,54 @@ impl Default for ContainerSpec {
     }
 }
 
-/// Information about a stored image.
+/// Information about a stored image (for list view).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageInfo {
     pub name: String,
     pub pool: String,
+    pub size_bytes: Option<u64>,
+    pub exclusive_bytes: Option<u64>,
+    pub layer_count: u32,
+    pub source: String,
+    pub layers: Vec<LayerSummary>,
+}
+
+/// Summary of a layer (for list --layers view).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerSummary {
+    pub chain_id: String,
+    pub size_bytes: Option<u64>,
+    pub shared_with: Vec<String>,
+}
+
+/// Detailed image information (for inspect view).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageDetail {
+    pub name: String,
+    pub pool: String,
     pub size_bytes: u64,
+    pub source: String,
+    pub reference: String,
+    pub config: ImageConfigDetail,
+    pub layers: Vec<LayerDetailInfo>,
+}
+
+/// Layer detail for inspect view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerDetailInfo {
+    pub chain_id: String,
+    pub diff_id: String,
+    pub size_bytes: u64,
+    pub shared_with: Vec<String>,
+}
+
+/// Image config for inspect view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageConfigDetail {
+    pub entrypoint: Vec<String>,
+    pub cmd: Vec<String>,
+    pub env: Vec<String>,
+    pub working_dir: String,
 }
 
 /// Information about a storage pool.
@@ -246,7 +288,14 @@ pub enum Request {
         pool: Option<String>,
     },
     /// List images.
-    ImageList { pool: Option<String> },
+    ImageList {
+        pool: Option<String>,
+        show_size: bool,
+        show_exclusive: bool,
+        show_layers: bool,
+    },
+    /// Inspect an image (detailed info).
+    ImageInspect { name: String, pool: Option<String> },
     /// Remove an image.
     ImageRemove { name: String, pool: Option<String> },
     /// Add a bind mount to a running container.
@@ -306,6 +355,8 @@ pub enum Response {
     ImagePulled { name: String },
     /// Image list.
     ImageList(Vec<ImageInfo>),
+    /// Image detail (inspect).
+    ImageInspect(ImageDetail),
     /// Image removed.
     ImageRemoved { name: String },
     /// Pool list.

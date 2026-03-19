@@ -182,4 +182,21 @@ impl Client {
             update,
         })
     }
+
+    /// Inspect an image (detailed info).
+    pub fn image_inspect(
+        &mut self,
+        name: &str,
+        pool: Option<&str>,
+    ) -> Result<sandbox_proto::ImageDetail> {
+        let resp = self.request(&Request::ImageInspect {
+            name: name.to_string(),
+            pool: pool.map(|s| s.to_string()),
+        })?;
+        match resp {
+            Response::ImageInspect(detail) => Ok(detail),
+            Response::Error { message } => Err(Error::Other(message)),
+            _ => Err(Error::Other("unexpected response".to_string())),
+        }
+    }
 }

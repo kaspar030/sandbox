@@ -7,7 +7,7 @@ use super::persist;
 use sandbox::container::Container;
 use sandbox::error::{Error, Result};
 use sandbox::namespace::user;
-use sandbox::protocol::{ContainerInfo, ContainerSpec, ImageInfo, PoolInfo, Request, Response};
+use sandbox::protocol::{ContainerInfo, ContainerSpec, PoolInfo, Request, Response};
 use sandbox::storage::fs_detect::FsType;
 use sandbox::storage::{self, StorageManager};
 use sandbox::sys::idmap;
@@ -286,6 +286,7 @@ impl ContainerManager {
 
     /// Initiate an async stop: send SIGTERM and return pid + pidfd.
     /// Returns Err(Response) if the container doesn't exist or isn't running.
+    #[allow(clippy::result_large_err)]
     pub fn initiate_stop(
         &mut self,
         name: &str,
@@ -438,7 +439,15 @@ impl ContainerManager {
                 name,
                 pool,
             } => self.handle_image_pull(&reference, name.as_deref(), pool.as_deref()),
-            Request::ImageList { pool } => self.handle_image_list(pool.as_deref()),
+            Request::ImageList {
+                pool,
+                show_size,
+                show_exclusive,
+                show_layers,
+            } => self.handle_image_list(pool.as_deref(), show_size, show_exclusive, show_layers),
+            Request::ImageInspect { name, pool } => {
+                self.handle_image_inspect(&name, pool.as_deref())
+            }
             Request::ImageRemove { name, pool } => self.handle_image_remove(&name, pool.as_deref()),
             Request::MountAdd {
                 name,
@@ -1117,7 +1126,13 @@ impl ContainerManager {
         }
     }
 
-    fn handle_image_list(&self, pool: Option<&str>) -> HandleResult {
+    fn handle_image_list(
+        &self,
+        pool: Option<&str>,
+        show_size: bool,
+        show_exclusive: bool,
+        show_layers: bool,
+    ) -> HandleResult {
         let pool = match self.storage.resolve_pool(pool) {
             Ok(p) => p,
             Err(e) => {
@@ -1127,20 +1142,28 @@ impl ContainerManager {
             }
         };
 
-        match storage::image::list_images(pool) {
-            Ok(images) => {
-                let infos: Vec<ImageInfo> = images
-                    .into_iter()
-                    .map(|i| ImageInfo {
-                        name: i.name,
-                        pool: i.pool,
-                        size_bytes: i.size_bytes,
-                    })
-                    .collect();
-                HandleResult::response_only(Response::ImageList(infos))
-            }
+        match storage::image::list_images(pool, show_size, show_exclusive, show_layers) {
+            Ok(images) => HandleResult::response_only(Response::ImageList(images)),
             Err(e) => HandleResult::response_only(Response::Error {
                 message: format!("failed to list images: {e}"),
+            }),
+        }
+    }
+
+    fn handle_image_inspect(&self, name: &str, pool: Option<&str>) -> HandleResult {
+        let pool = match self.storage.resolve_pool(pool) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
+
+        match storage::image::inspect_image(pool, name) {
+            Ok(detail) => HandleResult::response_only(Response::ImageInspect(detail)),
+            Err(e) => HandleResult::response_only(Response::Error {
+                message: format!("inspect failed: {e}"),
             }),
         }
     }
