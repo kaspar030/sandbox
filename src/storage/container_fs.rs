@@ -67,11 +67,19 @@ pub fn create_container_rootfs(
 /// On other filesystems: rm -rf.
 pub fn destroy_container_rootfs(pool: &StoragePool, container_name: &str) -> Result<()> {
     let container_path = pool.container_path(container_name);
+    destroy_container_rootfs_by_path(container_path, pool.fs_type.clone())
+}
+
+/// Destroy a container rootfs given its path and filesystem type.
+///
+/// Like [`destroy_container_rootfs`], but takes owned values so it can be
+/// moved into a background task for deferred cleanup.
+pub fn destroy_container_rootfs_by_path(container_path: PathBuf, fs_type: FsType) -> Result<()> {
     if !container_path.exists() {
         return Ok(());
     }
 
-    match pool.fs_type {
+    match fs_type {
         FsType::Btrfs => btrfs_subvolume_delete(&container_path)?,
         FsType::Bcachefs => bcachefs_subvolume_delete(&container_path)?,
         _ => {
