@@ -118,9 +118,26 @@ fn enter_container_ns(container_pid: i32) -> bool {
     }
     drop(ns_fd);
 
+    // Become container root. After setns(CLONE_NEWUSER), the process is uid 65534
+    // (overflow/nobody) because host uid 0 is not mapped in the container's user
+    // namespace. setresuid/setresgid to 0 makes us container root with full
+    // capabilities — this is what nsenter does internally.
+    if let Err(e) = nix::unistd::setresgid(0.into(), 0.into(), 0.into()) {
+        eprintln!("hot_mount: setresgid(0,0,0): {e}");
+        return false;
+    }
+    if let Err(e) = nix::unistd::setresuid(0.into(), 0.into(), 0.into()) {
+        eprintln!("hot_mount: setresuid(0,0,0): {e}");
+        return false;
+    }
+
     // chroot + chdir into the container's root
-    if nix::unistd::chroot("/").is_err() || std::env::set_current_dir("/").is_err() {
-        eprintln!("hot_mount: chroot/chdir failed");
+    if let Err(e) = nix::unistd::chroot("/") {
+        eprintln!("hot_mount: chroot(/): {e}");
+        return false;
+    }
+    if let Err(e) = std::env::set_current_dir("/") {
+        eprintln!("hot_mount: chdir(/): {e}");
         return false;
     }
 
@@ -137,19 +154,19 @@ fn child_do_mount(container_pid: i32, tree_raw: i32, target: &str, is_file: bool
     let target_path = Path::new(target);
     if is_file {
         if let Some(parent) = target_path.parent() {
-            if std::fs::create_dir_all(parent).is_err() {
-                eprintln!("hot_mount: mkdir -p {}: failed", parent.display());
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("hot_mount: mkdir -p {}: {e}", parent.display());
                 std::process::exit(1);
             }
         }
         if !target_path.exists() {
-            if std::fs::File::create(target_path).is_err() {
-                eprintln!("hot_mount: touch {target}: failed");
+            if let Err(e) = std::fs::File::create(target_path) {
+                eprintln!("hot_mount: touch {target}: {e}");
                 std::process::exit(1);
             }
         }
-    } else if std::fs::create_dir_all(target_path).is_err() {
-        eprintln!("hot_mount: mkdir -p {target}: failed");
+    } else if let Err(e) = std::fs::create_dir_all(target_path) {
+        eprintln!("hot_mount: mkdir -p {target}: {e}");
         std::process::exit(1);
     }
 
