@@ -285,6 +285,7 @@ fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("sandbox=info".parse().unwrap()),
         )
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .init();
 
     let cli = Cli::parse();

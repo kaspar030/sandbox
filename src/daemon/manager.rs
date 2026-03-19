@@ -347,6 +347,7 @@ impl ContainerManager {
     }
 
     /// Handle a container exit: reap the child, update state, clean up resources.
+    #[tracing::instrument(skip_all, fields(name = name))]
     pub fn handle_container_exit(&mut self, name: &str) -> i32 {
         let container = match self.containers.get_mut(name) {
             Some(c) => c,
@@ -452,6 +453,7 @@ impl ContainerManager {
     }
 
     /// Prepare a container's rootfs: copy from image, set up idmapped mount.
+    #[tracing::instrument(skip_all)]
     fn prepare_container_rootfs(&self, container: &mut Container) -> Result<()> {
         let pool = self.storage.resolve_pool(container.spec.pool.as_deref())?;
         let pool_name = pool.name.clone();
@@ -476,6 +478,7 @@ impl ContainerManager {
     ///
     /// Called during create (after rootfs copy) and on start if the mount
     /// was cleaned up (e.g., after daemon restart recovery).
+    #[tracing::instrument(skip_all)]
     fn ensure_idmap_mount(container: &mut Container) -> Result<()> {
         // Skip if already mounted
         if container.idmap_mount.is_some() {
@@ -519,6 +522,7 @@ impl ContainerManager {
 
     /// Apply image config (entrypoint, cmd, env, working_dir) to a ContainerSpec.
     /// Image defaults are used only if the user didn't provide overrides.
+    #[tracing::instrument(skip_all)]
     fn apply_image_config(&self, spec: &mut ContainerSpec) {
         let pool = match self.storage.resolve_pool(spec.pool.as_deref()) {
             Ok(p) => p,
@@ -568,6 +572,7 @@ impl ContainerManager {
         HandleResult::response_only(Response::Created { name })
     }
 
+    #[tracing::instrument(skip_all, fields(name = %spec.name))]
     fn handle_run(&mut self, mut spec: ContainerSpec) -> HandleResult {
         let name = spec.name.clone();
 

@@ -19,6 +19,7 @@ use std::process::Command;
 ///
 /// On btrfs/bcachefs: creates an instant CoW snapshot of the image subvolume.
 /// On other filesystems: copies with cp -a --reflink=auto.
+#[tracing::instrument(skip_all, fields(image = image_name, container = container_name))]
 pub fn create_container_rootfs(
     pool: &StoragePool,
     image_name: &str,
