@@ -625,7 +625,17 @@ fn build_spec(
         },
         network: network_mode,
         seccomp: seccomp_mode,
-        capabilities: CapabilitySpec { keep: cap_add },
+        capabilities: if cap_add.is_empty() {
+            CapabilitySpec::default()
+        } else {
+            let mut caps = CapabilitySpec::default();
+            for cap in cap_add {
+                if !caps.keep.contains(&cap) {
+                    caps.keep.push(cap);
+                }
+            }
+            caps
+        },
         bind_mounts,
         use_init: init,
         detach: false,
