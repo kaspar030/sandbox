@@ -230,6 +230,10 @@ impl Container {
     }
 
     fn child_setup_inner(&self, sync_fd: &EventFd, slave_raw: i32, master_raw: i32) -> Result<()> {
+        // Die if the daemon (our parent) crashes — ensures no orphan containers
+        nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL)
+            .map_err(|e| Error::Other(format!("set_pdeathsig failed: {e}")))?;
+
         // Wait for parent to finish uid_map / gid_map / network setup
         sync_fd.wait()?;
 

@@ -173,7 +173,12 @@ pub enum Request {
     /// List all containers.
     List,
     /// Execute a command in a running container's namespaces.
-    Exec { name: String, command: Vec<String> },
+    Exec {
+        name: String,
+        command: Vec<String>,
+        /// If true, run without PTY (fire-and-forget). Default: false (interactive).
+        detach: bool,
+    },
     /// Import an image from a path (directory or tar.gz).
     ImageImport {
         name: String,
@@ -215,6 +220,10 @@ pub enum Response {
     ImageRemoved { name: String },
     /// Pool list.
     PoolList(Vec<PoolInfo>),
+    /// Container exited (sent after PTY EOF on interactive run).
+    ContainerExited { exit_code: i32 },
+    /// Exec child exited (sent after PTY EOF on interactive exec).
+    ExecExited { exit_code: i32 },
     /// Error response.
     Error { message: String },
 }

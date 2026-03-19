@@ -6,6 +6,7 @@
 //! - SCM_RIGHTS for passing PTY fds to clients
 
 pub mod manager;
+pub mod persist;
 
 use sandbox::error::{Error, Result};
 use sandbox::protocol::{self, Request, Response};
@@ -32,6 +33,7 @@ pub fn run_daemon(socket_path: Option<&str>, foreground: bool, data_dir: Option<
         std::fs::create_dir_all(parent)?;
     }
     std::fs::create_dir_all(MOUNTS_DIR)?;
+    persist::ensure_state_dir().map_err(Error::Io)?;
 
     // Initialize storage manager
     let storage = StorageManager::init(Path::new(data_dir))?;
@@ -50,9 +52,12 @@ pub fn run_daemon(socket_path: Option<&str>, foreground: bool, data_dir: Option<
         tracing::info!("running in foreground");
     }
 
-    let mgr = Arc::new(smol::lock::Mutex::new(manager::ContainerManager::new(
-        Arc::clone(&storage),
-    )));
+    let mgr = manager::ContainerManager::new(Arc::clone(&storage));
+
+    // Recover from previous crash: clean up leftover containers, cgroups, mounts
+    mgr.recover_from_crash();
+
+    let mgr = Arc::new(smol::lock::Mutex::new(mgr));
 
     smol::block_on(async {
         loop {
@@ -70,8 +75,20 @@ pub fn run_daemon(socket_path: Option<&str>, foreground: bool, data_dir: Option<
                     tracing::error!("accept error: {e}");
                 }
             }
+
+            // Check if shutdown was requested
+            if mgr.lock().await.shutdown_requested {
+                tracing::info!("daemon shutting down");
+                break;
+            }
         }
-    })
+    });
+
+    // Clean up socket file
+    let _ = std::fs::remove_file(socket_path);
+    tracing::info!("daemon stopped");
+
+    Ok(())
 }
 
 /// Handle a single client connection.
@@ -104,34 +121,84 @@ async fn handle_client(
         tracing::debug!("sent PTY master fd to client");
     }
 
-    // If a container was started, spawn a background task to monitor its
-    // pidfd. When the pidfd becomes readable (child exited), we reap the
-    // child and update the container state. This uses smol's async epoll
-    // integration — no polling threads, no busy-waiting.
+    // Interactive container start: monitor pidfd and send exit code to client
     if let Response::Started { ref name, .. } = result.response {
         let name = name.clone();
-        let mgr = Arc::clone(&mgr);
-        smol::spawn(async move {
-            // Take the pidfd out of the container (so we can await it
-            // without holding the manager lock).
-            let pidfd = {
-                let mut m = mgr.lock().await;
-                m.take_pidfd(&name)
-            };
-            if let Some(pidfd) = pidfd {
-                if let Ok(async_fd) = Async::new(pidfd) {
-                    // Block until the child exits (pidfd becomes readable)
-                    let _ = async_fd.readable().await;
-                }
-                // Reap the child and update container state
-                let mut m = mgr.lock().await;
-                m.handle_container_exit(&name);
+        let has_pty = result.pty_master.is_some();
+        let mgr_clone = Arc::clone(&mgr);
+
+        // Take the pidfd out of the container
+        let pidfd = {
+            let mut m = mgr.lock().await;
+            m.take_pidfd(&name)
+        };
+
+        if let Some(pidfd) = pidfd {
+            if has_pty {
+                // Interactive mode: keep connection alive, send exit code after container exits
+                let exit_code = await_pidfd_and_reap(pidfd, &name, mgr_clone).await;
+                let _ = write_async_message(&mut stream, &Response::ContainerExited { exit_code }).await;
+            } else {
+                // Detached mode: monitor in background
+                smol::spawn(async move {
+                    let _ = await_pidfd_and_reap(pidfd, &name, mgr_clone).await;
+                })
+                .detach();
             }
-        })
-        .detach();
+        }
+    }
+
+    // Interactive exec: monitor exec pidfd and send exit code to client
+    if let Response::ExecStarted { pid } = result.response {
+        if let Some(exec_pidfd) = result.exec_pidfd {
+            let has_pty = result.pty_master.is_some();
+            if has_pty {
+                // Interactive exec: keep connection alive, send exit code
+                let exit_code = await_exec_pidfd(exec_pidfd, pid as i32).await;
+                let _ = write_async_message(&mut stream, &Response::ExecExited { exit_code }).await;
+            } else {
+                // Detached exec: just reap in background
+                smol::spawn(async move {
+                    let _ = await_exec_pidfd(exec_pidfd, pid as i32).await;
+                })
+                .detach();
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Wait for a container pidfd to become readable (child exited), then reap
+/// and update state. Returns the exit code.
+async fn await_pidfd_and_reap(
+    pidfd: std::os::fd::OwnedFd,
+    name: &str,
+    mgr: Arc<smol::lock::Mutex<manager::ContainerManager>>,
+) -> i32 {
+    if let Ok(async_fd) = Async::new(pidfd) {
+        let _ = async_fd.readable().await;
+    }
+    let mut m = mgr.lock().await;
+    m.handle_container_exit(name)
+}
+
+/// Wait for an exec child pidfd to become readable, then reap it.
+/// Returns the exit code.
+async fn await_exec_pidfd(pidfd: std::os::fd::OwnedFd, child_pid: i32) -> i32 {
+    if let Ok(async_fd) = Async::new(pidfd) {
+        let _ = async_fd.readable().await;
+    }
+    // Reap the specific exec child
+    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    match waitpid(
+        nix::unistd::Pid::from_raw(child_pid),
+        Some(WaitPidFlag::WNOHANG),
+    ) {
+        Ok(WaitStatus::Exited(_, code)) => code,
+        Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
+        _ => 1,
+    }
 }
 
 /// Read a length-prefixed postcard message from an async stream.

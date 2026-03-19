@@ -120,6 +120,7 @@ fn test_roundtrip_all_request_variants() {
         Request::Exec {
             name: "foo".to_string(),
             command: vec!["/bin/ls".to_string(), "-la".to_string()],
+            detach: false,
         },
         Request::Shutdown,
     ];

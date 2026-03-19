@@ -189,6 +189,10 @@ enum Commands {
         /// Container name
         name: String,
 
+        /// Run detached (no PTY, no interactive I/O)
+        #[arg(short, long)]
+        detach: bool,
+
         /// Command to execute
         #[arg(last = true)]
         command: Vec<String>,
@@ -393,10 +397,20 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Commands::Exec { name, command } => {
+        Commands::Exec { name, command, detach } => {
             let mut client = client::Client::connect(cli.socket.as_deref())?;
-            let resp = client.request(&Request::Exec { name, command })?;
-            print_response(&resp);
+            if detach {
+                let resp = client.request(&Request::Exec { name, command, detach: true })?;
+                print_response(&resp);
+            } else {
+                let (resp, exit_code) = client.request_interactive(&Request::Exec { name, command, detach: false })?;
+                if let Response::Error { .. } = &resp {
+                    print_response(&resp);
+                }
+                if let Some(code) = exit_code {
+                    std::process::exit(code);
+                }
+            }
         }
 
         Commands::Image { action } => {
@@ -472,6 +486,10 @@ fn print_response(resp: &Response) {
         Response::ContainerList(_) => {}
         Response::ImageList(_) => {}
         Response::PoolList(_) => {}
+        Response::ContainerExited { exit_code } => {
+            println!("Container exited with code {exit_code}")
+        }
+        Response::ExecExited { exit_code } => println!("Exec exited with code {exit_code}"),
         Response::Error { message } => eprintln!("Error: {message}"),
     }
 }

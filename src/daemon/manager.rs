@@ -3,6 +3,7 @@
 //! Tracks all containers, handles creation/start/stop/destroy requests,
 //! and monitors pidfds for container exit events.
 
+use super::persist;
 use sandbox::container::Container;
 use sandbox::error::{Error, Result};
 use sandbox::namespace::user;
@@ -23,6 +24,8 @@ const MOUNTS_DIR: &str = "/run/sandbox/mounts";
 pub struct HandleResult {
     pub response: Response,
     pub pty_master: Option<OwnedFd>,
+    /// Pidfd for an exec child (for monitoring + exit code delivery).
+    pub exec_pidfd: Option<OwnedFd>,
 }
 
 impl HandleResult {
@@ -30,6 +33,7 @@ impl HandleResult {
         Self {
             response,
             pty_master: None,
+            exec_pidfd: None,
         }
     }
 
@@ -37,6 +41,7 @@ impl HandleResult {
         Self {
             response,
             pty_master,
+            exec_pidfd: None,
         }
     }
 }
@@ -47,6 +52,8 @@ pub struct ContainerManager {
     storage: Arc<StorageManager>,
     /// Number of background rootfs deletions currently in flight.
     pending_cleanups: Arc<AtomicUsize>,
+    /// Set to true when a shutdown request has been received.
+    pub shutdown_requested: bool,
 }
 
 impl ContainerManager {
@@ -55,6 +62,119 @@ impl ContainerManager {
             containers: HashMap::new(),
             storage,
             pending_cleanups: Arc::new(AtomicUsize::new(0)),
+            shutdown_requested: false,
+        }
+    }
+
+    /// Recover from a previous daemon crash. Loads persisted state files,
+    /// kills any surviving containers (PDEATHSIG should have handled this,
+    /// but be defensive), and cleans up all leftover resources.
+    pub fn recover_from_crash(&self) {
+        let records = persist::load_all_states();
+        if records.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            "found {} persisted container state(s), cleaning up",
+            records.len()
+        );
+
+        for (name, record) in &records {
+            // Kill the container process if it somehow survived
+            if record.pid > 0 {
+                let pid = nix::unistd::Pid::from_raw(record.pid);
+                // Check if alive
+                if nix::sys::signal::kill(pid, None).is_ok() {
+                    tracing::info!("killing orphaned container process {name} (pid {})", record.pid);
+                    let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+                    let _ = nix::sys::wait::waitpid(pid, None);
+                }
+            }
+
+            // Clean up cgroup
+            if record.cgroup_path.exists() {
+                tracing::debug!("removing leftover cgroup {}", record.cgroup_path.display());
+                let _ = std::fs::remove_dir(&record.cgroup_path);
+            }
+
+            // Unmount and remove idmapped mount
+            if let Some(ref mount_path) = record.idmap_mount {
+                if mount_path.exists() {
+                    tracing::debug!("unmounting leftover idmap mount {}", mount_path.display());
+                    let _ = nix::mount::umount2(mount_path, nix::mount::MntFlags::MNT_DETACH);
+                    let _ = std::fs::remove_dir(mount_path);
+                }
+            }
+
+            // Delete rootfs for ephemeral containers; leave non-ephemeral intact
+            if record.ephemeral {
+                if let Some(ref rootfs_path) = record.rootfs_path {
+                    if let Some(ref pool_name) = record.pool_name {
+                        if let Some(pool) = self.storage.pool(pool_name) {
+                            let fs_type = pool.fs_type.clone();
+                            self.spawn_deferred_cleanup(
+                                rootfs_path.clone(),
+                                fs_type,
+                                name.clone(),
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Remove the state file
+            persist::remove_state(name);
+            tracing::info!("cleaned up leftover container {name}");
+        }
+
+        // Scan for orphaned cgroups not in any state file
+        let known_names: std::collections::HashSet<&str> =
+            records.iter().map(|(n, _)| n.as_str()).collect();
+        let cgroup_parent = std::path::Path::new("/sys/fs/cgroup/sandbox");
+        if let Ok(entries) = std::fs::read_dir(cgroup_parent) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !known_names.contains(name.as_ref()) && entry.path().is_dir() {
+                    tracing::debug!("removing orphaned cgroup /sys/fs/cgroup/sandbox/{name}");
+                    let _ = std::fs::remove_dir(entry.path());
+                }
+            }
+        }
+
+        // Scan for orphaned mounts
+        let mounts_dir = std::path::Path::new(MOUNTS_DIR);
+        if let Ok(entries) = std::fs::read_dir(mounts_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !known_names.contains(name.as_ref()) && entry.path().is_dir() {
+                    tracing::debug!("unmounting orphaned mount {}", entry.path().display());
+                    let _ = nix::mount::umount2(&entry.path(), nix::mount::MntFlags::MNT_DETACH);
+                    let _ = std::fs::remove_dir(entry.path());
+                }
+            }
+        }
+
+        // Scan for stale .cleanup-* directories in all pools
+        for pool in self.storage.list_pools() {
+            let fs_dir = pool.path.join("fs");
+            if let Ok(entries) = std::fs::read_dir(&fs_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with(".cleanup-") {
+                        tracing::debug!("finishing stale cleanup {}", entry.path().display());
+                        let fs_type = pool.fs_type.clone();
+                        self.spawn_deferred_cleanup(
+                            entry.path(),
+                            fs_type,
+                            name_str.to_string(),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -113,15 +233,35 @@ impl ContainerManager {
         self.containers.get_mut(name)?.pidfd.take()
     }
 
+    /// Persist a non-ephemeral container's state to disk.
+    fn persist_container(name: &str, container: &Container) {
+        if container.ephemeral {
+            return;
+        }
+        let record = persist::ContainerRecord {
+            spec: container.spec.clone(),
+            state: container.state.current().clone(),
+            pid: container.pid.unwrap_or(0),
+            cgroup_path: PathBuf::from("/sys/fs/cgroup/sandbox").join(name),
+            idmap_mount: container.idmap_mount.clone(),
+            rootfs_path: container.rootfs_path.clone(),
+            pool_name: container.pool_name.clone(),
+            ephemeral: container.ephemeral,
+        };
+        if let Err(e) = persist::save_state(name, &record) {
+            tracing::warn!("failed to persist state for {name}: {e}");
+        }
+    }
+
     /// Handle a container exit: reap the child, update state, clean up resources.
-    pub fn handle_container_exit(&mut self, name: &str) {
+    pub fn handle_container_exit(&mut self, name: &str) -> i32 {
         let container = match self.containers.get_mut(name) {
             Some(c) => c,
-            None => return,
+            None => return 1,
         };
 
         if !container.state.is_running() {
-            return;
+            return 1;
         }
 
         let exit_code = if let Some(pid) = container.pid {
@@ -138,6 +278,16 @@ impl ContainerManager {
         let _ = container.state.stop(exit_code);
         let is_ephemeral = container.ephemeral;
         tracing::info!("container {name} exited with code {exit_code}");
+
+        // Persist updated state (Stopped) for non-ephemeral containers
+        if !is_ephemeral {
+            if let Err(e) = persist::update_state(
+                name,
+                sandbox::protocol::ContainerState::Stopped { exit_code },
+            ) {
+                tracing::warn!("failed to persist exit state for {name}: {e}");
+            }
+        }
 
         // Clean up cgroup
         if let Some(ref cgroup) = container.cgroup {
@@ -161,6 +311,8 @@ impl ContainerManager {
             }
             tracing::info!("ephemeral container {name} auto-removed");
         }
+
+        exit_code
     }
 
     /// Handle a request and return a response + optional PTY fd.
@@ -172,7 +324,7 @@ impl ContainerManager {
             Request::Stop { name, timeout_secs } => self.handle_stop(&name, timeout_secs),
             Request::Destroy { name } => self.handle_destroy(&name),
             Request::List => self.handle_list(),
-            Request::Exec { name, command } => self.handle_exec(&name, command),
+            Request::Exec { name, command, detach } => self.handle_exec(&name, command, detach),
             Request::ImageImport { name, source, pool } => {
                 self.handle_image_import(&name, &source, pool.as_deref())
             }
@@ -191,6 +343,7 @@ impl ContainerManager {
                         "shutdown: {pending} background rootfs cleanup(s) still in progress"
                     );
                 }
+                self.shutdown_requested = true;
                 HandleResult::response_only(Response::Ok)
             }
         }
@@ -287,6 +440,7 @@ impl ContainerManager {
             Ok(()) => {
                 let pid = container.pid.unwrap_or(0) as u32;
                 let pty_master = container.take_pty_master();
+                Self::persist_container(&name, &container);
                 self.containers.insert(name.clone(), container);
                 HandleResult::with_pty(Response::Started { name, pid }, pty_master)
             }
@@ -329,6 +483,7 @@ impl ContainerManager {
             Ok(()) => {
                 let pid = container.pid.unwrap_or(0) as u32;
                 let pty_master = container.take_pty_master();
+                Self::persist_container(name, container);
                 HandleResult::with_pty(
                     Response::Started {
                         name: name.to_string(),
@@ -384,9 +539,12 @@ impl ContainerManager {
         }
 
         match container.destroy() {
-            Ok(()) => HandleResult::response_only(Response::Destroyed {
-                name: name.to_string(),
-            }),
+            Ok(()) => {
+                persist::remove_state(name);
+                HandleResult::response_only(Response::Destroyed {
+                    name: name.to_string(),
+                })
+            }
             Err(e) => {
                 self.containers.insert(name.to_string(), container);
                 HandleResult::response_only(Response::Error {
@@ -410,7 +568,7 @@ impl ContainerManager {
         HandleResult::response_only(Response::ContainerList(list))
     }
 
-    fn handle_exec(&mut self, name: &str, command: Vec<String>) -> HandleResult {
+    fn handle_exec(&mut self, name: &str, command: Vec<String>, detach: bool) -> HandleResult {
         let container = match self.containers.get(name) {
             Some(c) => c,
             None => {
@@ -435,10 +593,17 @@ impl ContainerManager {
             }
         };
 
-        match exec_in_container(pid, &command) {
-            Ok(child_pid) => HandleResult::response_only(Response::ExecStarted {
-                pid: child_pid as u32,
-            }),
+        match exec_in_container(pid, name, &command, detach) {
+            Ok(result) => {
+                let response = Response::ExecStarted {
+                    pid: result.pid as u32,
+                };
+                HandleResult {
+                    response,
+                    pty_master: result.pty_master,
+                    exec_pidfd: Some(result.pidfd),
+                }
+            }
             Err(e) => HandleResult::response_only(Response::Error {
                 message: format!("exec failed: {e}"),
             }),
@@ -531,8 +696,26 @@ impl ContainerManager {
     }
 }
 
+/// Result of exec_in_container.
+struct ExecResult {
+    pid: libc::pid_t,
+    pidfd: OwnedFd,
+    pty_master: Option<OwnedFd>,
+}
+
 /// Execute a command inside an existing container's namespaces.
-fn exec_in_container(container_pid: libc::pid_t, command: &[String]) -> Result<libc::pid_t> {
+///
+/// Forks a child that joins the container's namespaces, optionally sets up
+/// a PTY for interactive use, writes itself into the container's cgroup, and
+/// execs the command. Returns a pidfd for monitoring + optional PTY master.
+fn exec_in_container(
+    container_pid: libc::pid_t,
+    container_name: &str,
+    command: &[String],
+    detach: bool,
+) -> Result<ExecResult> {
+    use std::os::fd::FromRawFd;
+
     let namespaces = ["pid", "mnt", "net", "uts", "ipc", "user"];
 
     let mut ns_fds: Vec<(String, std::fs::File)> = Vec::new();
@@ -546,18 +729,74 @@ fn exec_in_container(container_pid: libc::pid_t, command: &[String]) -> Result<l
         }
     }
 
+    // Allocate PTY for interactive mode
+    let pty = if !detach {
+        Some(sandbox::sys::pty::allocate_pty()?)
+    } else {
+        None
+    };
+
+    // Cgroup path for the container
+    let cgroup_procs = format!("/sys/fs/cgroup/sandbox/{container_name}/cgroup.procs");
+
     match unsafe { nix::unistd::fork() } {
         Err(e) => {
             return Err(Error::Other(format!("fork failed: {e}")));
         }
         Ok(nix::unistd::ForkResult::Parent { child }) => {
-            return Ok(child.as_raw());
+            let child_pid = child.as_raw();
+
+            // Close slave end in parent
+            if let Some((master, _slave)) = pty {
+                // Open pidfd for the child
+                let pidfd_raw = unsafe { libc::syscall(libc::SYS_pidfd_open, child_pid, 0) };
+                if pidfd_raw < 0 {
+                    return Err(Error::Other(format!(
+                        "pidfd_open failed: {}",
+                        std::io::Error::last_os_error()
+                    )));
+                }
+                let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd_raw as i32) };
+
+                return Ok(ExecResult {
+                    pid: child_pid,
+                    pidfd,
+                    pty_master: Some(master),
+                });
+            } else {
+                // Detached mode — no PTY
+                let pidfd_raw = unsafe { libc::syscall(libc::SYS_pidfd_open, child_pid, 0) };
+                if pidfd_raw < 0 {
+                    return Err(Error::Other(format!(
+                        "pidfd_open failed: {}",
+                        std::io::Error::last_os_error()
+                    )));
+                }
+                let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd_raw as i32) };
+
+                return Ok(ExecResult {
+                    pid: child_pid,
+                    pidfd,
+                    pty_master: None,
+                });
+            }
         }
         Ok(nix::unistd::ForkResult::Child) => {}
     }
 
     // === CHILD ===
     {
+        // Die if daemon dies
+        let _ = nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL);
+
+        // Join the container's cgroup (must happen before setns into mnt namespace,
+        // since the host cgroupfs is not visible inside the container)
+        if let Err(e) = std::fs::write(&cgroup_procs, format!("{}", std::process::id())) {
+            eprintln!("failed to join cgroup: {e}");
+            // Non-fatal — continue without cgroup membership
+        }
+
+        // Join the container's namespaces
         for (ns_name, ns_fd) in &ns_fds {
             let flags = match ns_name.as_str() {
                 "pid" => nix::sched::CloneFlags::CLONE_NEWPID,
@@ -580,6 +819,16 @@ fn exec_in_container(container_pid: libc::pid_t, command: &[String]) -> Result<l
             std::process::exit(1);
         }
         let _ = std::env::set_current_dir("/");
+
+        // Set up PTY slave as stdin/stdout/stderr
+        if let Some((_master, slave)) = pty {
+            // Drop master in child
+            drop(_master);
+            if let Err(e) = sandbox::sys::pty::setup_slave_pty(&slave, -1) {
+                eprintln!("pty setup failed: {e}");
+                std::process::exit(1);
+            }
+        }
 
         if command.is_empty() {
             std::process::exit(1);

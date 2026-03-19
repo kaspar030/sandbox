@@ -66,7 +66,16 @@ impl Client {
             // Receive the PTY master fd via SCM_RIGHTS
             match scm_rights::recv_fd(&self.stream) {
                 Ok(pty_master) => {
-                    let exit_code = interactive_session(pty_master)?;
+                    // Run the interactive session (blocks until PTY EOF)
+                    let _ = interactive_session(pty_master)?;
+
+                    // Read the exit code from the daemon (sent after container/exec exits)
+                    let exit_msg: Response = protocol::read_message(&mut self.stream)?;
+                    let exit_code = match exit_msg {
+                        Response::ContainerExited { exit_code } => exit_code,
+                        Response::ExecExited { exit_code } => exit_code,
+                        _ => 0,
+                    };
                     return Ok((response, Some(exit_code)));
                 }
                 Err(e) => {
