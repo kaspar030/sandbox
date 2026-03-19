@@ -328,8 +328,16 @@ enum MountAction {
         /// Container name
         name: String,
 
-        /// Mount spec: SOURCE:TARGET[:ro]
+        /// Mount spec: SOURCE[:TARGET][:ro|:rw] or SOURCE::ro
         spec: String,
+
+        /// Mount read-only (overrides :ro/:rw in spec)
+        #[arg(long = "read-only", alias = "ro")]
+        read_only: bool,
+
+        /// Mount read-write (overrides :ro/:rw in spec)
+        #[arg(long = "read-write", alias = "rw")]
+        read_write: bool,
     },
     /// Remove a bind mount from a running container
     #[command(alias = "rm")]
@@ -662,8 +670,20 @@ fn main() -> anyhow::Result<()> {
         Commands::Mount { action } => {
             let mut client = Client::connect(cli.socket.as_deref())?;
             match action {
-                MountAction::Add { name, spec } => {
-                    let (source, target, readonly) = parse_mount_spec(&spec)?;
+                MountAction::Add {
+                    name,
+                    spec,
+                    read_only,
+                    read_write,
+                } => {
+                    let (source, target, mut readonly) = parse_mount_spec(&spec)?;
+                    // Flags override the spec
+                    if read_only {
+                        readonly = true;
+                    }
+                    if read_write {
+                        readonly = false;
+                    }
                     let resp = client.request(&Request::MountAdd {
                         name,
                         source,
@@ -913,15 +933,59 @@ fn parse_exec_user(s: &str) -> anyhow::Result<sandbox_proto::ExecUser> {
 }
 
 /// Parse a mount spec: "SOURCE:TARGET" or "SOURCE:TARGET:ro"
+/// Parse a mount spec with multiple supported formats:
+///
+///   /path                     → source=/path, target=/path, rw
+///   /path:ro                  → source=/path, target=/path, ro
+///   /path::ro                 → source=/path, target=/path, ro
+///   /source:/target           → source=/source, target=/target, rw
+///   /source:/target:ro        → source=/source, target=/target, ro
+///
+/// Source path is made absolute before parsing.
 fn parse_mount_spec(spec: &str) -> anyhow::Result<(String, String, bool)> {
     let parts: Vec<&str> = spec.splitn(3, ':').collect();
     match parts.len() {
-        2 => Ok((parts[0].to_string(), parts[1].to_string(), false)),
-        3 => {
-            let readonly = parts[2] == "ro";
-            Ok((parts[0].to_string(), parts[1].to_string(), readonly))
+        1 => {
+            // /path — source only, target = source
+            let source = make_absolute(parts[0]);
+            Ok((source.clone(), source, false))
         }
-        _ => anyhow::bail!("invalid mount spec: {spec} (expected SOURCE:TARGET[:ro])"),
+        2 => {
+            let source = make_absolute(parts[0]);
+            if parts[1].is_empty() || parts[1] == "ro" || parts[1] == "rw" {
+                // /path:ro or /path:rw or /path: (trailing colon)
+                let readonly = parts[1] == "ro";
+                Ok((source.clone(), source, readonly))
+            } else {
+                // /source:/target
+                Ok((source, parts[1].to_string(), false))
+            }
+        }
+        3 => {
+            let source = make_absolute(parts[0]);
+            if parts[1].is_empty() {
+                // /path::ro — double colon, no target, with flag
+                let readonly = parts[2] == "ro";
+                Ok((source.clone(), source, readonly))
+            } else {
+                // /source:/target:ro
+                let readonly = parts[2] == "ro";
+                Ok((source, parts[1].to_string(), readonly))
+            }
+        }
+        _ => anyhow::bail!("invalid mount spec: {spec}"),
+    }
+}
+
+/// Make a path absolute (resolve relative to cwd).
+fn make_absolute(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        path.to_string()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(p).to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string())
     }
 }
 
