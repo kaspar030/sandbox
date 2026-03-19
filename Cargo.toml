@@ -43,8 +43,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Signal handling (graceful daemon shutdown)
-signal-hook = "0.3"
-signal-hook-async-std = "0.2"
+signal-hook = "0.4"
+signal-hook-async-std = "0.4"
 
 # OCI registry pull
 ureq = { version = "2", features = ["json"] }
