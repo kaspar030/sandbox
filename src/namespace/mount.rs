@@ -93,13 +93,36 @@ const HOST_DEV_NODES: &[&str] = &[
     "null", "zero", "full", "random", "urandom", "tty",
 ];
 
+/// Create an empty file using raw libc (avoids Rust std::fs stat overhead
+/// which can trigger EOVERFLOW on some kernel/userns configurations).
+fn touch_file(path: &std::ffi::CStr) -> bool {
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if fd >= 0 {
+        unsafe { libc::close(fd) };
+        true
+    } else {
+        false
+    }
+}
+
+/// Create a directory using raw libc.
+fn mkdir_p(path: &std::ffi::CStr) {
+    unsafe { libc::mkdir(path.as_ptr(), 0o755) };
+}
+
 /// Mount /dev with minimal device nodes.
 ///
-/// Bind-mounts device nodes directly from host `/dev/<name>` paths.
+/// All operations are non-fatal — the container will start with whatever
+/// devices and filesystems succeed. This handles kernel/security configs
+/// that restrict tmpfs, mknod, or bind-mounts inside user namespaces.
+///
 /// This runs before `pivot_root`, so host paths are still accessible.
-/// The bind-mount preserves the source superblock (host devtmpfs, no
-/// `SB_I_NODEV`), so the devices remain functional inside the user
-/// namespace even though the target tmpfs has `SB_I_NODEV`.
 pub fn setup_dev(rootfs: &Path) -> Result<()> {
     let dev_path = rootfs.join("dev");
     std::fs::create_dir_all(&dev_path).map_err(|e| Error::Mount {
@@ -107,74 +130,58 @@ pub fn setup_dev(rootfs: &Path) -> Result<()> {
         source: e,
     })?;
 
-    // Mount tmpfs on /dev
-    nix::mount::mount(
+    // Try to mount tmpfs on /dev for a clean device directory.
+    // Non-fatal: some user namespace configs return EOVERFLOW.
+    let _tmpfs_ok = match nix::mount::mount(
         Some("tmpfs"),
         &dev_path,
         Some("tmpfs"),
         MsFlags::MS_NOSUID | MsFlags::MS_STRICTATIME,
         Some("mode=755,size=65536k"),
-    )
-    .map_err(|e| Error::Mount {
-        path: dev_path.clone(),
-        source: std::io::Error::from_raw_os_error(e as i32),
-    })?;
+    ) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("tmpfs mount on /dev failed: {e}, using rootfs /dev directly");
+            false
+        }
+    };
 
     // Bind-mount each device node from the host.
-    // Source is the host's /dev/<name> (on devtmpfs, init user namespace).
-    // Target is <rootfs>/dev/<name> (on our tmpfs).
-    // The bind mount preserves the source superblock, so the device works
-    // despite the target tmpfs having SB_I_NODEV.
+    // Uses raw libc for file creation and mounting to avoid Rust std::fs
+    // stat() calls that can trigger EOVERFLOW on certain kernels.
     for name in HOST_DEV_NODES {
         let dev_node = dev_path.join(name);
         let host_path = format!("/dev/{name}");
 
-        // Create empty file as bind-mount target
-        std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&dev_node)
-            .map_err(|e| Error::Mount {
-                path: dev_node.clone(),
-                source: e,
-            })?;
+        let c_src = match std::ffi::CString::new(host_path.as_str()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let c_dst = match std::ffi::CString::new(dev_node.as_os_str().as_encoded_bytes()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
 
-        // Use raw libc::mount to avoid any nix path conversion overhead
-        let c_src = std::ffi::CString::new(host_path.as_str())
-            .map_err(|e| Error::Other(format!("invalid device path: {e}")))?;
-        let c_dst = std::ffi::CString::new(dev_node.as_os_str().as_encoded_bytes())
-            .map_err(|e| Error::Other(format!("invalid device path: {e}")))?;
+        // Create empty target file using raw libc::open (no stat)
+        if !touch_file(&c_dst) {
+            tracing::warn!("create target /dev/{name}: {}", std::io::Error::last_os_error());
+            continue;
+        }
 
+        // Bind-mount the host device node
         let ret = unsafe {
-            libc::mount(
-                c_src.as_ptr(),
-                c_dst.as_ptr(),
-                std::ptr::null(),
-                libc::MS_BIND,
-                std::ptr::null(),
-            )
+            libc::mount(c_src.as_ptr(), c_dst.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null())
         };
         if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            // Non-fatal: log and skip this device
-            tracing::warn!(
-                "bind-mount {host_path} -> {}: {} (errno {})",
-                dev_node.display(),
-                err,
-                err.raw_os_error().unwrap_or(0)
-            );
+            tracing::warn!("bind-mount /dev/{name}: {}", std::io::Error::last_os_error());
         }
     }
 
-    // Create /dev/pts — use newinstance for user namespace compatibility.
-    // Non-fatal if it fails (some user namespace configs block devpts).
+    // Create /dev/pts + devpts mount (non-fatal)
     let pts_path = dev_path.join("pts");
-    std::fs::create_dir_all(&pts_path).map_err(|e| Error::Mount {
-        path: pts_path.clone(),
-        source: e,
-    })?;
-
+    if let Ok(c) = std::ffi::CString::new(pts_path.as_os_str().as_encoded_bytes()) {
+        mkdir_p(&c);
+    }
     match nix::mount::mount(
         Some("devpts"),
         &pts_path,
@@ -183,86 +190,45 @@ pub fn setup_dev(rootfs: &Path) -> Result<()> {
         Some("newinstance,ptmxmode=0666,mode=620"),
     ) {
         Ok(()) => {
-            // Create /dev/ptmx symlink to /dev/pts/ptmx
-            let ptmx = dev_path.join("ptmx");
-            let _ = std::os::unix::fs::symlink("pts/ptmx", &ptmx);
+            let _ = std::os::unix::fs::symlink("pts/ptmx", dev_path.join("ptmx"));
         }
         Err(e) => {
-            tracing::warn!("devpts mount failed (expected in some user namespace configs): {e}");
+            tracing::warn!("devpts mount failed: {e}");
         }
     }
 
-    // Create /dev/shm
+    // Create /dev/shm (non-fatal)
     let shm_path = dev_path.join("shm");
-    std::fs::create_dir_all(&shm_path).map_err(|e| Error::Mount {
-        path: shm_path.clone(),
-        source: e,
-    })?;
-
-    nix::mount::mount(
+    if let Ok(c) = std::ffi::CString::new(shm_path.as_os_str().as_encoded_bytes()) {
+        mkdir_p(&c);
+    }
+    if let Err(e) = nix::mount::mount(
         Some("tmpfs"),
         &shm_path,
         Some("tmpfs"),
         MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
         Some("mode=1777,size=65536k"),
-    )
-    .map_err(|e| Error::Mount {
-        path: shm_path,
-        source: std::io::Error::from_raw_os_error(e as i32),
-    })?;
+    ) {
+        tracing::warn!("shm tmpfs mount failed: {e}");
+    }
 
-    // Symlinks
-    std::os::unix::fs::symlink("/proc/self/fd", dev_path.join("fd"))
-        .or_else(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                Ok(())
-            } else {
-                Err(e)
+    // Symlinks (non-fatal)
+    let symlinks = [
+        ("/proc/self/fd", "fd"),
+        ("/proc/self/fd/0", "stdin"),
+        ("/proc/self/fd/1", "stdout"),
+        ("/proc/self/fd/2", "stderr"),
+    ];
+    for (target, name) in &symlinks {
+        let link = dev_path.join(name);
+        match std::os::unix::fs::symlink(target, &link) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                tracing::warn!("symlink /dev/{name}: {e}");
             }
-        })
-        .map_err(|e| Error::Mount {
-            path: dev_path.join("fd"),
-            source: e,
-        })?;
-
-    std::os::unix::fs::symlink("/proc/self/fd/0", dev_path.join("stdin"))
-        .or_else(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        })
-        .map_err(|e| Error::Mount {
-            path: dev_path.join("stdin"),
-            source: e,
-        })?;
-
-    std::os::unix::fs::symlink("/proc/self/fd/1", dev_path.join("stdout"))
-        .or_else(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        })
-        .map_err(|e| Error::Mount {
-            path: dev_path.join("stdout"),
-            source: e,
-        })?;
-
-    std::os::unix::fs::symlink("/proc/self/fd/2", dev_path.join("stderr"))
-        .or_else(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        })
-        .map_err(|e| Error::Mount {
-            path: dev_path.join("stderr"),
-            source: e,
-        })?;
+        }
+    }
 
     Ok(())
 }
