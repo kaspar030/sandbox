@@ -69,7 +69,20 @@ impl Container {
             });
         }
 
-        // 1. Create cgroup and apply limits
+        // 1. Resolve UID/GID mappings if not explicitly provided.
+        // When the spec has empty mappings, the daemon builds them from
+        // /etc/subuid and /etc/subgid based on its own context.
+        if self.spec.uid_mappings.is_empty() || self.spec.gid_mappings.is_empty() {
+            let (uid_maps, gid_maps) = namespace::user::build_id_mappings()?;
+            if self.spec.uid_mappings.is_empty() {
+                self.spec.uid_mappings = uid_maps;
+            }
+            if self.spec.gid_mappings.is_empty() {
+                self.spec.gid_mappings = gid_maps;
+            }
+        }
+
+        // 2. Create cgroup and apply limits
         let cgroup = Cgroup::create(&self.spec.name)?;
         cgroup.apply_limits(&self.spec.cgroup)?;
         let cgroup_fd = cgroup.open_fd()?;
@@ -171,8 +184,28 @@ impl Container {
         slave_raw: i32,
         master_raw: i32,
     ) -> Result<()> {
-        // Wait for parent to finish uid_map / network setup
+        // Wait for parent to finish uid_map / gid_map / network setup
         sync_fd.wait()?;
+
+        // Become container uid 0 / gid 0. After clone3(CLONE_NEWUSER), the
+        // child inherits kuid 0 from the root daemon, but the uid_map maps
+        // container uid 0 to a subordinate host uid (e.g., 100000). Since
+        // kuid 0 is not in the mapped range, the child appears as uid 65534
+        // (overflow). setresuid/setresgid adopts container uid/gid 0, which
+        // maps correctly through the uid_map. This is what runc, crun, LXC,
+        // and systemd-nspawn all do.
+        nix::unistd::setresgid(
+            nix::unistd::Gid::from_raw(0),
+            nix::unistd::Gid::from_raw(0),
+            nix::unistd::Gid::from_raw(0),
+        )
+        .map_err(|e| Error::Other(format!("setresgid(0,0,0) failed: {e}")))?;
+        nix::unistd::setresuid(
+            nix::unistd::Uid::from_raw(0),
+            nix::unistd::Uid::from_raw(0),
+            nix::unistd::Uid::from_raw(0),
+        )
+        .map_err(|e| Error::Other(format!("setresuid(0,0,0) failed: {e}")))?;
 
         // Make mounts private
         namespace::mount::make_mounts_private()?;

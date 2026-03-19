@@ -4,6 +4,7 @@
 //! for the child process. The child waits (via eventfd) until this is done.
 
 use crate::error::{Error, Result};
+use crate::namespace::subid;
 use crate::protocol::IdMapping;
 use std::fs;
 
@@ -46,6 +47,60 @@ pub fn setup_user_namespace(
     write_gid_map(child_pid, gid_mappings)?;
     write_uid_map(child_pid, uid_mappings)?;
     Ok(())
+}
+
+/// Build UID/GID mappings based on the daemon's current context.
+///
+/// When running as root: reads /etc/subuid and /etc/subgid for subordinate
+/// ranges. Container uid 0 maps to the first subordinate uid (e.g., 100000).
+/// Falls back to `0 0 1` (container root = host root) if no subid ranges found.
+///
+/// When running as non-root: maps container uid 0 to the current uid,
+/// plus any subordinate ranges from /etc/subuid.
+pub fn build_id_mappings() -> Result<(Vec<IdMapping>, Vec<IdMapping>)> {
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+    let username = subid::current_username().unwrap_or_else(|| uid.to_string());
+
+    let uid_ranges = subid::read_subuid(&username, uid);
+    let gid_ranges = subid::read_subgid(&username, gid);
+
+    let uid_mappings = build_mappings_from_ranges(uid, &uid_ranges);
+    let gid_mappings = build_mappings_from_ranges(gid, &gid_ranges);
+
+    if uid_ranges.is_empty() {
+        tracing::warn!(
+            "no subordinate UID ranges found for {username} (uid {uid}) in /etc/subuid; \
+             container will use a single-UID mapping"
+        );
+    }
+
+    Ok((uid_mappings, gid_mappings))
+}
+
+/// Build ID mappings from subordinate ranges.
+///
+/// If subordinate ranges exist, container uid 0 maps to the first
+/// subordinate range (fully within that range). If no ranges exist,
+/// fall back to mapping container 0 to the daemon's own uid.
+fn build_mappings_from_ranges(own_id: u32, ranges: &[subid::SubIdRange]) -> Vec<IdMapping> {
+    if ranges.is_empty() {
+        // No subordinate ranges — map container 0 to our own uid
+        return vec![IdMapping {
+            container_id: 0,
+            host_id: own_id,
+            count: 1,
+        }];
+    }
+
+    // Use the first (and typically only) subordinate range.
+    // Map container uid 0..count to host uid start..start+count.
+    let range = &ranges[0];
+    vec![IdMapping {
+        container_id: 0,
+        host_id: range.start,
+        count: range.count,
+    }]
 }
 
 /// Convert ID mappings to the kernel format: "container_id host_id count\n"

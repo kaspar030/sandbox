@@ -93,36 +93,13 @@ const HOST_DEV_NODES: &[&str] = &[
     "null", "zero", "full", "random", "urandom", "tty",
 ];
 
-/// Create an empty file using raw libc (avoids Rust std::fs stat overhead
-/// which can trigger EOVERFLOW on some kernel/userns configurations).
-fn touch_file(path: &std::ffi::CStr) -> bool {
-    let fd = unsafe {
-        libc::open(
-            path.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
-            0o644,
-        )
-    };
-    if fd >= 0 {
-        unsafe { libc::close(fd) };
-        true
-    } else {
-        false
-    }
-}
-
-/// Create a directory using raw libc.
-fn mkdir_p(path: &std::ffi::CStr) {
-    unsafe { libc::mkdir(path.as_ptr(), 0o755) };
-}
-
 /// Mount /dev with minimal device nodes.
 ///
-/// All operations are non-fatal — the container will start with whatever
-/// devices and filesystems succeed. This handles kernel/security configs
-/// that restrict tmpfs, mknod, or bind-mounts inside user namespaces.
-///
+/// Bind-mounts device nodes directly from host `/dev/<name>` paths.
 /// This runs before `pivot_root`, so host paths are still accessible.
+/// The bind-mount preserves the source superblock (host devtmpfs, no
+/// `SB_I_NODEV`), so the devices remain functional inside the user
+/// namespace.
 pub fn setup_dev(rootfs: &Path) -> Result<()> {
     let dev_path = rootfs.join("dev");
     std::fs::create_dir_all(&dev_path).map_err(|e| Error::Mount {
@@ -130,58 +107,55 @@ pub fn setup_dev(rootfs: &Path) -> Result<()> {
         source: e,
     })?;
 
-    // Try to mount tmpfs on /dev for a clean device directory.
-    // Non-fatal: some user namespace configs return EOVERFLOW.
-    let _tmpfs_ok = match nix::mount::mount(
+    // Mount tmpfs on /dev for a clean device directory
+    nix::mount::mount(
         Some("tmpfs"),
         &dev_path,
         Some("tmpfs"),
         MsFlags::MS_NOSUID | MsFlags::MS_STRICTATIME,
         Some("mode=755,size=65536k"),
-    ) {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::warn!("tmpfs mount on /dev failed: {e}, using rootfs /dev directly");
-            false
-        }
-    };
+    )
+    .map_err(|e| Error::Mount {
+        path: dev_path.clone(),
+        source: std::io::Error::from_raw_os_error(e as i32),
+    })?;
 
-    // Bind-mount each device node from the host.
-    // Uses raw libc for file creation and mounting to avoid Rust std::fs
-    // stat() calls that can trigger EOVERFLOW on certain kernels.
+    // Bind-mount each device node from the host
     for name in HOST_DEV_NODES {
         let dev_node = dev_path.join(name);
         let host_path = format!("/dev/{name}");
 
-        let c_src = match std::ffi::CString::new(host_path.as_str()) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let c_dst = match std::ffi::CString::new(dev_node.as_os_str().as_encoded_bytes()) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+        // Create empty file as bind-mount target
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&dev_node)
+            .map_err(|e| Error::Mount {
+                path: dev_node.clone(),
+                source: e,
+            })?;
 
-        // Create empty target file using raw libc::open (no stat)
-        if !touch_file(&c_dst) {
-            tracing::warn!("create target /dev/{name}: {}", std::io::Error::last_os_error());
-            continue;
-        }
-
-        // Bind-mount the host device node
-        let ret = unsafe {
-            libc::mount(c_src.as_ptr(), c_dst.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null())
-        };
-        if ret != 0 {
-            tracing::warn!("bind-mount /dev/{name}: {}", std::io::Error::last_os_error());
-        }
+        nix::mount::mount(
+            Some(host_path.as_str()),
+            &dev_node,
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>,
+        )
+        .map_err(|e| Error::Mount {
+            path: dev_node,
+            source: std::io::Error::from_raw_os_error(e as i32),
+        })?;
     }
 
-    // Create /dev/pts + devpts mount (non-fatal)
+    // Create /dev/pts + devpts mount (non-fatal — may fail in some userns configs)
     let pts_path = dev_path.join("pts");
-    if let Ok(c) = std::ffi::CString::new(pts_path.as_os_str().as_encoded_bytes()) {
-        mkdir_p(&c);
-    }
+    std::fs::create_dir_all(&pts_path).map_err(|e| Error::Mount {
+        path: pts_path.clone(),
+        source: e,
+    })?;
+
     match nix::mount::mount(
         Some("devpts"),
         &pts_path,
@@ -199,9 +173,11 @@ pub fn setup_dev(rootfs: &Path) -> Result<()> {
 
     // Create /dev/shm (non-fatal)
     let shm_path = dev_path.join("shm");
-    if let Ok(c) = std::ffi::CString::new(shm_path.as_os_str().as_encoded_bytes()) {
-        mkdir_p(&c);
-    }
+    std::fs::create_dir_all(&shm_path).map_err(|e| Error::Mount {
+        path: shm_path.clone(),
+        source: e,
+    })?;
+
     if let Err(e) = nix::mount::mount(
         Some("tmpfs"),
         &shm_path,
@@ -212,7 +188,7 @@ pub fn setup_dev(rootfs: &Path) -> Result<()> {
         tracing::warn!("shm tmpfs mount failed: {e}");
     }
 
-    // Symlinks (non-fatal)
+    // Symlinks
     let symlinks = [
         ("/proc/self/fd", "fd"),
         ("/proc/self/fd/0", "stdin"),

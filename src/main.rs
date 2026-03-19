@@ -437,12 +437,11 @@ fn build_spec(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
+    // When no --uid-map/--gid-map is provided, send empty mappings.
+    // The daemon will build appropriate mappings from /etc/subuid and
+    // /etc/subgid based on its own context (root vs non-root).
     let uid_mappings = if uid_map.is_empty() {
-        vec![IdMapping {
-            container_id: 0,
-            host_id: unsafe { libc::getuid() },
-            count: 1,
-        }]
+        Vec::new()
     } else {
         uid_map
             .iter()
@@ -451,11 +450,7 @@ fn build_spec(
     };
 
     let gid_mappings = if gid_map.is_empty() {
-        vec![IdMapping {
-            container_id: 0,
-            host_id: unsafe { libc::getgid() },
-            count: 1,
-        }]
+        Vec::new()
     } else {
         gid_map
             .iter()

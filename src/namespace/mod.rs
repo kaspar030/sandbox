@@ -8,6 +8,7 @@ pub mod ipc;
 pub mod mount;
 pub mod network;
 pub mod pid;
+pub mod subid;
 pub mod user;
 pub mod uts;
 
