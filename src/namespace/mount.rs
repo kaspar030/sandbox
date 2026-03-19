@@ -140,17 +140,31 @@ pub fn setup_dev(rootfs: &Path) -> Result<()> {
                 source: e,
             })?;
 
-        nix::mount::mount(
-            Some(host_path.as_str()),
-            &dev_node,
-            None::<&str>,
-            MsFlags::MS_BIND,
-            None::<&str>,
-        )
-        .map_err(|e| Error::Mount {
-            path: dev_node,
-            source: std::io::Error::from_raw_os_error(e as i32),
-        })?;
+        // Use raw libc::mount to avoid any nix path conversion overhead
+        let c_src = std::ffi::CString::new(host_path.as_str())
+            .map_err(|e| Error::Other(format!("invalid device path: {e}")))?;
+        let c_dst = std::ffi::CString::new(dev_node.as_os_str().as_encoded_bytes())
+            .map_err(|e| Error::Other(format!("invalid device path: {e}")))?;
+
+        let ret = unsafe {
+            libc::mount(
+                c_src.as_ptr(),
+                c_dst.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            // Non-fatal: log and skip this device
+            tracing::warn!(
+                "bind-mount {host_path} -> {}: {} (errno {})",
+                dev_node.display(),
+                err,
+                err.raw_os_error().unwrap_or(0)
+            );
+        }
     }
 
     // Create /dev/pts — use newinstance for user namespace compatibility.
