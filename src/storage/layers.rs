@@ -97,7 +97,7 @@ fn image_meta_path(pool: &StoragePool, image_name: &str) -> PathBuf {
 
 /// Sanitize a digest or reference for use as a directory/file name.
 fn safe_name(s: &str) -> String {
-    s.replace(':', "_").replace('/', "_")
+    s.replace([':', '/'], "_")
 }
 
 // --- Chain ID computation ---

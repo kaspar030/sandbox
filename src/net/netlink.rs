@@ -346,10 +346,10 @@ impl NetlinkSocket {
         rtmsg[1] = 0; // rtm_dst_len (0 = default route)
         rtmsg[2] = 0; // rtm_src_len
         rtmsg[3] = 0; // rtm_tos
-        rtmsg[4] = libc::RT_TABLE_MAIN as u8; // rtm_table
-        rtmsg[5] = libc::RTPROT_BOOT as u8; // rtm_protocol
-        rtmsg[6] = libc::RT_SCOPE_UNIVERSE as u8; // rtm_scope
-        rtmsg[7] = libc::RTN_UNICAST as u8; // rtm_type
+        rtmsg[4] = libc::RT_TABLE_MAIN; // rtm_table
+        rtmsg[5] = libc::RTPROT_BOOT; // rtm_protocol
+        rtmsg[6] = libc::RT_SCOPE_UNIVERSE; // rtm_scope
+        rtmsg[7] = libc::RTN_UNICAST; // rtm_type
         rtmsg[8..12].copy_from_slice(&0u32.to_ne_bytes()); // rtm_flags
         msg.extend_payload(&rtmsg);
 
@@ -395,7 +395,7 @@ impl NetlinkMsg {
 
         // Pad with zeros
         let padding = padded_len - attr_len;
-        self.buf.extend(std::iter::repeat(0u8).take(padding));
+        self.buf.extend(std::iter::repeat_n(0u8, padding));
     }
 
     /// Add a u32 attribute.
@@ -419,7 +419,7 @@ impl NetlinkMsg {
         self.buf[start_pos..start_pos + 2].copy_from_slice(&len.to_ne_bytes());
         // Pad to 4-byte alignment
         let padding = ((self.buf.len() + 3) & !3) - self.buf.len();
-        self.buf.extend(std::iter::repeat(0u8).take(padding));
+        self.buf.extend(std::iter::repeat_n(0u8, padding));
     }
 
     /// Finalize the message by prepending the nlmsghdr.

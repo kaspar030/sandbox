@@ -60,13 +60,10 @@ pub fn configure_in_netns(
         // Rename it to the desired name.
         // Actually, the interface keeps its name. We need to find it.
         // After moving into the netns, the interface index may differ.
-        let idx = sock.get_link_index(iface_name).or_else(|_| {
-            // Try the original name — the interface might not have been renamed yet
-            // The interface we moved was the container-side veth
-            // We should look for the veth name pattern
-            Err(Error::NetworkSetup(format!(
+        let idx = sock.get_link_index(iface_name).map_err(|_| {
+            Error::NetworkSetup(format!(
                 "interface {iface_name} not found in container netns"
-            )))
+            ))
         })?;
 
         // Add IP address

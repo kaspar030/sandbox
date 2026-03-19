@@ -13,10 +13,13 @@ pub struct ContainerBuilder {
 
 impl ContainerBuilder {
     pub fn new(name: impl Into<String>, image: impl Into<String>) -> Self {
-        let mut spec = ContainerSpec::default();
-        spec.name = name.into();
-        spec.image = image.into();
-        Self { spec }
+        Self {
+            spec: ContainerSpec {
+                name: name.into(),
+                image: image.into(),
+                ..ContainerSpec::default()
+            },
+        }
     }
 
     pub fn pool(mut self, pool: impl Into<String>) -> Self {

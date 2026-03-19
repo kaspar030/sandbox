@@ -72,7 +72,7 @@ pub fn move_mount(mount_fd: &OwnedFd, target: &Path) -> Result<()> {
         libc::syscall(
             SYS_MOVE_MOUNT,
             mount_fd.as_raw_fd(),
-            b"\0".as_ptr(),
+            c"".as_ptr(),
             libc::AT_FDCWD,
             c_target.as_ptr(),
             MOVE_MOUNT_F_EMPTY_PATH,
@@ -106,7 +106,7 @@ pub fn mount_setattr(mount_fd: &OwnedFd, attr: &MountAttr, recursive: bool) -> R
         libc::syscall(
             SYS_MOUNT_SETATTR,
             mount_fd.as_raw_fd(),
-            b"\0".as_ptr(),
+            c"".as_ptr(),
             flags,
             attr as *const MountAttr,
             std::mem::size_of::<MountAttr>(),

@@ -698,6 +698,7 @@ fn print_response(resp: &Response) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_spec(
     name: String,
     image: String,

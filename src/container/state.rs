@@ -13,11 +13,17 @@ pub struct State {
     current: ContainerState,
 }
 
-impl State {
-    pub fn new() -> Self {
+impl Default for State {
+    fn default() -> Self {
         Self {
             current: ContainerState::Created,
         }
+    }
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn current(&self) -> &ContainerState {
