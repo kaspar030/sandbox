@@ -16,7 +16,10 @@ pub fn run_init(command: &[String]) -> ! {
     // Set up signal forwarding
     let child_pid = match unsafe { libc::fork() } {
         -1 => {
-            eprintln!("sandbox-init: fork failed: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "sandbox-init: fork failed: {}",
+                std::io::Error::last_os_error()
+            );
             std::process::exit(1);
         }
         0 => {

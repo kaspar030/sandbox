@@ -36,6 +36,9 @@ pub struct Container {
     /// PTY master fd (for interactive containers). The daemon passes this
     /// to the CLI client via SCM_RIGHTS after the container starts.
     pub pty_master: Option<OwnedFd>,
+    /// If true, the container is automatically removed from the daemon
+    /// registry when it exits. Set for containers created via `run`.
+    pub ephemeral: bool,
 }
 
 impl Container {
@@ -48,6 +51,7 @@ impl Container {
             pidfd: None,
             cgroup: None,
             pty_master: None,
+            ephemeral: false,
         }
     }
 
@@ -107,9 +111,7 @@ impl Container {
             if ret != 0 {
                 return Err(Error::Io(std::io::Error::last_os_error()));
             }
-            unsafe {
-                (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))
-            }
+            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
         };
         let result_write_raw = result_write.as_raw_fd();
 
@@ -122,10 +124,7 @@ impl Container {
         let slave_raw = pty_fds.as_ref().map(|(_, s)| s.as_raw_fd()).unwrap_or(-1);
 
         // 6. clone3
-        let clone_result = clone3::clone3_with_pidfd(
-            ns_flags.bits(),
-            Some(cgroup_fd.as_raw_fd()),
-        )?;
+        let clone_result = clone3::clone3_with_pidfd(ns_flags.bits(), Some(cgroup_fd.as_raw_fd()))?;
 
         match clone_result {
             Some(CloneResult { child_pid, pidfd }) => {
@@ -160,16 +159,16 @@ impl Container {
                     let mut status = 0i32;
                     unsafe { libc::waitpid(child_pid, &mut status, 0) };
                     cgroup.destroy().ok();
-                    return Err(Error::Other(format!(
-                        "container setup failed: {msg}"
-                    )));
+                    return Err(Error::Other(format!("container setup failed: {msg}")));
                 }
 
                 // n == 0: EOF, exec succeeded
                 self.pid = Some(child_pid);
                 self.pidfd = Some(pidfd);
                 self.cgroup = Some(cgroup);
-                self.state.start().map_err(|e| Error::Other(e.to_string()))?;
+                self.state
+                    .start()
+                    .map_err(|e| Error::Other(e.to_string()))?;
                 Ok(())
             }
             None => {
@@ -254,12 +253,7 @@ impl Container {
         std::process::exit(1);
     }
 
-    fn child_setup_inner(
-        &self,
-        sync_fd: &EventFd,
-        slave_raw: i32,
-        master_raw: i32,
-    ) -> Result<()> {
+    fn child_setup_inner(&self, sync_fd: &EventFd, slave_raw: i32, master_raw: i32) -> Result<()> {
         // Wait for parent to finish uid_map / gid_map / network setup
         sync_fd.wait()?;
 
@@ -357,13 +351,7 @@ impl Container {
 
         loop {
             let mut status: i32 = 0;
-            let ret = unsafe {
-                libc::waitpid(
-                    self.pid.unwrap_or(0),
-                    &mut status,
-                    libc::WNOHANG,
-                )
-            };
+            let ret = unsafe { libc::waitpid(self.pid.unwrap_or(0), &mut status, libc::WNOHANG) };
 
             if ret > 0 {
                 let exit_code = if libc::WIFEXITED(status) {
@@ -373,7 +361,9 @@ impl Container {
                 } else {
                     1
                 };
-                self.state.stop(exit_code).map_err(|e| Error::Other(e.to_string()))?;
+                self.state
+                    .stop(exit_code)
+                    .map_err(|e| Error::Other(e.to_string()))?;
                 return Ok(exit_code);
             }
 
@@ -391,7 +381,9 @@ impl Container {
                 } else {
                     137
                 };
-                self.state.stop(exit_code).map_err(|e| Error::Other(e.to_string()))?;
+                self.state
+                    .stop(exit_code)
+                    .map_err(|e| Error::Other(e.to_string()))?;
                 return Ok(exit_code);
             }
 

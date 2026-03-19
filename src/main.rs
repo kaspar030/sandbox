@@ -131,6 +131,15 @@ enum Commands {
         bind: Vec<String>,
         #[arg(long)]
         init: bool,
+
+        /// Start the container immediately after creation
+        #[arg(long)]
+        start: bool,
+
+        /// Run detached (no interactive PTY). Only used with --start.
+        #[arg(long, short = 'd')]
+        detach: bool,
+
         #[arg(long = "uid-map")]
         uid_map: Vec<String>,
         #[arg(long = "gid-map")]
@@ -274,6 +283,8 @@ fn main() -> anyhow::Result<()> {
             cap_add,
             bind,
             init,
+            start,
+            detach,
             uid_map,
             gid_map,
             command,
@@ -284,7 +295,34 @@ fn main() -> anyhow::Result<()> {
             )?;
             let mut client = client::Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Create(spec))?;
-            print_response(&resp);
+
+            if start {
+                // Create succeeded — immediately start the container
+                if let Response::Created { ref name } = resp {
+                    let start_req = Request::Start {
+                        name: name.clone(),
+                        command: None,
+                    };
+                    if detach {
+                        let resp = client.request(&start_req)?;
+                        print_response(&resp);
+                    } else {
+                        let (resp, exit_code) =
+                            client.request_interactive(&start_req)?;
+                        if let Response::Error { .. } = &resp {
+                            print_response(&resp);
+                        }
+                        if let Some(code) = exit_code {
+                            std::process::exit(code);
+                        }
+                    }
+                } else {
+                    // Create failed
+                    print_response(&resp);
+                }
+            } else {
+                print_response(&resp);
+            }
         }
 
         Commands::Start { name, command } => {

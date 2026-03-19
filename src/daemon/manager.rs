@@ -75,6 +75,7 @@ impl ContainerManager {
         };
 
         let _ = container.state.stop(exit_code);
+        let is_ephemeral = container.ephemeral;
         tracing::info!("container {name} exited with code {exit_code}");
 
         // Clean up cgroup
@@ -82,6 +83,14 @@ impl ContainerManager {
             let _ = cgroup.destroy();
         }
         container.cgroup = None;
+
+        // Auto-remove ephemeral containers (created via `run`)
+        if is_ephemeral {
+            if let Some(mut c) = self.containers.remove(name) {
+                let _ = c.destroy();
+            }
+            tracing::info!("ephemeral container {name} auto-removed");
+        }
     }
 
     /// Handle a request and return a response + optional PTY fd.
@@ -131,6 +140,7 @@ impl ContainerManager {
         }
 
         let mut container = Container::new(spec);
+        container.ephemeral = true; // auto-remove on exit
 
         match container.start() {
             Ok(()) => {
