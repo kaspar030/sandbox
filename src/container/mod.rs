@@ -174,14 +174,6 @@ impl Container {
         // Wait for parent to finish uid_map / network setup
         sync_fd.wait()?;
 
-        // Set up PTY slave as controlling terminal and stdio
-        if slave_raw >= 0 {
-            let slave_owned = unsafe { OwnedFd::from_raw_fd(slave_raw) };
-            pty::setup_slave_pty(&slave_owned, master_raw)?;
-            // Don't drop slave_owned — setup_slave_pty already closed the raw fd
-            std::mem::forget(slave_owned);
-        }
-
         // Make mounts private
         namespace::mount::make_mounts_private()?;
 
@@ -193,8 +185,20 @@ impl Container {
         // Set up rootfs (mounts /dev, /proc, /sys, bind mounts, pivot_root).
         // Device nodes are bind-mounted from host /dev paths which are still
         // accessible since pivot_root hasn't happened yet.
+        // This must happen BEFORE PTY setup, because setsid() (called in
+        // setup_slave_pty) can interfere with mount operations in user namespaces.
         let rootfs = PathBuf::from(&self.spec.rootfs);
         setup_rootfs(&rootfs, &self.spec.bind_mounts)?;
+
+        // Set up PTY slave as controlling terminal and stdio.
+        // Must be after pivot_root (rootfs setup) so that setsid() doesn't
+        // interfere with mount operations.
+        if slave_raw >= 0 {
+            let slave_owned = unsafe { OwnedFd::from_raw_fd(slave_raw) };
+            pty::setup_slave_pty(&slave_owned, master_raw)?;
+            // Don't drop slave_owned — setup_slave_pty already closed the raw fd
+            std::mem::forget(slave_owned);
+        }
 
         // Apply seccomp filter
         seccomp::apply_seccomp(&self.spec.seccomp)?;

@@ -24,13 +24,16 @@ pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()> {
         return Err(Error::RootfsNotFound(rootfs.to_path_buf()));
     }
 
-    // Reject "/" as rootfs — pivot_root to the host root is nonsensical
-    // and breaks /dev setup (mounting tmpfs on /dev hides host devices).
-    let canonical = rootfs.canonicalize().map_err(|e| Error::Mount {
+    // Canonicalize to absolute path — relative paths break after
+    // mount namespace changes (make_mounts_private, pivot_root).
+    let rootfs = rootfs.canonicalize().map_err(|e| Error::Mount {
         path: rootfs.to_path_buf(),
         source: e,
     })?;
-    if canonical == Path::new("/") {
+
+    // Reject "/" as rootfs — pivot_root to the host root is nonsensical
+    // and breaks /dev setup (mounting tmpfs on /dev hides host devices).
+    if rootfs == Path::new("/") {
         return Err(Error::RootfsSetup(
             "cannot use \"/\" as rootfs — provide a dedicated root filesystem directory".to_string(),
         ));
@@ -38,8 +41,8 @@ pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()> {
 
     // Bind-mount rootfs onto itself (required for pivot_root)
     nix::mount::mount(
-        Some(rootfs),
-        rootfs,
+        Some(rootfs.as_path()),
+        &rootfs,
         None::<&str>,
         MsFlags::MS_BIND | MsFlags::MS_REC,
         None::<&str>,
@@ -50,12 +53,12 @@ pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()> {
     })?;
 
     // Set up special filesystems inside the new root
-    setup_dev(rootfs)?;
-    mount_proc(rootfs)?;
-    setup_sys(rootfs)?;
+    setup_dev(&rootfs)?;
+    mount_proc(&rootfs)?;
+    setup_sys(&rootfs)?;
 
     // Set up user bind mounts
-    setup_bind_mounts(rootfs, bind_mounts)?;
+    setup_bind_mounts(&rootfs, bind_mounts)?;
 
     // Create the old_root directory for pivot_root
     let old_root = rootfs.join("old_root");
@@ -65,7 +68,7 @@ pub fn setup_rootfs(rootfs: &Path, bind_mounts: &[BindMount]) -> Result<()> {
     })?;
 
     // pivot_root: swap root filesystem
-    nix::unistd::pivot_root(rootfs, &old_root).map_err(|e| {
+    nix::unistd::pivot_root(&rootfs, &old_root).map_err(|e| {
         Error::PivotRoot(std::io::Error::from_raw_os_error(e as i32))
     })?;
 
