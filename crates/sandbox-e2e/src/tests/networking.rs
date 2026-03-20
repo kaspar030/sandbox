@@ -1,35 +1,28 @@
 use crate::context::TestContext;
 
 pub fn test_bridged_auto_ip(ctx: &TestContext) -> Result<(), String> {
-    let output = ctx.cli_ok(&[
+    // Use ifconfig (available in alpine) to check for assigned IP
+    let output = ctx.cli(&[
         "run",
         "--network",
         "bridged",
         "--image",
         "alpine",
         "--",
-        "/bin/sh",
-        "-c",
-        "ip addr show eth0 2>/dev/null || echo no-ip-cmd",
+        "ifconfig",
     ]);
 
-    if output.contains("no-ip-cmd") {
-        // Alpine might not have ip command — try ifconfig
-        let output2 = ctx.cli_ok(&[
-            "run",
-            "--network",
-            "bridged",
-            "--image",
-            "alpine",
-            "--",
-            "ifconfig",
-            "eth0",
-        ]);
-        if !output2.contains("10.0.0.") {
-            return Err(format!("expected 10.0.0.x IP, got: {output2}"));
-        }
-    } else if !output.contains("10.0.0.") {
-        return Err(format!("expected 10.0.0.x IP, got: {output}"));
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        return Err(format!("bridged run failed: {stderr}"));
+    }
+
+    if !stdout.contains("10.0.0.") {
+        return Err(format!(
+            "expected 10.0.0.x IP in ifconfig output, got: {stdout}"
+        ));
     }
 
     Ok(())

@@ -783,7 +783,10 @@ fn print_response(resp: &Response) {
                 println!("{}:{}{}", m.source, m.target, ro);
             }
         }
-        Response::Error { message } => eprintln!("Error: {message}"),
+        Response::Error { message } => {
+            eprintln!("Error: {message}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -841,22 +844,12 @@ fn build_spec(
     let bind_mounts: Vec<BindMount> = bind
         .iter()
         .map(|b| {
-            let parts: Vec<&str> = b.split(':').collect();
-            match parts.len() {
-                2 => Ok(BindMount {
-                    source: parts[0].to_string(),
-                    target: parts[1].to_string(),
-                    readonly: false,
-                }),
-                3 => Ok(BindMount {
-                    source: parts[0].to_string(),
-                    target: parts[1].to_string(),
-                    readonly: parts[2] == "ro",
-                }),
-                _ => {
-                    anyhow::bail!("invalid bind mount format: {b} (expected SRC:DST or SRC:DST:ro)")
-                }
-            }
+            let (source, target, readonly) = parse_mount_spec(b)?;
+            Ok(BindMount {
+                source,
+                target,
+                readonly,
+            })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 

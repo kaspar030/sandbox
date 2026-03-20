@@ -56,15 +56,17 @@ pub fn configure_in_netns(
     let result = (|| -> Result<()> {
         let mut sock = NetlinkSocket::new()?;
 
-        // The moved interface may have a different name in the new ns.
-        // Rename it to the desired name.
-        // Actually, the interface keeps its name. We need to find it.
-        // After moving into the netns, the interface index may differ.
+        // Find the interface by name (it keeps its name after moving to the netns)
         let idx = sock.get_link_index(iface_name).map_err(|_| {
             Error::NetworkSetup(format!(
                 "interface {iface_name} not found in container netns"
             ))
         })?;
+
+        // Rename to "eth0" for a clean look inside the container
+        if iface_name != "eth0" {
+            sock.rename_link(iface_name, "eth0")?;
+        }
 
         // Add IP address
         sock.add_address(idx, addr, prefix_len)?;

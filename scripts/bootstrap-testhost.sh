@@ -44,6 +44,15 @@ if grep -q "$(whoami)" /etc/subuid; then
 else
     echo "  WARNING: no subuid entry for $(whoami)"
 fi
+# Ensure root has subuid/subgid (needed when daemon runs via sudo)
+if ! grep -q "^root:" /etc/subuid; then
+    echo "root:100000:65536" | sudo tee -a /etc/subuid
+    echo "  Added root to /etc/subuid"
+fi
+if ! grep -q "^root:" /etc/subgid; then
+    echo "root:100000:65536" | sudo tee -a /etc/subgid
+    echo "  Added root to /etc/subgid"
+fi
 
 echo "=== Checking nft ==="
 if command -v nft &>/dev/null; then

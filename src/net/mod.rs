@@ -48,7 +48,10 @@ pub fn setup_container_network(
     // Configure the container-side interface (done via nsenter or netlink
     // into the child's namespace). We do this from the parent by specifying
     // the target netns pid.
-    veth::configure_in_netns(child_pid, "eth0", address, prefix_len, gateway)?;
+    // Configure the container-side interface. The name stays as veth_{pid}_c
+    // after moving to the new namespace. We rename it to "eth0" inside
+    // configure_in_netns.
+    veth::configure_in_netns(child_pid, &container_veth, address, prefix_len, gateway)?;
 
     Ok(())
 }

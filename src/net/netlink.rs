@@ -259,6 +259,27 @@ impl NetlinkSocket {
         self.send_and_ack(&data)
     }
 
+    /// Rename a network interface.
+    pub fn rename_link(&mut self, old_name: &str, new_name: &str) -> Result<()> {
+        let idx = self.get_link_index(old_name)?;
+
+        let mut msg = NetlinkMsg::new(RTM_NEWLINK, NLM_F_REQUEST | NLM_F_ACK);
+        msg.seq = self.seq;
+        self.seq += 1;
+
+        // ifinfomsg with the interface index
+        let mut ifinfo = [0u8; 16];
+        ifinfo[4..8].copy_from_slice(&(idx as i32).to_ne_bytes());
+        msg.extend_payload(&ifinfo);
+
+        // IFLA_IFNAME = new name
+        let name_bytes = new_name.as_bytes();
+        msg.add_attr(IFLA_IFNAME, name_bytes);
+
+        let data = msg.finalize();
+        self.send_and_ack(&data)
+    }
+
     /// Create a bridge interface.
     pub fn create_bridge(&mut self, name: &str) -> Result<()> {
         let mut msg = NetlinkMsg::new(
