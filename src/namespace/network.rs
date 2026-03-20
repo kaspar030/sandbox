@@ -21,8 +21,14 @@ pub fn setup_network(mode: &NetworkMode, child_pid: libc::pid_t) -> Result<()> {
             gateway,
             prefix_len,
         } => {
-            // Set up veth pair + bridge using raw netlink
-            crate::net::setup_container_network(child_pid, bridge, *address, *gateway, *prefix_len)
+            // Address and gateway must be resolved by IPAM before reaching here
+            let addr = address.ok_or_else(|| {
+                Error::NetworkSetup("bridged network: address not allocated".to_string())
+            })?;
+            let gw = gateway.ok_or_else(|| {
+                Error::NetworkSetup("bridged network: gateway not set".to_string())
+            })?;
+            crate::net::setup_container_network(child_pid, bridge, addr, gw, *prefix_len)
         }
         NetworkMode::None => {
             // Network namespace was created but leave it unconfigured.

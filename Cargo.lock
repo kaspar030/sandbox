@@ -1455,6 +1455,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sandbox-e2e"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "sandbox-client",
+ "sandbox-proto",
+]
+
+[[package]]
 name = "sandbox-proto"
 version = "0.1.0"
 dependencies = [

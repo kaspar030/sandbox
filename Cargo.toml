@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/sandbox-proto", "crates/sandbox-client"]
+members = [".", "crates/sandbox-proto", "crates/sandbox-client", "crates/sandbox-e2e"]
 
 [package]
 name = "sandbox"

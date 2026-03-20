@@ -54,15 +54,31 @@ pub struct ContainerManager {
     pending_cleanups: Arc<AtomicUsize>,
     /// Set to true when a shutdown request has been received.
     pub shutdown_requested: bool,
+    /// IP allocators per bridge name.
+    ipam: HashMap<String, sandbox::net::ipam::IpAllocator>,
+    /// Whether nftables (nft) is available on this system.
+    nft_available: bool,
+    /// Published host ports: host_port → container name.
+    published_ports: HashMap<u16, String>,
+    /// Bridge reference counts: bridge_name → number of containers using it.
+    bridge_refcounts: HashMap<String, u32>,
 }
 
 impl ContainerManager {
     pub fn new(storage: Arc<StorageManager>) -> Self {
+        let nft_available = sandbox::net::nat::nft_available();
+        if !nft_available {
+            tracing::warn!("nftables (nft) not found — bridged networking will not work");
+        }
         Self {
             containers: HashMap::new(),
             storage,
             pending_cleanups: Arc::new(AtomicUsize::new(0)),
             shutdown_requested: false,
+            ipam: HashMap::new(),
+            nft_available,
+            published_ports: HashMap::new(),
+            bridge_refcounts: HashMap::new(),
         }
     }
 
@@ -71,6 +87,9 @@ impl ContainerManager {
     /// but be defensive), cleans up transient resources (cgroups, mounts),
     /// and re-registers non-ephemeral containers as Created.
     pub fn recover_from_crash(&mut self) {
+        // Clean up stale NAT rules from previous run
+        sandbox::net::nat::cleanup_nat();
+
         let records = persist::load_all_states();
         if records.is_empty() {
             return;
@@ -341,6 +360,140 @@ impl ContainerManager {
         }
     }
 
+    /// Set up bridged networking for a container spec.
+    ///
+    /// Allocates an IP from IPAM if not specified, validates port mappings,
+    /// sets up NAT masquerade + port forwarding, and adds resolv.conf bind mount.
+    fn setup_bridged_networking(&mut self, spec: &mut ContainerSpec) -> Result<()> {
+        let (bridge, address, gateway, prefix_len) = match &spec.network {
+            sandbox::protocol::NetworkMode::Bridged {
+                bridge,
+                address,
+                gateway,
+                prefix_len,
+            } => (bridge.clone(), *address, *gateway, *prefix_len),
+            _ => return Ok(()),
+        };
+
+        // Check nft availability
+        if !self.nft_available {
+            return Err(Error::Other(
+                "bridged networking requires nftables (nft) — not found on this system".to_string(),
+            ));
+        }
+
+        // Get or create IPAM for this bridge
+        let allocator = self.ipam.entry(bridge.clone()).or_insert_with(|| {
+            sandbox::net::ipam::IpAllocator::load(&bridge).unwrap_or_else(|| {
+                let subnet = std::net::Ipv4Addr::new(10, 0, 0, 0);
+                sandbox::net::ipam::IpAllocator::new(subnet, prefix_len, &bridge)
+            })
+        });
+
+        // Allocate or register IP
+        let container_ip = if let Some(ip) = address {
+            allocator.register(ip, &spec.name)?;
+            ip
+        } else {
+            allocator.allocate(&spec.name)?
+        };
+
+        let gw = gateway.unwrap_or_else(|| allocator.gateway());
+
+        // Update the spec with the resolved IP and gateway
+        spec.network = sandbox::protocol::NetworkMode::Bridged {
+            bridge: bridge.clone(),
+            address: Some(container_ip),
+            gateway: Some(gw),
+            prefix_len,
+        };
+
+        // Set up NAT masquerade (idempotent — deletes and recreates table)
+        let subnet_str = allocator.subnet_str();
+        sandbox::net::nat::setup_masquerade(&bridge, &subnet_str)?;
+
+        // Track bridge refcount
+        *self.bridge_refcounts.entry(bridge.clone()).or_insert(0) += 1;
+
+        // Validate and set up port forwarding
+        for pm in &spec.publish {
+            if let Some(existing) = self.published_ports.get(&pm.host_port) {
+                return Err(Error::Other(format!(
+                    "host port {} already in use by container '{existing}'",
+                    pm.host_port
+                )));
+            }
+            sandbox::net::nat::add_port_forward(
+                &pm.protocol.to_string(),
+                pm.host_port,
+                container_ip,
+                pm.container_port,
+            )?;
+            self.published_ports.insert(pm.host_port, spec.name.clone());
+        }
+
+        // Auto-add /etc/resolv.conf bind mount (read-only) so DNS works
+        if !spec
+            .bind_mounts
+            .iter()
+            .any(|m| m.target == "/etc/resolv.conf")
+        {
+            spec.bind_mounts.push(sandbox::protocol::BindMount {
+                source: "/etc/resolv.conf".to_string(),
+                target: "/etc/resolv.conf".to_string(),
+                readonly: true,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Clean up bridged networking for a container.
+    fn cleanup_bridged_networking(&mut self, spec: &ContainerSpec) {
+        let bridge = match &spec.network {
+            sandbox::protocol::NetworkMode::Bridged { bridge, .. } => bridge.clone(),
+            _ => return,
+        };
+
+        // Release IP
+        if let Some(allocator) = self.ipam.get_mut(&bridge) {
+            allocator.release(&spec.name);
+        }
+
+        // Remove port forwarding rules
+        for pm in &spec.publish {
+            let _ = sandbox::net::nat::remove_port_forward(&pm.protocol.to_string(), pm.host_port);
+            self.published_ports.remove(&pm.host_port);
+        }
+
+        // Decrement bridge refcount
+        if let Some(count) = self.bridge_refcounts.get_mut(&bridge) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                // Last container on this bridge — clean up
+                self.bridge_refcounts.remove(&bridge);
+                let _ = sandbox::net::bridge::delete_bridge(&bridge);
+                sandbox::net::nat::cleanup_nat();
+                if let Some(allocator) = self.ipam.remove(&bridge) {
+                    allocator.remove_state();
+                }
+                tracing::info!("bridge {bridge} removed (last container left)");
+            }
+        }
+    }
+
+    /// Validate that --publish is only used with bridged networking.
+    fn validate_publish(spec: &ContainerSpec) -> Result<()> {
+        if !spec.publish.is_empty()
+            && !matches!(spec.network, sandbox::protocol::NetworkMode::Bridged { .. })
+        {
+            return Err(Error::Other(
+                "--publish requires --network bridged (port forwarding makes no sense with host or no networking)".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Handle a container exit: reap the child, update state, clean up resources.
     #[tracing::instrument(skip_all, level = "debug", fields(name = name))]
     pub fn handle_container_exit(&mut self, name: &str) -> i32 {
@@ -386,6 +539,10 @@ impl ContainerManager {
 
         // Auto-remove ephemeral containers
         if is_ephemeral {
+            // Clean up networking before removing the container
+            if let Some(c) = self.containers.get(name) {
+                self.cleanup_bridged_networking(&c.spec.clone());
+            }
             if let Some(mut c) = self.containers.remove(name) {
                 // Defer rootfs deletion to a background task so we release
                 // the manager mutex quickly.
@@ -583,6 +740,19 @@ impl ContainerManager {
         }
 
         self.apply_image_config(&mut spec);
+
+        // Validate and set up bridged networking
+        if let Err(e) = Self::validate_publish(&spec) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("{e}"),
+            });
+        }
+        if let Err(e) = self.setup_bridged_networking(&mut spec) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("network setup failed: {e}"),
+            });
+        }
+
         let mut container = Container::new(spec);
 
         // Prepare rootfs (copy image + idmap mount)
@@ -607,6 +777,19 @@ impl ContainerManager {
         }
 
         self.apply_image_config(&mut spec);
+
+        // Validate and set up bridged networking (IPAM, NAT, port forwarding)
+        if let Err(e) = Self::validate_publish(&spec) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("{e}"),
+            });
+        }
+        if let Err(e) = self.setup_bridged_networking(&mut spec) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("network setup failed: {e}"),
+            });
+        }
+
         let mut container = Container::new(spec);
         container.ephemeral = true;
 
@@ -949,6 +1132,9 @@ impl ContainerManager {
                 });
             }
         };
+
+        // Clean up networking
+        self.cleanup_bridged_networking(&container.spec.clone());
 
         // Defer rootfs deletion to a background task.
         if let Some(ref pool_name) = container.pool_name {

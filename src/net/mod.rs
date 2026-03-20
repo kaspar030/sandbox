@@ -4,6 +4,8 @@
 //! without shelling out to `ip` or depending on an async netlink library.
 
 pub mod bridge;
+pub mod ipam;
+pub mod nat;
 pub mod netlink;
 pub mod veth;
 
@@ -34,8 +36,8 @@ pub fn setup_container_network(
     // Move container-side veth into the container's network namespace
     veth::move_to_netns(&container_veth, child_pid)?;
 
-    // Ensure bridge exists
-    bridge::ensure_bridge(bridge_name)?;
+    // Ensure bridge exists with gateway IP
+    bridge::ensure_bridge(bridge_name, gateway, prefix_len)?;
 
     // Attach host-side veth to bridge
     bridge::add_to_bridge(bridge_name, &host_veth)?;

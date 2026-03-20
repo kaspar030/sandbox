@@ -46,6 +46,8 @@ pub struct ContainerSpec {
     pub seccomp: SeccompMode,
     pub capabilities: CapabilitySpec,
     pub bind_mounts: Vec<BindMount>,
+    /// Port mappings for bridged networking (host_port:container_port/proto).
+    pub publish: Vec<PortMapping>,
     pub use_init: bool,
     /// If true, run detached (no PTY, no interactive I/O).
     /// If false (default), allocate a PTY and send master fd to client.
@@ -70,6 +72,7 @@ impl Default for ContainerSpec {
             seccomp: SeccompMode::Default,
             capabilities: CapabilitySpec::default(),
             bind_mounts: Vec::new(),
+            publish: Vec::new(),
             use_init: false,
             detach: false,
         }
@@ -165,12 +168,38 @@ pub enum NetworkMode {
     /// Create isolated network namespace with veth + bridge.
     Bridged {
         bridge: String,
-        address: Ipv4Addr,
-        gateway: Ipv4Addr,
+        /// Container IP — auto-allocated by IPAM if None.
+        address: Option<Ipv4Addr>,
+        /// Gateway IP — auto-assigned (bridge IP) if None.
+        gateway: Option<Ipv4Addr>,
         prefix_len: u8,
     },
     /// Isolated network namespace, no configuration (user sets up manually).
     None,
+}
+
+/// Port mapping for bridged networking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortMapping {
+    pub host_port: u16,
+    pub container_port: u16,
+    pub protocol: PortProtocol,
+}
+
+/// Protocol for port mapping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PortProtocol {
+    Tcp,
+    Udp,
+}
+
+impl std::fmt::Display for PortProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PortProtocol::Tcp => write!(f, "tcp"),
+            PortProtocol::Udp => write!(f, "udp"),
+        }
+    }
 }
 
 /// Seccomp profile selection.

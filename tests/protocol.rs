@@ -45,6 +45,7 @@ fn test_roundtrip_request_create() {
             target: "/mnt".to_string(),
             readonly: true,
         }],
+        publish: Vec::new(),
         use_init: false,
         detach: false,
     };
@@ -189,8 +190,8 @@ fn test_network_mode_bridged_roundtrip() {
     let spec = ContainerSpec {
         network: NetworkMode::Bridged {
             bridge: "sbr0".to_string(),
-            address: "10.0.0.2".parse().unwrap(),
-            gateway: "10.0.0.1".parse().unwrap(),
+            address: Some("10.0.0.2".parse().unwrap()),
+            gateway: Some("10.0.0.1".parse().unwrap()),
             prefix_len: 24,
         },
         ..Default::default()
@@ -209,8 +210,14 @@ fn test_network_mode_bridged_roundtrip() {
                 prefix_len,
             } => {
                 assert_eq!(bridge, "sbr0");
-                assert_eq!(address, "10.0.0.2".parse::<std::net::Ipv4Addr>().unwrap());
-                assert_eq!(gateway, "10.0.0.1".parse::<std::net::Ipv4Addr>().unwrap());
+                assert_eq!(
+                    address,
+                    Some("10.0.0.2".parse::<std::net::Ipv4Addr>().unwrap())
+                );
+                assert_eq!(
+                    gateway,
+                    Some("10.0.0.1".parse::<std::net::Ipv4Addr>().unwrap())
+                );
                 assert_eq!(prefix_len, 24);
             }
             _ => panic!("expected Bridged network mode"),

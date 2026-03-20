@@ -84,6 +84,10 @@ enum Commands {
         #[arg(long = "bind")]
         bind: Vec<String>,
 
+        /// Publish container port (hostPort:containerPort[/tcp|udp])
+        #[arg(long = "publish", short = 'p')]
+        publish: Vec<String>,
+
         /// Use built-in mini-init as PID 1
         #[arg(long)]
         init: bool,
@@ -136,6 +140,8 @@ enum Commands {
         cap_add: Vec<String>,
         #[arg(long = "bind")]
         bind: Vec<String>,
+        #[arg(long = "publish", short = 'p')]
+        publish: Vec<String>,
         #[arg(long)]
         init: bool,
 
@@ -404,6 +410,7 @@ fn main() -> anyhow::Result<()> {
             seccomp,
             cap_add,
             bind,
+            publish,
             init,
             detach,
             uid_map,
@@ -416,6 +423,7 @@ fn main() -> anyhow::Result<()> {
                 seccomp, cap_add, bind, init, uid_map, gid_map, command,
             )?;
             spec.detach = detach;
+            spec.publish = parse_port_mappings(&publish)?;
             let mut client = Client::connect(cli.socket.as_deref())?;
 
             if detach {
@@ -453,6 +461,7 @@ fn main() -> anyhow::Result<()> {
             seccomp,
             cap_add,
             bind,
+            publish,
             init,
             start,
             detach,
@@ -461,10 +470,11 @@ fn main() -> anyhow::Result<()> {
             command,
         } => {
             let name = name.unwrap_or_else(|| petname::petname(2, "-").unwrap());
-            let spec = build_spec(
+            let mut spec = build_spec(
                 name, image, pool, hostname, memory, cpus, pids_max, network, bridge, ip, gateway,
                 seccomp, cap_add, bind, init, uid_map, gid_map, command,
             )?;
+            spec.publish = parse_port_mappings(&publish)?;
             let mut client = Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Create(spec))?;
 
@@ -809,14 +819,9 @@ fn build_spec(
         "host" => NetworkMode::Host,
         "none" => NetworkMode::None,
         "bridged" => {
-            let addr: std::net::Ipv4Addr = ip
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("--ip required for bridged networking"))?
-                .parse()?;
-            let gw: std::net::Ipv4Addr = gateway
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("--gateway required for bridged networking"))?
-                .parse()?;
+            let addr: Option<std::net::Ipv4Addr> = ip.as_deref().map(|s| s.parse()).transpose()?;
+            let gw: Option<std::net::Ipv4Addr> =
+                gateway.as_deref().map(|s| s.parse()).transpose()?;
             NetworkMode::Bridged {
                 bridge: bridge.unwrap_or_else(|| "sbr0".to_string()),
                 address: addr,
@@ -911,6 +916,7 @@ fn build_spec(
             caps
         },
         bind_mounts,
+        publish: Vec::new(), // populated by caller from --publish flags
         use_init: init,
         detach: false,
     })
@@ -933,6 +939,43 @@ fn parse_exec_user(s: &str) -> anyhow::Result<sandbox_proto::ExecUser> {
 }
 
 /// Parse a mount spec: "SOURCE:TARGET" or "SOURCE:TARGET:ro"
+/// Parse port mapping specs: "hostPort:containerPort[/tcp|/udp]"
+fn parse_port_mappings(specs: &[String]) -> anyhow::Result<Vec<sandbox_proto::PortMapping>> {
+    specs.iter().map(|s| parse_port_mapping(s)).collect()
+}
+
+fn parse_port_mapping(spec: &str) -> anyhow::Result<sandbox_proto::PortMapping> {
+    // Format: hostPort:containerPort[/protocol]
+    // Examples: 8080:80, 8080:80/tcp, 5353:53/udp
+    let (ports, proto) = if let Some((p, pr)) = spec.rsplit_once('/') {
+        let protocol = match pr {
+            "tcp" => sandbox_proto::PortProtocol::Tcp,
+            "udp" => sandbox_proto::PortProtocol::Udp,
+            other => anyhow::bail!("unknown protocol: {other} (expected tcp or udp)"),
+        };
+        (p, protocol)
+    } else {
+        (spec, sandbox_proto::PortProtocol::Tcp)
+    };
+
+    let (host, container) = ports.split_once(':').ok_or_else(|| {
+        anyhow::anyhow!("invalid port mapping: {spec} (expected hostPort:containerPort)")
+    })?;
+
+    let host_port: u16 = host
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid host port: {host}"))?;
+    let container_port: u16 = container
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid container port: {container}"))?;
+
+    Ok(sandbox_proto::PortMapping {
+        host_port,
+        container_port,
+        protocol: proto,
+    })
+}
+
 /// Parse a mount spec with multiple supported formats:
 ///
 ///   /path                     → source=/path, target=/path, rw

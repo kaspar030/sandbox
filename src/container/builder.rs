@@ -111,8 +111,8 @@ impl ContainerBuilder {
     ) -> Self {
         self.spec.network = NetworkMode::Bridged {
             bridge: bridge.into(),
-            address,
-            gateway,
+            address: Some(address),
+            gateway: Some(gateway),
             prefix_len,
         };
         self

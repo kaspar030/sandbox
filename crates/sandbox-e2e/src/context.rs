@@ -1,0 +1,202 @@
+//! TestContext: manages daemon lifecycle, client connections, and CLI execution.
+
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+pub struct TestContext {
+    pub sandbox_bin: PathBuf,
+    pub workdir: PathBuf,
+    pub data_dir: PathBuf,
+    pub socket_path: PathBuf,
+    daemon_child: Option<Child>,
+    keep: bool,
+}
+
+impl TestContext {
+    pub fn new(sandbox_bin: PathBuf, pool: &Path, keep: bool) -> Self {
+        // Create a unique workdir under the pool
+        let id: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let workdir = pool.join(format!("sandbox-e2e-{id}"));
+        let data_dir = workdir.join("data");
+        let socket_path = workdir.join("sandbox.sock");
+
+        std::fs::create_dir_all(&data_dir).expect("failed to create workdir");
+
+        Self {
+            sandbox_bin,
+            workdir,
+            data_dir,
+            socket_path,
+            daemon_child: None,
+            keep,
+        }
+    }
+
+    /// Start the daemon process.
+    pub fn start_daemon(&mut self) {
+        let child = Command::new(&self.sandbox_bin)
+            .args([
+                "daemon",
+                "start",
+                "--socket",
+                self.socket_path.to_str().unwrap(),
+                "--data-dir",
+                self.data_dir.to_str().unwrap(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to start daemon");
+
+        self.daemon_child = Some(child);
+
+        // Wait for socket to appear
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if self.socket_path.exists() {
+                // Brief extra wait for the daemon to be fully ready
+                std::thread::sleep(Duration::from_millis(100));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!(
+            "daemon did not create socket at {} within 10s",
+            self.socket_path.display()
+        );
+    }
+
+    /// Stop the daemon gracefully.
+    pub fn stop_daemon(&mut self) {
+        // Try graceful shutdown via CLI
+        let _ = self.cli(&["daemon", "stop"]);
+        std::thread::sleep(Duration::from_millis(500));
+
+        // If still running, kill it
+        if let Some(child) = self.daemon_child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.daemon_child = None;
+    }
+
+    /// Get a sandbox-client connected to this daemon.
+    #[allow(dead_code)]
+    pub fn client(&self) -> sandbox_client::Client {
+        sandbox_client::Client::connect(Some(self.socket_path.to_str().unwrap()))
+            .expect("failed to connect to daemon")
+    }
+
+    /// Run a sandbox CLI command, returning the full output.
+    pub fn cli(&self, args: &[&str]) -> Output {
+        Command::new(&self.sandbox_bin)
+            .arg("--socket")
+            .arg(self.socket_path.to_str().unwrap())
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run sandbox CLI: {e}"))
+    }
+
+    /// Run a sandbox CLI command and return stdout as a string.
+    /// Panics with stderr if the command fails.
+    pub fn cli_ok(&self, args: &[&str]) -> String {
+        let output = self.cli(args);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            panic!(
+                "CLI command failed: sandbox {}\nstdout: {stdout}\nstderr: {stderr}",
+                args.join(" ")
+            );
+        }
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    /// Run a sandbox CLI command and return stderr.
+    #[allow(dead_code)]
+    pub fn cli_stderr(&self, args: &[&str]) -> String {
+        let output = self.cli(args);
+        String::from_utf8_lossy(&output.stderr).to_string()
+    }
+
+    /// Check if a CLI command succeeds.
+    pub fn cli_succeeds(&self, args: &[&str]) -> bool {
+        self.cli(args).status.success()
+    }
+
+    /// Check if a CLI command fails.
+    pub fn cli_fails(&self, args: &[&str]) -> bool {
+        !self.cli(args).status.success()
+    }
+
+    /// Ensure required images are pulled (only on first run).
+    pub fn ensure_images(&self) {
+        let output = self.cli_ok(&["image", "list"]);
+
+        if !output.contains("alpine") {
+            eprint!("  Pulling alpine:latest...");
+            self.cli_ok(&["image", "pull", "alpine:latest"]);
+            eprintln!("OK");
+        }
+
+        if !output.contains("ubuntu") {
+            eprint!("  Pulling ubuntu:noble...");
+            self.cli_ok(&["image", "pull", "ubuntu:noble", "--name", "ubuntu"]);
+            eprintln!("OK");
+        }
+    }
+
+    /// Restart the daemon (stop + start). Used for recovery tests.
+    pub fn restart_daemon(&mut self) {
+        self.stop_daemon();
+        std::thread::sleep(Duration::from_millis(200));
+        self.start_daemon();
+    }
+
+    /// Read daemon stderr (for debugging).
+    #[allow(dead_code)]
+    pub fn daemon_stderr(&mut self) -> String {
+        if let Some(ref mut child) = self.daemon_child
+            && let Some(ref mut stderr) = child.stderr
+        {
+            let mut buf = String::new();
+            let _ = stderr.read_to_string(&mut buf);
+            return buf;
+        }
+        String::new()
+    }
+}
+
+impl Drop for TestContext {
+    fn drop(&mut self) {
+        if self.keep {
+            eprintln!(
+                "\n  --keep: daemon still running, workdir preserved at {}",
+                self.workdir.display()
+            );
+            eprintln!("  socket: {}", self.socket_path.display());
+            // Detach daemon so it's not killed
+            if self.daemon_child.is_some() {
+                std::mem::forget(self.daemon_child.take());
+            }
+            return;
+        }
+
+        self.stop_daemon();
+
+        // Clean up workdir
+        if self.workdir.exists() {
+            // Use btrfs subvolume delete for any subvolumes, then rm -rf
+            let _ = Command::new("btrfs")
+                .args(["subvolume", "delete", "--"])
+                .arg(self.workdir.join("data"))
+                .output();
+            let _ = std::fs::remove_dir_all(&self.workdir);
+        }
+    }
+}
