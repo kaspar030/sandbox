@@ -112,6 +112,17 @@ fn all_tests() -> Vec<Test> {
             "env_no_daemon_leak",
             tests::env::test_env_no_daemon_leak,
         ),
+        Test::Immutable("Environment", "env_run", tests::env::test_env_run),
+        Test::Immutable(
+            "Environment",
+            "env_create_persist",
+            tests::env::test_env_create_persist,
+        ),
+        Test::Immutable(
+            "Environment",
+            "env_exec_override",
+            tests::env::test_env_exec_override,
+        ),
         // Networking
         Test::Immutable(
             "Networking",

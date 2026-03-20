@@ -130,6 +130,7 @@ fn test_roundtrip_all_request_variants() {
                 uid: 1000,
                 gid: 1000,
             }),
+            env: vec!["FOO=bar".to_string()],
         },
         Request::Shutdown,
     ];
@@ -278,4 +279,31 @@ fn test_container_spec_backward_compat() {
     assert!(spec.entrypoint.is_empty());
     assert!(spec.env.is_empty());
     assert_eq!(spec.working_dir, "/");
+}
+
+/// Verify that an Exec request with env roundtrips correctly.
+#[test]
+fn test_exec_with_env_roundtrip() {
+    let req = Request::Exec {
+        name: "test".to_string(),
+        command: vec!["/bin/env".to_string()],
+        detach: false,
+        user: None,
+        env: vec!["FOO=bar".to_string(), "BAZ=qux".to_string()],
+    };
+
+    let encoded = encode_message(&req).unwrap();
+    let (decoded, rest): (Request, &[u8]) = decode_message(&encoded).unwrap();
+    assert!(rest.is_empty());
+
+    match decoded {
+        Request::Exec {
+            name, command, env, ..
+        } => {
+            assert_eq!(name, "test");
+            assert_eq!(command, vec!["/bin/env"]);
+            assert_eq!(env, vec!["FOO=bar", "BAZ=qux"]);
+        }
+        _ => panic!("expected Exec request"),
+    }
 }

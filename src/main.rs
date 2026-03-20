@@ -92,6 +92,10 @@ enum Commands {
         #[arg(long = "volume", short = 'v')]
         volume: Vec<String>,
 
+        /// Set environment variable (KEY=VALUE or KEY to pass from host)
+        #[arg(short = 'e', long = "env")]
+        env: Vec<String>,
+
         /// Use built-in mini-init as PID 1
         #[arg(long)]
         init: bool,
@@ -148,6 +152,9 @@ enum Commands {
         publish: Vec<String>,
         #[arg(long = "volume", short = 'v')]
         volume: Vec<String>,
+        /// Set environment variable (KEY=VALUE or KEY to pass from host)
+        #[arg(short = 'e', long = "env")]
+        env: Vec<String>,
         #[arg(long)]
         init: bool,
 
@@ -222,6 +229,10 @@ enum Commands {
         /// Run as user UID or UID:GID (default: 0, container root)
         #[arg(short = 'u', long)]
         user: Option<String>,
+
+        /// Set environment variable for this exec only (KEY=VALUE or KEY to pass from host)
+        #[arg(short = 'e', long = "env")]
+        env: Vec<String>,
 
         /// Run detached (no PTY, no interactive I/O)
         #[arg(short, long)]
@@ -535,6 +546,7 @@ fn main() -> anyhow::Result<()> {
             bind,
             publish,
             volume,
+            env,
             init,
             detach,
             uid_map,
@@ -542,9 +554,27 @@ fn main() -> anyhow::Result<()> {
             command,
         } => {
             let name = name.unwrap_or_else(|| petname::petname(2, "-").unwrap());
+            let resolved_env = resolve_env(&env);
             let mut spec = build_spec(
-                name, image, pool, hostname, memory, cpus, pids_max, network, bridge, ip, gateway,
-                seccomp, cap_add, bind, init, uid_map, gid_map, command,
+                name,
+                image,
+                pool,
+                hostname,
+                memory,
+                cpus,
+                pids_max,
+                network,
+                bridge,
+                ip,
+                gateway,
+                seccomp,
+                cap_add,
+                bind,
+                resolved_env,
+                init,
+                uid_map,
+                gid_map,
+                command,
             )?;
             spec.detach = detach;
             spec.publish = parse_port_mappings(&publish)?;
@@ -588,6 +618,7 @@ fn main() -> anyhow::Result<()> {
             bind,
             publish,
             volume,
+            env,
             init,
             start,
             detach,
@@ -596,9 +627,27 @@ fn main() -> anyhow::Result<()> {
             command,
         } => {
             let name = name.unwrap_or_else(|| petname::petname(2, "-").unwrap());
+            let resolved_env = resolve_env(&env);
             let mut spec = build_spec(
-                name, image, pool, hostname, memory, cpus, pids_max, network, bridge, ip, gateway,
-                seccomp, cap_add, bind, init, uid_map, gid_map, command,
+                name,
+                image,
+                pool,
+                hostname,
+                memory,
+                cpus,
+                pids_max,
+                network,
+                bridge,
+                ip,
+                gateway,
+                seccomp,
+                cap_add,
+                bind,
+                resolved_env,
+                init,
+                uid_map,
+                gid_map,
+                command,
             )?;
             spec.publish = parse_port_mappings(&publish)?;
             spec.volumes = parse_volume_mounts(&volume)?;
@@ -711,10 +760,12 @@ fn main() -> anyhow::Result<()> {
         Commands::Exec {
             name,
             user,
+            env,
             command,
             detach,
         } => {
             let exec_user = user.map(|u| parse_exec_user(&u)).transpose()?;
+            let resolved_env = resolve_env(&env);
             let mut client = Client::connect(cli.socket.as_deref())?;
             if detach {
                 let resp = client.request(&Request::Exec {
@@ -722,6 +773,7 @@ fn main() -> anyhow::Result<()> {
                     command,
                     detach: true,
                     user: exec_user,
+                    env: resolved_env,
                 })?;
                 print_response(&resp);
             } else {
@@ -730,6 +782,7 @@ fn main() -> anyhow::Result<()> {
                     command,
                     detach: false,
                     user: exec_user,
+                    env: resolved_env,
                 })?;
                 if let Response::Error { .. } = &resp {
                     print_response(&resp);
@@ -1146,6 +1199,23 @@ fn print_response(resp: &Response) {
     }
 }
 
+/// Resolve environment variable arguments.
+///
+/// - `KEY=VALUE` → passed as-is
+/// - `KEY` (no `=`) → resolved from the caller's environment; silently skipped if not set
+fn resolve_env(raw: &[String]) -> Vec<String> {
+    let mut resolved = Vec::with_capacity(raw.len());
+    for item in raw {
+        if item.contains('=') {
+            resolved.push(item.clone());
+        } else if let Ok(val) = std::env::var(item) {
+            resolved.push(format!("{item}={val}"));
+        }
+        // else: bare name not set in caller env → silently skip (Docker behavior)
+    }
+    resolved
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_spec(
     name: String,
@@ -1162,6 +1232,7 @@ fn build_spec(
     seccomp: String,
     cap_add: Vec<String>,
     bind: Vec<String>,
+    env: Vec<String>,
     init: bool,
     uid_map: Vec<String>,
     gid_map: Vec<String>,
@@ -1235,7 +1306,7 @@ fn build_spec(
         pool,
         entrypoint: Vec::new(),
         command: cmd,
-        env: Vec::new(),
+        env,
         working_dir: "/".to_string(),
         hostname,
         uid_mappings,

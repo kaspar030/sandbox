@@ -739,7 +739,8 @@ impl ContainerManager {
                 command,
                 detach,
                 user,
-            } => self.handle_exec(&name, command, detach, user),
+                env,
+            } => self.handle_exec(&name, command, detach, user, env),
             Request::ImageImport { name, source, pool } => {
                 self.handle_image_import(&name, &source, pool.as_deref())
             }
@@ -2152,6 +2153,7 @@ impl ContainerManager {
         command: Vec<String>,
         detach: bool,
         user: Option<sandbox::protocol::ExecUser>,
+        exec_env: Vec<String>,
     ) -> HandleResult {
         let container = match self.containers.get(name) {
             Some(c) => c,
@@ -2177,7 +2179,8 @@ impl ContainerManager {
             }
         };
 
-        let env = container.spec.env.clone();
+        // Merge: container env is the base, per-exec env overrides per-key
+        let env = merge_env(&container.spec.env, &exec_env);
         match exec_in_container(pid, name, &command, detach, user, &env) {
             Ok(result) => {
                 let response = Response::ExecStarted {
@@ -2372,6 +2375,33 @@ struct ExecResult {
     pid: libc::pid_t,
     pidfd: OwnedFd,
     pty_master: Option<OwnedFd>,
+}
+
+/// Merge container env (base) with per-exec env (overrides).
+///
+/// For keys present in both, the exec value wins. Exec env can also add new keys.
+fn merge_env(container_env: &[String], exec_env: &[String]) -> Vec<String> {
+    if exec_env.is_empty() {
+        return container_env.to_vec();
+    }
+    // Build a map from container env, preserving order
+    let mut map: Vec<(String, String)> = Vec::new();
+    for var in container_env {
+        if let Some((k, v)) = var.split_once('=') {
+            map.push((k.to_string(), v.to_string()));
+        }
+    }
+    // Override or append from exec env
+    for var in exec_env {
+        if let Some((k, v)) = var.split_once('=') {
+            if let Some(entry) = map.iter_mut().find(|(key, _)| key == k) {
+                entry.1 = v.to_string();
+            } else {
+                map.push((k.to_string(), v.to_string()));
+            }
+        }
+    }
+    map.into_iter().map(|(k, v)| format!("{k}={v}")).collect()
 }
 
 /// Execute a command inside an existing container's namespaces.

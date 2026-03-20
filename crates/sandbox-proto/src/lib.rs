@@ -361,6 +361,9 @@ pub enum Request {
         detach: bool,
         /// Run as a specific user (default: container root, uid 0).
         user: Option<ExecUser>,
+        /// Per-exec environment variables (merged on top of container env).
+        #[serde(default)]
+        env: Vec<String>,
     },
     /// Import an image from a path (directory or tar.gz).
     ImageImport {
