@@ -4,6 +4,7 @@ pub mod images;
 pub mod lifecycle;
 pub mod mounts;
 pub mod networking;
+pub mod networks;
 pub mod persistence;
 pub mod stacks;
 pub mod volumes;

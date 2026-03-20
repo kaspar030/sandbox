@@ -4,11 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "End-to-end tests for the sandbox container manager"
 
-[[bin]]
-name = "sandbox-e2e"
-path = "src/main.rs"
-
 [dependencies]
 sandbox-client = { path = "../sandbox-client" }
 sandbox-proto = { path = "../sandbox-proto" }
 clap = { version = "4", features = ["derive", "env"] }
+nix = { version = "0.31.2", features = ["uio"] }

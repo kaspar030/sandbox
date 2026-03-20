@@ -128,6 +128,27 @@ fn all_tests() -> Vec<Test> {
             "bridged_dns",
             tests::networking::test_bridged_dns,
         ),
+        // Named Networks
+        Test::Immutable(
+            "Networks",
+            "network_create_list_remove",
+            tests::networks::test_network_create_list_remove,
+        ),
+        Test::Immutable(
+            "Networks",
+            "network_with_subnet",
+            tests::networks::test_network_with_subnet,
+        ),
+        Test::Immutable(
+            "Networks",
+            "container_on_named_network",
+            tests::networks::test_container_on_named_network,
+        ),
+        Test::Immutable(
+            "Networks",
+            "default_network",
+            tests::networks::test_default_network,
+        ),
         // Volumes
         Test::Immutable(
             "Volumes",

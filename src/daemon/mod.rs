@@ -76,6 +76,9 @@ pub fn run_daemon(
         Path::new(socket_path),
     );
 
+    // Load persisted networks and create the default network
+    mgr.init_networks();
+
     // Recover from previous crash: clean up leftover containers, cgroups, mounts
     mgr.recover_from_crash();
 

@@ -12,10 +12,26 @@ use sandbox::storage::fs_detect::FsType;
 use sandbox::storage::{self, StorageManager};
 use sandbox::sys::idmap;
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Parse a subnet string like "10.1.0.0/24" into (addr, prefix_len).
+fn parse_subnet(s: &str) -> std::result::Result<(Ipv4Addr, u8), String> {
+    let parts: Vec<&str> = s.split('/').collect();
+    if parts.len() != 2 {
+        return Err(format!("invalid subnet: {s} (expected x.x.x.x/prefix)"));
+    }
+    let addr: Ipv4Addr = parts[0]
+        .parse()
+        .map_err(|_| format!("invalid IP in subnet: {}", parts[0]))?;
+    let prefix: u8 = parts[1]
+        .parse()
+        .map_err(|_| format!("invalid prefix in subnet: {}", parts[1]))?;
+    Ok((addr, prefix))
+}
 
 /// Result of handling a request — includes the response and optionally
 /// a PTY master fd to send to the client via SCM_RIGHTS.
@@ -44,6 +60,16 @@ impl HandleResult {
     }
 }
 
+/// Configuration for a named network.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct NetworkConfig {
+    name: String,
+    bridge: String,
+    subnet: std::net::Ipv4Addr,
+    gateway: std::net::Ipv4Addr,
+    prefix_len: u8,
+}
+
 /// State of an active stack.
 #[derive(Debug, Clone)]
 struct StackState {
@@ -69,6 +95,10 @@ pub struct ContainerManager {
     published_ports: HashMap<u16, String>,
     /// Bridge reference counts: bridge_name → number of containers using it.
     bridge_refcounts: HashMap<String, u32>,
+    /// Named networks: network_name → NetworkConfig.
+    networks: HashMap<String, NetworkConfig>,
+    /// Next subnet index for auto-allocation (10.0.N.0/24).
+    next_subnet_idx: u8,
     /// Active stacks: stack_name → StackState.
     stacks: HashMap<String, StackState>,
     /// Derived paths.
@@ -102,10 +132,41 @@ impl ContainerManager {
             nft_available,
             published_ports: HashMap::new(),
             bridge_refcounts: HashMap::new(),
+            networks: HashMap::new(),
+            next_subnet_idx: 0,
             stacks: HashMap::new(),
             state_dir,
             ipam_dir,
             mounts_dir,
+        }
+    }
+
+    /// Load persisted network configs and create the "default" network if needed.
+    pub fn init_networks(&mut self) {
+        self.load_network_configs();
+
+        // Ensure the "default" network exists (backward compat with --network bridged)
+        if !self.networks.contains_key("default") {
+            let config = NetworkConfig {
+                name: "default".to_string(),
+                bridge: "sbr0".to_string(),
+                subnet: std::net::Ipv4Addr::new(10, 0, 0, 0),
+                gateway: std::net::Ipv4Addr::new(10, 0, 0, 1),
+                prefix_len: 24,
+            };
+            self.networks.insert("default".to_string(), config);
+            // Don't persist the default network — it's always auto-created
+        }
+
+        // Set next_subnet_idx based on existing networks
+        for config in self.networks.values() {
+            let octets = config.subnet.octets();
+            if octets[0] == 10 && octets[1] == 0 {
+                let idx = octets[2];
+                if idx >= self.next_subnet_idx {
+                    self.next_subnet_idx = idx.wrapping_add(1);
+                }
+            }
         }
     }
 
@@ -420,6 +481,21 @@ impl ContainerManager {
     }
 
     fn setup_bridged_networking(&mut self, spec: &mut ContainerSpec) -> Result<()> {
+        // Resolve Named networks to Bridged
+        if let sandbox::protocol::NetworkMode::Named { name } = &spec.network {
+            let net = self.networks.get(name).ok_or_else(|| {
+                Error::Other(format!(
+                    "network '{name}' not found (create it with: sandbox network create {name})"
+                ))
+            })?;
+            spec.network = sandbox::protocol::NetworkMode::Bridged {
+                bridge: net.bridge.clone(),
+                address: None,
+                gateway: Some(net.gateway),
+                prefix_len: net.prefix_len,
+            };
+        }
+
         let (bridge, address, gateway, prefix_len) = match &spec.network {
             sandbox::protocol::NetworkMode::Bridged {
                 bridge,
@@ -541,10 +617,14 @@ impl ContainerManager {
     /// Validate that --publish is only used with bridged networking.
     fn validate_publish(spec: &ContainerSpec) -> Result<()> {
         if !spec.publish.is_empty()
-            && !matches!(spec.network, sandbox::protocol::NetworkMode::Bridged { .. })
+            && !matches!(
+                spec.network,
+                sandbox::protocol::NetworkMode::Bridged { .. }
+                    | sandbox::protocol::NetworkMode::Named { .. }
+            )
         {
             return Err(Error::Other(
-                "--publish requires --network bridged (port forwarding makes no sense with host or no networking)".to_string(),
+                "--publish requires a network (bridged or named)".to_string(),
             ));
         }
         Ok(())
@@ -691,6 +771,11 @@ impl ContainerManager {
             Request::StackDown { name } => self.handle_stack_down(&name),
             Request::StackPs { name } => self.handle_stack_ps(&name),
             Request::StackList => self.handle_stack_list(),
+            Request::NetworkCreate { name, subnet } => {
+                self.handle_network_create(&name, subnet.as_deref())
+            }
+            Request::NetworkRemove { name } => self.handle_network_remove(&name),
+            Request::NetworkList => self.handle_network_list(),
             Request::PoolList => self.handle_pool_list(),
             Request::Shutdown => {
                 tracing::info!("shutdown requested");
@@ -1218,13 +1303,37 @@ impl ContainerManager {
 
         let stack_name = def.name.clone();
 
-        // Generate bridge name if not specified (max 15 chars for Linux interface names)
-        let mut bridge_name = if def.network.bridge.is_empty() {
-            format!("sbr-{stack_name}")
+        // Create or reference a named network for the stack
+        let network_name = if !def.network.subnet.is_empty() || def.network.bridge.is_empty() {
+            // Auto-create a network for this stack
+            let net_name = format!("stack-{stack_name}");
+            let subnet = if def.network.subnet.is_empty() {
+                None
+            } else {
+                Some(def.network.subnet.as_str())
+            };
+            let result = self.handle_network_create(&net_name, subnet);
+            if let Response::Error { message } = &result.response {
+                // Might already exist from a previous run
+                if !message.contains("already exists") {
+                    return result;
+                }
+            }
+            net_name
         } else {
+            // Use existing named network
             def.network.bridge.clone()
         };
-        bridge_name.truncate(15);
+
+        let bridge_name = self
+            .networks
+            .get(&network_name)
+            .map(|n| n.bridge.clone())
+            .unwrap_or_else(|| {
+                let mut b = format!("sbr-{stack_name}");
+                b.truncate(15);
+                b
+            });
 
         // Create volumes (prefixed with stack name)
         let mut volume_names: Vec<String> = Vec::new();
@@ -1257,11 +1366,8 @@ impl ContainerManager {
                     svc.command.clone()
                 },
                 env: svc.env.clone(),
-                network: sandbox::protocol::NetworkMode::Bridged {
-                    bridge: bridge_name.clone(),
-                    address: None,
-                    gateway: None,
-                    prefix_len: 24,
+                network: sandbox::protocol::NetworkMode::Named {
+                    name: network_name.clone(),
                 },
                 use_init: svc.init,
                 detach: true, // stacks run detached
@@ -1425,6 +1531,12 @@ impl ContainerManager {
             let _ = self.handle_volume_remove_inner(vol, None);
         }
 
+        // Remove the stack's network (if it was auto-created)
+        let net_name = format!("stack-{name}");
+        if self.networks.contains_key(&net_name) {
+            let _ = self.handle_network_remove(&net_name);
+        }
+
         tracing::info!("stack '{}' down", name);
 
         HandleResult::response_only(Response::StackDown {
@@ -1483,6 +1595,176 @@ impl ContainerManager {
         }
         for vol in volumes {
             let _ = self.handle_volume_remove_inner(vol, None);
+        }
+    }
+
+    fn handle_network_create(&mut self, name: &str, subnet: Option<&str>) -> HandleResult {
+        if self.networks.contains_key(name) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("network '{name}' already exists"),
+            });
+        }
+
+        if !self.nft_available {
+            return HandleResult::response_only(Response::Error {
+                message: "bridged networking requires nftables (nft)".to_string(),
+            });
+        }
+
+        // Parse or auto-allocate subnet
+        let (subnet_addr, prefix_len) = if let Some(s) = subnet {
+            match parse_subnet(s) {
+                Ok(v) => v,
+                Err(e) => {
+                    return HandleResult::response_only(Response::Error { message: e });
+                }
+            }
+        } else {
+            let idx = self.next_subnet_idx;
+            self.next_subnet_idx = self.next_subnet_idx.wrapping_add(1);
+            (std::net::Ipv4Addr::new(10, 0, idx, 0), 24u8)
+        };
+
+        let gateway = std::net::Ipv4Addr::from(u32::from(subnet_addr) + 1);
+
+        // Bridge name (truncate to 15 chars)
+        let mut bridge = format!("sbr-{name}");
+        bridge.truncate(15);
+
+        // Create bridge + NAT
+        if let Err(e) = sandbox::net::bridge::ensure_bridge(&bridge, gateway, prefix_len) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("bridge creation failed: {e}"),
+            });
+        }
+
+        let subnet_str = format!("{subnet_addr}/{prefix_len}");
+        if let Err(e) = sandbox::net::nat::setup_masquerade(&bridge, &subnet_str) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("NAT setup failed: {e}"),
+            });
+        }
+
+        // Create IPAM for this network
+        let allocator =
+            sandbox::net::ipam::IpAllocator::new(subnet_addr, prefix_len, &bridge, &self.ipam_dir);
+        let _ = allocator.save();
+        self.ipam.insert(bridge.clone(), allocator);
+        *self.bridge_refcounts.entry(bridge.clone()).or_insert(0) += 0; // just register
+
+        // Persist network config
+        let config = NetworkConfig {
+            name: name.to_string(),
+            bridge: bridge.clone(),
+            subnet: subnet_addr,
+            gateway,
+            prefix_len,
+        };
+        self.save_network_config(&config);
+        self.networks.insert(name.to_string(), config);
+
+        tracing::info!("created network '{name}' (bridge: {bridge}, subnet: {subnet_str})");
+
+        HandleResult::response_only(Response::NetworkCreated {
+            name: name.to_string(),
+        })
+    }
+
+    fn handle_network_remove(&mut self, name: &str) -> HandleResult {
+        let config = match self.networks.get(name) {
+            Some(c) => c.clone(),
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("network '{name}' not found"),
+                });
+            }
+        };
+
+        // Check if any containers are using this network's bridge
+        let in_use = self.containers.values().any(|c| {
+            matches!(&c.spec.network, sandbox::protocol::NetworkMode::Bridged { bridge, .. } if bridge == &config.bridge)
+        });
+        if in_use {
+            return HandleResult::response_only(Response::Error {
+                message: format!("network '{name}' is in use by containers"),
+            });
+        }
+
+        // Clean up bridge + NAT + IPAM
+        let _ = sandbox::net::bridge::delete_bridge(&config.bridge);
+        sandbox::net::nat::cleanup_nat();
+        self.ipam.remove(&config.bridge);
+        self.bridge_refcounts.remove(&config.bridge);
+        self.networks.remove(name);
+        self.remove_network_config(name);
+
+        tracing::info!("removed network '{name}'");
+
+        HandleResult::response_only(Response::NetworkRemoved {
+            name: name.to_string(),
+        })
+    }
+
+    fn handle_network_list(&self) -> HandleResult {
+        let infos: Vec<sandbox::protocol::NetworkInfo> = self
+            .networks
+            .values()
+            .map(|n| {
+                let containers = self
+                    .containers
+                    .values()
+                    .filter(|c| {
+                        matches!(&c.spec.network, sandbox::protocol::NetworkMode::Bridged { bridge, .. } if bridge == &n.bridge)
+                    })
+                    .count() as u32;
+                sandbox::protocol::NetworkInfo {
+                    name: n.name.clone(),
+                    bridge: n.bridge.clone(),
+                    subnet: format!("{}/{}", n.subnet, n.prefix_len),
+                    gateway: n.gateway.to_string(),
+                    containers,
+                }
+            })
+            .collect();
+        HandleResult::response_only(Response::NetworkList(infos))
+    }
+
+    fn save_network_config(&self, config: &NetworkConfig) {
+        let dir = self
+            .state_dir
+            .parent()
+            .unwrap_or(&self.state_dir)
+            .join("networks");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!("{}.json", config.name));
+        if let Ok(json) = serde_json::to_string(config) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    fn remove_network_config(&self, name: &str) {
+        let dir = self
+            .state_dir
+            .parent()
+            .unwrap_or(&self.state_dir)
+            .join("networks");
+        let _ = std::fs::remove_file(dir.join(format!("{name}.json")));
+    }
+
+    fn load_network_configs(&mut self) {
+        let dir = self
+            .state_dir
+            .parent()
+            .unwrap_or(&self.state_dir)
+            .join("networks");
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if let Ok(json) = std::fs::read_to_string(entry.path()) {
+                    if let Ok(config) = serde_json::from_str::<NetworkConfig>(&json) {
+                        self.networks.insert(config.name.clone(), config);
+                    }
+                }
+            }
         }
     }
 

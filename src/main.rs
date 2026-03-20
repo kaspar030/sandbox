@@ -244,6 +244,12 @@ enum Commands {
         action: MountAction,
     },
 
+    /// Manage named networks
+    Network {
+        #[command(subcommand)]
+        action: NetworkAction,
+    },
+
     /// Manage container stacks (groups of containers, networks, volumes)
     Stack {
         #[command(subcommand)]
@@ -376,6 +382,27 @@ enum MountAction {
     #[command(alias = "ls")]
     List {
         /// Container name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum NetworkAction {
+    /// Create a named network
+    Create {
+        /// Network name
+        name: String,
+        /// Subnet (e.g., 10.1.0.0/24). Auto-allocated if omitted.
+        #[arg(long)]
+        subnet: Option<String>,
+    },
+    /// List networks
+    #[command(alias = "ls")]
+    List,
+    /// Remove a network
+    #[command(alias = "rm")]
+    Remove {
+        /// Network name
         name: String,
     },
 }
@@ -813,6 +840,42 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        Commands::Network { action } => {
+            let mut client = Client::connect(cli.socket.as_deref())?;
+            match action {
+                NetworkAction::Create { name, subnet } => {
+                    let resp = client.request(&Request::NetworkCreate { name, subnet })?;
+                    print_response(&resp);
+                }
+                NetworkAction::List => {
+                    let resp = client.request(&Request::NetworkList)?;
+                    match &resp {
+                        Response::NetworkList(networks) => {
+                            if networks.is_empty() {
+                                println!("No networks");
+                            } else {
+                                println!(
+                                    "{:<20} {:<15} {:<18} {:<15} {:<10}",
+                                    "NAME", "BRIDGE", "SUBNET", "GATEWAY", "CONTAINERS"
+                                );
+                                for n in networks {
+                                    println!(
+                                        "{:<20} {:<15} {:<18} {:<15} {:<10}",
+                                        n.name, n.bridge, n.subnet, n.gateway, n.containers
+                                    );
+                                }
+                            }
+                        }
+                        _ => print_response(&resp),
+                    }
+                }
+                NetworkAction::Remove { name } => {
+                    let resp = client.request(&Request::NetworkRemove { name })?;
+                    print_response(&resp);
+                }
+            }
+        }
+
         Commands::Stack { action } => match action {
             StackAction::Up { file } => {
                 let path = std::path::Path::new(&file);
@@ -1002,6 +1065,9 @@ fn print_response(resp: &Response) {
                 println!("{}:{}{}", m.source, m.target, ro);
             }
         }
+        Response::NetworkCreated { name } => println!("Created network: {name}"),
+        Response::NetworkRemoved { name } => println!("Removed network: {name}"),
+        Response::NetworkList(_) => {}
         Response::Error { message } => {
             eprintln!("Error: {message}");
             std::process::exit(1);
@@ -1019,9 +1085,9 @@ fn build_spec(
     cpus: Option<f64>,
     pids_max: Option<u32>,
     network: String,
-    bridge: Option<String>,
-    ip: Option<String>,
-    gateway: Option<String>,
+    _bridge: Option<String>,
+    _ip: Option<String>,
+    _gateway: Option<String>,
     seccomp: String,
     cap_add: Vec<String>,
     bind: Vec<String>,
@@ -1040,18 +1106,14 @@ fn build_spec(
     let network_mode = match network.as_str() {
         "host" => NetworkMode::Host,
         "none" => NetworkMode::None,
-        "bridged" => {
-            let addr: Option<std::net::Ipv4Addr> = ip.as_deref().map(|s| s.parse()).transpose()?;
-            let gw: Option<std::net::Ipv4Addr> =
-                gateway.as_deref().map(|s| s.parse()).transpose()?;
-            NetworkMode::Bridged {
-                bridge: bridge.unwrap_or_else(|| "sbr0".to_string()),
-                address: addr,
-                gateway: gw,
-                prefix_len: 24,
-            }
-        }
-        other => anyhow::bail!("unknown network mode: {other}"),
+        // "bridged" is an alias for the "default" named network
+        "bridged" | "default" => NetworkMode::Named {
+            name: "default".to_string(),
+        },
+        // Anything else is a named network
+        name => NetworkMode::Named {
+            name: name.to_string(),
+        },
     };
 
     let seccomp_mode = match seccomp.as_str() {

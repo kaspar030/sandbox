@@ -169,6 +169,7 @@ pub enum NetworkMode {
     /// Share the host network namespace (fastest, no isolation).
     Host,
     /// Create isolated network namespace with veth + bridge.
+    /// Used internally after resolving a named network.
     Bridged {
         bridge: String,
         /// Container IP — auto-allocated by IPAM if None.
@@ -177,8 +178,21 @@ pub enum NetworkMode {
         gateway: Option<Ipv4Addr>,
         prefix_len: u8,
     },
+    /// Use a named network (resolved to Bridged by the daemon).
+    /// "default" is the default bridged network (10.0.0.0/24).
+    Named { name: String },
     /// Isolated network namespace, no configuration (user sets up manually).
     None,
+}
+
+/// Information about a named network.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkInfo {
+    pub name: String,
+    pub bridge: String,
+    pub subnet: String,
+    pub gateway: String,
+    pub containers: u32,
 }
 
 /// Port mapping for bridged networking.
@@ -380,6 +394,15 @@ pub enum Request {
     },
     /// Detach a volume from a running container.
     VolumeDetach { container: String, target: String },
+    /// Create a named network.
+    NetworkCreate {
+        name: String,
+        subnet: Option<String>,
+    },
+    /// Remove a named network.
+    NetworkRemove { name: String },
+    /// List named networks.
+    NetworkList,
     /// List storage pools.
     PoolList,
     /// Bring up a stack (create network + volumes + containers).
@@ -488,6 +511,12 @@ pub enum Response {
     VolumeAttached { target: String },
     /// Volume detached from container.
     VolumeDetached { target: String },
+    /// Network created.
+    NetworkCreated { name: String },
+    /// Network removed.
+    NetworkRemoved { name: String },
+    /// Network list.
+    NetworkList(Vec<NetworkInfo>),
     /// Stack brought up.
     StackUp {
         name: String,

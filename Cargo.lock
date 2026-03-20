@@ -1466,6 +1466,7 @@ name = "sandbox-e2e"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "nix",
  "sandbox-client",
  "sandbox-proto",
 ]

@@ -1,5 +1,9 @@
 [workspace]
-members = [".", "crates/sandbox-proto", "crates/sandbox-client", "crates/sandbox-e2e"]
+members = [
+  "crates/sandbox-proto",
+  "crates/sandbox-client",
+  "crates/sandbox-e2e",
+]
 
 [package]
 name = "sandbox"
@@ -23,7 +27,21 @@ sandbox-proto = { path = "crates/sandbox-proto" }
 sandbox-client = { path = "crates/sandbox-client" }
 
 # Syscall wrappers
-nix = { version = "0.31", features = ["sched", "mount", "signal", "hostname", "user", "process", "fs", "net", "ioctl", "event", "term", "ptrace", "env"] }
+nix = { version = "0.31", features = [
+  "sched",
+  "mount",
+  "signal",
+  "hostname",
+  "user",
+  "process",
+  "fs",
+  "net",
+  "ioctl",
+  "event",
+  "term",
+  "ptrace",
+  "env",
+] }
 libc = "0.2"
 
 # Error handling

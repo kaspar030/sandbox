@@ -30,6 +30,12 @@ pub fn setup_network(mode: &NetworkMode, child_pid: libc::pid_t) -> Result<()> {
             })?;
             crate::net::setup_container_network(child_pid, bridge, addr, gw, *prefix_len)
         }
+        NetworkMode::Named { name } => {
+            // Named networks should be resolved to Bridged by the daemon before reaching here
+            Err(Error::NetworkSetup(format!(
+                "named network '{name}' was not resolved to bridged"
+            )))
+        }
         NetworkMode::None => {
             // Network namespace was created but leave it unconfigured.
             // The loopback interface is down by default.

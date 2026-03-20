@@ -151,8 +151,9 @@ containers:
 
     let _ = ctx.cli(&["stack", "down", "e2e-stack-net"]);
 
-    if !stdout.contains("10.0.0.") {
-        return Err(format!("expected bridged IP, got: {stdout}"));
+    // Stack auto-creates a network with an auto-allocated subnet (10.0.N.0/24)
+    if !stdout.contains("inet addr:10.") {
+        return Err(format!("expected bridged IP (10.x.x.x), got: {stdout}"));
     }
 
     Ok(())
