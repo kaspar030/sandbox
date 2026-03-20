@@ -187,6 +187,16 @@ fn all_tests() -> Vec<Test> {
             "stack_dns_resolution",
             tests::stacks::test_stack_dns_resolution,
         ),
+        Test::Immutable(
+            "Stacks",
+            "stack_compose_format",
+            tests::stacks::test_stack_compose_format,
+        ),
+        Test::Immutable(
+            "Stacks",
+            "stack_strict_parsing",
+            tests::stacks::test_stack_strict_parsing,
+        ),
         // Persistence (needs mutable context for restart)
         Test::Mutable(
             "Persistence",

@@ -116,11 +116,7 @@ fn parse_query_name(packet: &[u8]) -> Option<String> {
         pos += label_len;
     }
 
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 /// Build a DNS A record response for a given query and IP address.
@@ -193,11 +189,7 @@ fn find_question_end(packet: &[u8]) -> Option<usize> {
         pos += 1 + label_len;
     }
     pos += 4; // skip QTYPE (2) + QCLASS (2)
-    if pos > packet.len() {
-        None
-    } else {
-        Some(pos)
-    }
+    if pos > packet.len() { None } else { Some(pos) }
 }
 
 /// Forward a DNS query to an upstream resolver and return the response.
@@ -207,8 +199,7 @@ async fn forward_query(
     upstream: SocketAddr,
 ) -> std::io::Result<Vec<u8>> {
     // Use a separate socket for forwarding (so we don't mix up responses)
-    let fwd_socket =
-        Async::<UdpSocket>::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0))?;
+    let fwd_socket = Async::<UdpSocket>::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0))?;
     fwd_socket.send_to(query, upstream).await?;
 
     let mut buf = [0u8; 512];

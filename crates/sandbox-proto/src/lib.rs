@@ -440,14 +440,22 @@ pub struct StackNetwork {
 }
 
 /// Container definition within a stack.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StackContainer {
     pub name: String,
     pub image: String,
     #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
+    pub entrypoint: Vec<String>,
+    #[serde(default)]
     pub env: Vec<String>,
+    #[serde(default)]
+    pub working_dir: String,
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default)]
+    pub user: String,
     #[serde(default)]
     pub volumes: Vec<String>,
     #[serde(default)]
@@ -455,7 +463,22 @@ pub struct StackContainer {
     #[serde(default)]
     pub publish: Vec<String>,
     #[serde(default)]
+    pub networks: Vec<String>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
     pub init: bool,
+    #[serde(default)]
+    pub restart: String,
+    /// CPU limit (e.g., "2.0")
+    #[serde(default)]
+    pub cpus: String,
+    /// Memory limit (e.g., "512M")
+    #[serde(default)]
+    pub memory: String,
+    /// PID limit
+    #[serde(default)]
+    pub pids: Option<u32>,
 }
 
 /// Information about a running stack.

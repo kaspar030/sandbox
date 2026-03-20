@@ -1380,9 +1380,34 @@ impl ContainerManager {
                 } else {
                     svc.command.clone()
                 },
+                entrypoint: svc.entrypoint.clone(),
                 env: svc.env.clone(),
+                working_dir: if svc.working_dir.is_empty() {
+                    "/".to_string()
+                } else {
+                    svc.working_dir.clone()
+                },
+                hostname: if svc.hostname.is_empty() {
+                    None
+                } else {
+                    Some(svc.hostname.clone())
+                },
                 network: sandbox::protocol::NetworkMode::Named {
                     name: network_name.clone(),
+                },
+                cgroup: sandbox::protocol::CgroupSpec {
+                    memory_max: if svc.memory.is_empty() {
+                        None
+                    } else {
+                        sandbox::stack::parse_memory_size(&svc.memory).ok()
+                    },
+                    cpu_max: if svc.cpus.is_empty() {
+                        None
+                    } else {
+                        sandbox::stack::parse_cpu_limit(&svc.cpus).ok()
+                    },
+                    pids_max: svc.pids,
+                    ..Default::default()
                 },
                 use_init: svc.init,
                 detach: true, // stacks run detached
@@ -1491,15 +1516,13 @@ impl ContainerManager {
         // Start DNS responder on the gateway IP
         let dns_shutdown = if let Some(net_config) = self.networks.get(&network_name) {
             let gateway = net_config.gateway;
-            let listen_addr =
-                std::net::SocketAddr::new(std::net::IpAddr::V4(gateway), 53);
-            let upstream = sandbox::net::dns::parse_upstream_dns()
-                .unwrap_or_else(|| {
-                    std::net::SocketAddr::new(
-                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
-                        53,
-                    )
-                });
+            let listen_addr = std::net::SocketAddr::new(std::net::IpAddr::V4(gateway), 53);
+            let upstream = sandbox::net::dns::parse_upstream_dns().unwrap_or_else(|| {
+                std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
+                    53,
+                )
+            });
 
             let (tx, rx) = smol::channel::bounded::<()>(1);
             smol::spawn(sandbox::net::dns::run_dns_responder(
@@ -1515,10 +1538,11 @@ impl ContainerManager {
                 if let Some(container) = self.containers.get(cname) {
                     if let Some(pid) = container.pid {
                         let resolv_content = format!("nameserver {gateway}\n");
-                        let resolv_path =
-                            self.mounts_dir.parent().unwrap_or(&self.mounts_dir).join(
-                                format!("resolv-{}.conf", cname),
-                            );
+                        let resolv_path = self
+                            .mounts_dir
+                            .parent()
+                            .unwrap_or(&self.mounts_dir)
+                            .join(format!("resolv-{}.conf", cname));
                         let _ = std::fs::write(&resolv_path, resolv_content);
                         // Hot-mount the generated resolv.conf into the container
                         let _ = sandbox::sys::hot_mount::hot_bind_mount(

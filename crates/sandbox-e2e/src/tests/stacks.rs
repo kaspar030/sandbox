@@ -219,3 +219,87 @@ containers:
 
     Ok(())
 }
+
+pub fn test_stack_compose_format(ctx: &TestContext) -> Result<(), String> {
+    let stack_file = ctx.workdir.join("test-compose.yaml");
+    fs::write(
+        &stack_file,
+        r#"
+name: e2e-compose
+volumes:
+  shared:
+services:
+  first:
+    image: alpine
+    init: true
+    environment:
+      MY_VAR: hello
+    command: ["sh", "-c", "echo $MY_VAR > /data/result && sleep 300"]
+    volumes:
+      - shared:/data
+  second:
+    image: alpine
+    init: true
+    depends_on:
+      - first
+    command: ["sleep", "300"]
+    volumes:
+      - shared:/data
+"#,
+    )
+    .unwrap();
+
+    let output = ctx.cli(&["stack", "up", stack_file.to_str().unwrap()]);
+    if !output.status.success() {
+        return Err(format!(
+            "compose stack up failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    let output = ctx.cli(&["exec", "e2e-compose-second", "--", "cat", "/data/result"]);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    let _ = ctx.cli(&["stack", "down", "e2e-compose"]);
+
+    if !stdout.contains("hello") {
+        return Err(format!(
+            "expected 'hello' from env var in shared volume, got: {stdout}"
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn test_stack_strict_parsing(ctx: &TestContext) -> Result<(), String> {
+    let stack_file = ctx.workdir.join("test-strict.yaml");
+    fs::write(
+        &stack_file,
+        r#"
+name: e2e-strict
+unknown_field: true
+services:
+  app:
+    image: alpine
+"#,
+    )
+    .unwrap();
+
+    let output = ctx.cli(&["stack", "up", stack_file.to_str().unwrap()]);
+    if output.status.success() {
+        let _ = ctx.cli(&["stack", "down", "e2e-strict"]);
+        return Err("stack up should fail with unknown field".into());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let combined = format!("{stdout}{stderr}");
+    if !combined.to_lowercase().contains("unknown") {
+        return Err(format!("error should mention 'unknown', got: {combined}"));
+    }
+
+    Ok(())
+}
