@@ -9,8 +9,6 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
-const IPAM_DIR: &str = "/var/lib/sandbox/ipam";
-
 /// IP address allocator for a bridge subnet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpAllocator {
@@ -26,6 +24,9 @@ pub struct IpAllocator {
     next_offset: u32,
     /// Bridge name (for persistence path).
     bridge_name: String,
+    /// Directory for IPAM state files.
+    #[serde(skip)]
+    ipam_dir: PathBuf,
 }
 
 impl IpAllocator {
@@ -33,7 +34,7 @@ impl IpAllocator {
     ///
     /// Gateway is the first usable IP (subnet + 1).
     /// Container IPs start from subnet + 2.
-    pub fn new(subnet: Ipv4Addr, prefix_len: u8, bridge_name: &str) -> Self {
+    pub fn new(subnet: Ipv4Addr, prefix_len: u8, bridge_name: &str, ipam_dir: &Path) -> Self {
         let subnet_u32 = u32::from(subnet);
         Self {
             subnet: subnet_u32,
@@ -42,6 +43,7 @@ impl IpAllocator {
             allocated: HashMap::new(),
             next_offset: 2,
             bridge_name: bridge_name.to_string(),
+            ipam_dir: ipam_dir.to_path_buf(),
         }
     }
 
@@ -156,22 +158,24 @@ impl IpAllocator {
 
     /// Persistence path.
     fn state_path(&self) -> PathBuf {
-        Path::new(IPAM_DIR).join(format!("{}.json", self.bridge_name))
+        self.ipam_dir.join(format!("{}.json", self.bridge_name))
     }
 
     /// Save state to disk.
     pub fn save(&self) -> Result<()> {
-        let _ = std::fs::create_dir_all(IPAM_DIR);
+        let _ = std::fs::create_dir_all(&self.ipam_dir);
         let json = serde_json::to_string(self)
             .map_err(|e| Error::Other(format!("IPAM serialize: {e}")))?;
         std::fs::write(self.state_path(), json).map_err(|e| Error::Other(format!("IPAM save: {e}")))
     }
 
     /// Load state from disk (if exists).
-    pub fn load(bridge_name: &str) -> Option<Self> {
-        let path = Path::new(IPAM_DIR).join(format!("{bridge_name}.json"));
+    pub fn load(bridge_name: &str, ipam_dir: &Path) -> Option<Self> {
+        let path = ipam_dir.join(format!("{bridge_name}.json"));
         let json = std::fs::read_to_string(&path).ok()?;
-        serde_json::from_str(&json).ok()
+        let mut alloc: Self = serde_json::from_str(&json).ok()?;
+        alloc.ipam_dir = ipam_dir.to_path_buf();
+        Some(alloc)
     }
 
     /// Remove persisted state.

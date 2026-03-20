@@ -3,27 +3,56 @@ use crate::context::TestContext;
 pub fn test_daemon_restart_recovery(ctx: &mut TestContext) -> Result<(), String> {
     let name = "persist-test";
 
-    // Create a non-ephemeral container
-    ctx.cli_ok(&["create", "--name", name, "--image", "alpine"]);
-
-    // Verify it exists
-    let list = ctx.cli_ok(&["list"]);
-    if !list.contains(name) {
-        return Err("container not in list after create".into());
+    // Create and start a non-ephemeral container (state is persisted on start)
+    let output = ctx.cli(&["create", "--name", name, "--image", "alpine", "--init"]);
+    if !output.status.success() {
+        return Err(format!(
+            "create failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
 
-    // Restart daemon
-    ctx.restart_daemon();
+    let output = ctx.cli(&["start", name, "--", "sleep", "300"]);
+    if !output.status.success() {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!(
+            "start failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Verify it exists and is running
+    let list = ctx.cli_ok(&["list"]);
+    if !list.contains(name) {
+        return Err(format!("container not in list after start. list: {list}"));
+    }
+    if !list.contains("Running") {
+        return Err(format!("container not running after start. list: {list}"));
+    }
+
+    // Check state file exists
+    let state_file = ctx.data_dir.join("state").join(format!("{name}.json"));
+    if !state_file.exists() {
+        return Err(format!("state file not found at {}", state_file.display()));
+    }
+
+    // Kill daemon abruptly (simulates crash — state files preserved)
+    ctx.kill_daemon();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    ctx.start_daemon();
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     // Verify container is recovered as Created
     let list = ctx.cli_ok(&["list"]);
     if !list.contains(name) {
-        return Err("container not recovered after daemon restart".into());
+        return Err(format!(
+            "container not recovered after daemon restart. list: {list}"
+        ));
     }
 
     // Clean up
-    ctx.cli_ok(&["destroy", name]);
+    let _ = ctx.cli(&["destroy", name]);
     Ok(())
 }
 

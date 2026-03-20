@@ -1,9 +1,8 @@
 //! Daemon state persistence.
 //!
-//! Persists container metadata to `/var/lib/sandbox/state/<name>.json` so the
-//! daemon can clean up leftover resources after a crash or reboot. Only
-//! non-ephemeral containers are persisted; ephemeral containers are cleaned up
-//! on exit anyway.
+//! Persists container metadata to `<state_dir>/<name>.json` so the daemon can
+//! clean up leftover resources after a crash or reboot. The state_dir is
+//! derived from the daemon's --data-dir (typically `<data_dir>/state/`).
 //!
 //! Write points (2-3 per container lifetime):
 //! 1. After container start succeeds
@@ -31,23 +30,20 @@ pub struct ContainerRecord {
     pub ephemeral: bool,
 }
 
-/// Base directory for state files.
-const STATE_DIR: &str = "/var/lib/sandbox/state";
-
 /// Ensure the state directory exists.
-pub fn ensure_state_dir() -> std::io::Result<()> {
-    fs::create_dir_all(STATE_DIR)
+pub fn ensure_state_dir(state_dir: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(state_dir)
 }
 
 /// Path to a container's state file.
-fn state_path(name: &str) -> PathBuf {
-    Path::new(STATE_DIR).join(format!("{name}.json"))
+fn state_path(state_dir: &Path, name: &str) -> PathBuf {
+    state_dir.join(format!("{name}.json"))
 }
 
 /// Persist a container record to disk. Uses write-to-temp + rename for
 /// atomicity. Calls fsync on the file before rename.
-pub fn save_state(name: &str, record: &ContainerRecord) -> std::io::Result<()> {
-    let path = state_path(name);
+pub fn save_state(state_dir: &Path, name: &str, record: &ContainerRecord) -> std::io::Result<()> {
+    let path = state_path(state_dir, name);
     let tmp_path = path.with_extension("json.tmp");
 
     let json = serde_json::to_string(record).map_err(std::io::Error::other)?;
@@ -61,25 +57,28 @@ pub fn save_state(name: &str, record: &ContainerRecord) -> std::io::Result<()> {
 }
 
 /// Update only the state field of an existing record. Read-modify-write.
-pub fn update_state(name: &str, new_state: ContainerState) -> std::io::Result<()> {
-    let path = state_path(name);
+pub fn update_state(
+    state_dir: &Path,
+    name: &str,
+    new_state: ContainerState,
+) -> std::io::Result<()> {
+    let path = state_path(state_dir, name);
     let json = fs::read_to_string(&path)?;
     let mut record: ContainerRecord = serde_json::from_str(&json)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     record.state = new_state;
-    save_state(name, &record)
+    save_state(state_dir, name, &record)
 }
 
 /// Remove a container's state file.
-pub fn remove_state(name: &str) {
-    let _ = fs::remove_file(state_path(name));
+pub fn remove_state(state_dir: &Path, name: &str) {
+    let _ = fs::remove_file(state_path(state_dir, name));
 }
 
 /// Load all persisted container records. Returns (name, record) pairs.
 /// Skips files that fail to parse (logs a warning).
-pub fn load_all_states() -> Vec<(String, ContainerRecord)> {
-    let dir = Path::new(STATE_DIR);
-    let entries = match fs::read_dir(dir) {
+pub fn load_all_states(state_dir: &Path) -> Vec<(String, ContainerRecord)> {
+    let entries = match fs::read_dir(state_dir) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
@@ -101,7 +100,6 @@ pub fn load_all_states() -> Vec<(String, ContainerRecord)> {
                     Ok(record) => records.push((name, record)),
                     Err(e) => {
                         tracing::warn!("failed to parse state file {}: {e}", path.display());
-                        // Remove corrupt state file
                         let _ = fs::remove_file(&path);
                     }
                 },

@@ -75,14 +75,29 @@ impl TestContext {
     pub fn stop_daemon(&mut self) {
         // Try graceful shutdown via CLI
         let _ = self.cli(&["daemon", "stop"]);
-        std::thread::sleep(Duration::from_millis(500));
 
-        // If still running, kill it
+        // Wait for the process to exit (up to 15 seconds for graceful shutdown)
         if let Some(child) = self.daemon_child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {
+                        if Instant::now() > deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(_) => break,
+                }
+            }
         }
         self.daemon_child = None;
+
+        // Remove stale socket
+        let _ = std::fs::remove_file(&self.socket_path);
     }
 
     /// Get a sandbox-client connected to this daemon.
@@ -134,28 +149,74 @@ impl TestContext {
         !self.cli(args).status.success()
     }
 
-    /// Ensure required images are pulled (only on first run).
+    /// Ensure required images are available in the daemon.
+    ///
+    /// Uses a cache directory at `<pool>/cache/` to avoid re-pulling from
+    /// the registry on every test run. Images are pulled to cache on first
+    /// run, then imported from cache on subsequent runs.
     pub fn ensure_images(&self) {
+        let cache_dir = self
+            .workdir
+            .parent()
+            .unwrap_or(Path::new("/pool"))
+            .join("cache");
+        let _ = std::fs::create_dir_all(&cache_dir);
+
         let output = self.cli_ok(&["image", "list"]);
 
-        if !output.contains("alpine") {
-            eprint!("  Pulling alpine:latest...");
-            self.cli_ok(&["image", "pull", "alpine:latest"]);
-            eprintln!("OK");
-        }
+        for (name, reference) in &[("alpine", "alpine:latest"), ("ubuntu", "ubuntu:noble")] {
+            if output.contains(name) {
+                continue;
+            }
 
-        if !output.contains("ubuntu") {
-            eprint!("  Pulling ubuntu:noble...");
-            self.cli_ok(&["image", "pull", "ubuntu:noble", "--name", "ubuntu"]);
-            eprintln!("OK");
+            let cached_image = cache_dir.join(name);
+            if cached_image.is_dir() {
+                // Import from cache
+                eprint!("  Importing {name} from cache...");
+                self.cli_ok(&["image", "import", name, cached_image.to_str().unwrap()]);
+                eprintln!("OK");
+            } else {
+                // Pull from registry, then cache it
+                eprint!("  Pulling {reference}...");
+                if name == &"ubuntu" {
+                    self.cli_ok(&["image", "pull", reference, "--name", name]);
+                } else {
+                    self.cli_ok(&["image", "pull", reference]);
+                }
+                eprintln!("OK");
+
+                // Cache the image by copying the storage pool's image dir
+                let pool_image = self.data_dir.join("storage/main/images").join(name);
+                if pool_image.is_dir() {
+                    eprint!("  Caching {name}...");
+                    let _ = Command::new("cp")
+                        .args(["-a", "--reflink=auto", "--"])
+                        .arg(&pool_image)
+                        .arg(&cached_image)
+                        .output();
+                    eprintln!("OK");
+                }
+            }
         }
     }
 
-    /// Restart the daemon (stop + start). Used for recovery tests.
+    /// Restart the daemon (stop + start).
+    #[allow(dead_code)]
     pub fn restart_daemon(&mut self) {
         self.stop_daemon();
         std::thread::sleep(Duration::from_millis(200));
         self.start_daemon();
+    }
+
+    /// Kill the daemon abruptly (simulates crash). Does NOT clean up
+    /// containers or state — used for recovery tests.
+    pub fn kill_daemon(&mut self) {
+        if let Some(child) = self.daemon_child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.daemon_child = None;
+        let _ = std::fs::remove_file(&self.socket_path);
     }
 
     /// Read daemon stderr (for debugging).

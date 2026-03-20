@@ -26,7 +26,6 @@ use std::time::Duration;
 
 const DEFAULT_SOCKET_PATH: &str = "/run/sandbox/sandbox.sock";
 const DEFAULT_DATA_DIR: &str = "/var/lib/sandbox";
-const MOUNTS_DIR: &str = "/run/sandbox/mounts";
 
 /// Default timeout for graceful container shutdown (seconds).
 const SHUTDOWN_TIMEOUT: u64 = 10;
@@ -40,12 +39,19 @@ pub fn run_daemon(
     let socket_path = socket_path.unwrap_or(DEFAULT_SOCKET_PATH);
     let data_dir = data_dir.unwrap_or(DEFAULT_DATA_DIR);
 
+    // Derive paths from data_dir and socket_path
+    let mounts_dir = Path::new(socket_path)
+        .parent()
+        .unwrap_or(Path::new("/run/sandbox"))
+        .join("mounts");
+    let state_dir = Path::new(data_dir).join("state");
+
     // Ensure directories exist
     if let Some(parent) = Path::new(socket_path).parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::create_dir_all(MOUNTS_DIR)?;
-    persist::ensure_state_dir().map_err(Error::Io)?;
+    std::fs::create_dir_all(&mounts_dir)?;
+    persist::ensure_state_dir(&state_dir).map_err(Error::Io)?;
 
     // Initialize storage manager
     let storage = StorageManager::init(Path::new(data_dir))?;
@@ -64,7 +70,11 @@ pub fn run_daemon(
         tracing::info!("running in foreground");
     }
 
-    let mut mgr = manager::ContainerManager::new(Arc::clone(&storage));
+    let mut mgr = manager::ContainerManager::new(
+        Arc::clone(&storage),
+        Path::new(data_dir),
+        Path::new(socket_path),
+    );
 
     // Recover from previous crash: clean up leftover containers, cgroups, mounts
     mgr.recover_from_crash();

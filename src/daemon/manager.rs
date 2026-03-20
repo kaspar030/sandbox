@@ -17,8 +17,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-const MOUNTS_DIR: &str = "/run/sandbox/mounts";
-
 /// Result of handling a request — includes the response and optionally
 /// a PTY master fd to send to the client via SCM_RIGHTS.
 pub struct HandleResult {
@@ -62,14 +60,28 @@ pub struct ContainerManager {
     published_ports: HashMap<u16, String>,
     /// Bridge reference counts: bridge_name → number of containers using it.
     bridge_refcounts: HashMap<String, u32>,
+    /// Derived paths.
+    state_dir: PathBuf,
+    ipam_dir: PathBuf,
+    mounts_dir: PathBuf,
 }
 
 impl ContainerManager {
-    pub fn new(storage: Arc<StorageManager>) -> Self {
+    pub fn new(
+        storage: Arc<StorageManager>,
+        data_dir: &std::path::Path,
+        socket_path: &std::path::Path,
+    ) -> Self {
         let nft_available = sandbox::net::nat::nft_available();
         if !nft_available {
             tracing::warn!("nftables (nft) not found — bridged networking will not work");
         }
+        let state_dir = data_dir.join("state");
+        let ipam_dir = data_dir.join("ipam");
+        let mounts_dir = socket_path
+            .parent()
+            .unwrap_or(std::path::Path::new("/run/sandbox"))
+            .join("mounts");
         Self {
             containers: HashMap::new(),
             storage,
@@ -79,6 +91,9 @@ impl ContainerManager {
             nft_available,
             published_ports: HashMap::new(),
             bridge_refcounts: HashMap::new(),
+            state_dir,
+            ipam_dir,
+            mounts_dir,
         }
     }
 
@@ -90,7 +105,7 @@ impl ContainerManager {
         // Clean up stale NAT rules from previous run
         sandbox::net::nat::cleanup_nat();
 
-        let records = persist::load_all_states();
+        let records = persist::load_all_states(&self.state_dir);
         if records.is_empty() {
             return;
         }
@@ -149,7 +164,7 @@ impl ContainerManager {
                         }
                     }
                 }
-                persist::remove_state(&name);
+                persist::remove_state(&self.state_dir, &name);
                 tracing::info!("cleaned up ephemeral container {name}");
             } else {
                 // Non-ephemeral: keep rootfs, re-register as Created
@@ -163,12 +178,12 @@ impl ContainerManager {
                         false,
                     );
                     // Update state file to Created
-                    Self::persist_container(&name, &container);
+                    Self::persist_container(&self.state_dir, &name, &container);
                     self.containers.insert(name.clone(), container);
                     tracing::info!("recovered container {name} as Created");
                 } else {
                     // Rootfs gone — nothing to recover
-                    persist::remove_state(&name);
+                    persist::remove_state(&self.state_dir, &name);
                     tracing::warn!("container {name} rootfs missing, removed state");
                 }
             }
@@ -191,7 +206,7 @@ impl ContainerManager {
         }
 
         // Scan for orphaned mounts
-        let mounts_dir = std::path::Path::new(MOUNTS_DIR);
+        let mounts_dir = &self.mounts_dir;
         if let Ok(entries) = std::fs::read_dir(mounts_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
@@ -225,7 +240,7 @@ impl ContainerManager {
                         // whose daemon crashed before cleanup)
                         tracing::info!("cleaning up orphaned container rootfs: {name_str}");
                         // Unmount any stale idmap mount
-                        let mount_path = std::path::Path::new(MOUNTS_DIR).join(name_str.as_ref());
+                        let mount_path = self.mounts_dir.join(name_str.as_ref());
                         if mount_path.exists() {
                             let _ =
                                 nix::mount::umount2(&mount_path, nix::mount::MntFlags::MNT_DETACH);
@@ -341,7 +356,7 @@ impl ContainerManager {
     }
 
     /// Persist a non-ephemeral container's state to disk.
-    fn persist_container(name: &str, container: &Container) {
+    fn persist_container(state_dir: &std::path::Path, name: &str, container: &Container) {
         if container.ephemeral {
             return;
         }
@@ -355,7 +370,7 @@ impl ContainerManager {
             pool_name: container.pool_name.clone(),
             ephemeral: container.ephemeral,
         };
-        if let Err(e) = persist::save_state(name, &record) {
+        if let Err(e) = persist::save_state(state_dir, name, &record) {
             tracing::warn!("failed to persist state for {name}: {e}");
         }
     }
@@ -383,10 +398,11 @@ impl ContainerManager {
         }
 
         // Get or create IPAM for this bridge
+        let ipam_dir = self.ipam_dir.clone();
         let allocator = self.ipam.entry(bridge.clone()).or_insert_with(|| {
-            sandbox::net::ipam::IpAllocator::load(&bridge).unwrap_or_else(|| {
+            sandbox::net::ipam::IpAllocator::load(&bridge, &ipam_dir).unwrap_or_else(|| {
                 let subnet = std::net::Ipv4Addr::new(10, 0, 0, 0);
-                sandbox::net::ipam::IpAllocator::new(subnet, prefix_len, &bridge)
+                sandbox::net::ipam::IpAllocator::new(subnet, prefix_len, &bridge, &ipam_dir)
             })
         });
 
@@ -524,6 +540,7 @@ impl ContainerManager {
         // Persist updated state (Stopped) for non-ephemeral containers
         if !is_ephemeral {
             if let Err(e) = persist::update_state(
+                &self.state_dir,
                 name,
                 sandbox::protocol::ContainerState::Stopped { exit_code },
             ) {
@@ -650,17 +667,12 @@ impl ContainerManager {
         container.pool_name = Some(pool_name);
 
         // Set up idmapped mount on top of the new rootfs
-        Self::ensure_idmap_mount(container)?;
+        Self::ensure_idmap_mount(container, &self.mounts_dir)?;
 
         Ok(())
     }
 
-    /// Ensure the idmapped mount is set up for a container.
-    ///
-    /// Called during create (after rootfs copy) and on start if the mount
-    /// was cleaned up (e.g., after daemon restart recovery).
-    #[tracing::instrument(skip_all, level = "debug")]
-    fn ensure_idmap_mount(container: &mut Container) -> Result<()> {
+    fn ensure_idmap_mount(container: &mut Container, mounts_dir: &std::path::Path) -> Result<()> {
         // Skip if already mounted
         if container.idmap_mount.is_some() {
             return Ok(());
@@ -682,7 +694,7 @@ impl ContainerManager {
             }
         }
 
-        let mount_target = PathBuf::from(MOUNTS_DIR).join(&container.spec.name);
+        let mount_target = mounts_dir.join(&container.spec.name);
         std::fs::create_dir_all(&mount_target).map_err(|e| {
             Error::Other(format!(
                 "failed to create mount point {}: {e}",
@@ -804,7 +816,7 @@ impl ContainerManager {
             Ok(()) => {
                 let pid = container.pid.unwrap_or(0) as u32;
                 let pty_master = container.take_pty_master();
-                Self::persist_container(&name, &container);
+                Self::persist_container(&self.state_dir, &name, &container);
                 self.containers.insert(name.clone(), container);
                 HandleResult::with_pty(Response::Started { name, pid }, pty_master)
             }
@@ -845,7 +857,7 @@ impl ContainerManager {
 
         // Re-create idmap mount if needed (e.g., after daemon restart recovery)
         if container.idmap_mount.is_none() {
-            if let Err(e) = Self::ensure_idmap_mount(container) {
+            if let Err(e) = Self::ensure_idmap_mount(container, &self.mounts_dir) {
                 return HandleResult::response_only(Response::Error {
                     message: format!("failed to set up idmap mount: {e}"),
                 });
@@ -856,7 +868,7 @@ impl ContainerManager {
             Ok(()) => {
                 let pid = container.pid.unwrap_or(0) as u32;
                 let pty_master = container.take_pty_master();
-                Self::persist_container(name, container);
+                Self::persist_container(&self.state_dir, name, container);
                 HandleResult::with_pty(
                     Response::Started {
                         name: name.to_string(),
@@ -928,7 +940,7 @@ impl ContainerManager {
             });
 
         // Persist updated state
-        Self::persist_container(name, container);
+        Self::persist_container(&self.state_dir, name, container);
 
         HandleResult::response_only(Response::MountAdded {
             target: target.to_string(),
@@ -983,7 +995,7 @@ impl ContainerManager {
         container.spec.bind_mounts.remove(idx.unwrap());
 
         // Persist updated state
-        Self::persist_container(name, container);
+        Self::persist_container(&self.state_dir, name, container);
 
         HandleResult::response_only(Response::MountRemoved {
             target: target.to_string(),
@@ -1147,7 +1159,7 @@ impl ContainerManager {
 
         match container.destroy() {
             Ok(()) => {
-                persist::remove_state(name);
+                persist::remove_state(&self.state_dir, name);
                 HandleResult::response_only(Response::Destroyed {
                     name: name.to_string(),
                 })
