@@ -80,3 +80,56 @@ pub fn test_mount_shorthand(ctx: &TestContext) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Test that mount add/remove works on stopped containers.
+pub fn test_mount_stopped(ctx: &TestContext) -> Result<(), String> {
+    let name = "mount-stopped-test";
+
+    // Create test dirs
+    let test_dir = ctx.workdir.join("mount-stopped-src");
+    fs::create_dir_all(&test_dir).unwrap();
+    fs::write(test_dir.join("data"), "stopped-mount-content").unwrap();
+    let src = test_dir.to_str().unwrap();
+
+    // Create container (stopped)
+    ctx.cli_ok(&[
+        "create", "--name", name, "--image", "alpine", "--", "sleep", "30",
+    ]);
+
+    // Add mount while stopped
+    let spec = format!("{src}:/mnt/added");
+    ctx.cli_ok(&["mount", "add", name, &spec]);
+
+    // Verify mount is listed
+    let list_output = ctx.cli_ok(&["mount", "ls", name]);
+    if !list_output.contains("/mnt/added") {
+        ctx.cli_ok(&["destroy", name]);
+        return Err(format!(
+            "expected /mnt/added in mount list, got: {list_output}"
+        ));
+    }
+
+    // Start and verify mount is effective
+    ctx.cli_ok(&["start", name]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let output = ctx.cli_ok(&["exec", name, "--", "cat", "/mnt/added/data"]);
+    if !output.contains("stopped-mount-content") {
+        ctx.cli_ok(&["stop", name]);
+        ctx.cli_ok(&["destroy", name]);
+        return Err(format!("expected stopped-mount-content, got: {output}"));
+    }
+
+    // Stop, remove mount while stopped
+    ctx.cli_ok(&["stop", name]);
+    ctx.cli_ok(&["mount", "rm", name, "/mnt/added"]);
+
+    // Verify mount is gone from list
+    let list_output2 = ctx.cli_ok(&["mount", "ls", name]);
+    if list_output2.contains("/mnt/added") {
+        ctx.cli_ok(&["destroy", name]);
+        return Err("mount should have been removed".into());
+    }
+
+    ctx.cli_ok(&["destroy", name]);
+    Ok(())
+}

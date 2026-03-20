@@ -1074,21 +1074,6 @@ impl ContainerManager {
             }
         };
 
-        if !container.state.is_running() {
-            return HandleResult::response_only(Response::Error {
-                message: format!("container {name} is not running"),
-            });
-        }
-
-        let pid = match container.pid {
-            Some(p) => p,
-            None => {
-                return HandleResult::response_only(Response::Error {
-                    message: "container has no PID".to_string(),
-                });
-            }
-        };
-
         let source_path = std::path::Path::new(source);
         if !source_path.exists() {
             return HandleResult::response_only(Response::Error {
@@ -1096,15 +1081,26 @@ impl ContainerManager {
             });
         }
 
-        // Perform the hot bind mount
-        if let Err(e) = sandbox::sys::hot_mount::hot_bind_mount(pid, source_path, target, readonly)
-        {
-            return HandleResult::response_only(Response::Error {
-                message: format!("mount failed: {e}"),
-            });
+        // If running, perform the hot bind mount immediately
+        if container.state.is_running() {
+            let pid = match container.pid {
+                Some(p) => p,
+                None => {
+                    return HandleResult::response_only(Response::Error {
+                        message: "container has no PID".to_string(),
+                    });
+                }
+            };
+            if let Err(e) =
+                sandbox::sys::hot_mount::hot_bind_mount(pid, source_path, target, readonly)
+            {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("mount failed: {e}"),
+                });
+            }
         }
 
-        // Add to bind_mounts so it persists across restart
+        // Add to bind_mounts (takes effect on next start if stopped)
         container
             .spec
             .bind_mounts
@@ -1132,21 +1128,6 @@ impl ContainerManager {
             }
         };
 
-        if !container.state.is_running() {
-            return HandleResult::response_only(Response::Error {
-                message: format!("container {name} is not running"),
-            });
-        }
-
-        let pid = match container.pid {
-            Some(p) => p,
-            None => {
-                return HandleResult::response_only(Response::Error {
-                    message: "container has no PID".to_string(),
-                });
-            }
-        };
-
         // Check mount exists in bind_mounts
         let idx = container
             .spec
@@ -1159,14 +1140,24 @@ impl ContainerManager {
             });
         }
 
-        // Perform the hot unmount
-        if let Err(e) = sandbox::sys::hot_mount::hot_unmount(pid, target) {
-            return HandleResult::response_only(Response::Error {
-                message: format!("unmount failed: {e}"),
-            });
+        // If running, perform the hot unmount in the container's namespaces
+        if container.state.is_running() {
+            let pid = match container.pid {
+                Some(p) => p,
+                None => {
+                    return HandleResult::response_only(Response::Error {
+                        message: "container has no PID".to_string(),
+                    });
+                }
+            };
+            if let Err(e) = sandbox::sys::hot_mount::hot_unmount(pid, target) {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("unmount failed: {e}"),
+                });
+            }
         }
 
-        // Remove from bind_mounts
+        // Remove from bind_mounts (takes effect on next start if stopped)
         container.spec.bind_mounts.remove(idx.unwrap());
 
         // Persist updated state
