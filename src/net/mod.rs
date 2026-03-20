@@ -4,6 +4,7 @@
 //! without shelling out to `ip` or depending on an async netlink library.
 
 pub mod bridge;
+pub mod dns;
 pub mod ipam;
 pub mod nat;
 pub mod netlink;

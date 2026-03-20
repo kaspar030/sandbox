@@ -158,3 +158,64 @@ containers:
 
     Ok(())
 }
+
+pub fn test_stack_dns_resolution(ctx: &TestContext) -> Result<(), String> {
+    let stack_file = ctx.workdir.join("test-stack-dns.yaml");
+    fs::write(
+        &stack_file,
+        r#"
+name: e2e-dns
+containers:
+  server:
+    image: alpine
+    init: true
+    command: ["sleep", "300"]
+  client:
+    image: alpine
+    init: true
+    command: ["sleep", "300"]
+"#,
+    )
+    .unwrap();
+
+    // Stack up
+    let output = ctx.cli(&["stack", "up", stack_file.to_str().unwrap()]);
+    if !output.status.success() {
+        return Err(format!(
+            "stack up failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    // Verify DNS: client should be able to resolve "server" to an IP
+    // Use nslookup/ping/getent - alpine has nslookup
+    let output = ctx.cli(&["exec", "e2e-dns-client", "--", "nslookup", "server"]);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    // Also check resolv.conf points to the gateway
+    let resolv = ctx.cli(&["exec", "e2e-dns-client", "--", "cat", "/etc/resolv.conf"]);
+    let resolv_content = String::from_utf8_lossy(&resolv.stdout).to_string();
+
+    let _ = ctx.cli(&["stack", "down", "e2e-dns"]);
+
+    // Verify resolv.conf points to a gateway (10.x.x.1)
+    if !resolv_content.contains("nameserver 10.") {
+        return Err(format!(
+            "resolv.conf should point to gateway, got: {resolv_content}"
+        ));
+    }
+
+    // Verify nslookup resolved "server" to an IP
+    let combined = format!("{stdout}{stderr}");
+    if !combined.contains("10.") {
+        return Err(format!(
+            "DNS resolution failed. nslookup output: {combined}"
+        ));
+    }
+
+    Ok(())
+}

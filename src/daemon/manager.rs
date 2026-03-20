@@ -71,12 +71,15 @@ struct NetworkConfig {
 }
 
 /// State of an active stack.
-#[derive(Debug, Clone)]
 struct StackState {
     name: String,
     bridge: String,
+    #[allow(dead_code)]
+    network_name: String,
     containers: Vec<String>,
     volumes: Vec<String>,
+    /// Sender to signal the DNS responder to shut down.
+    dns_shutdown: Option<smol::channel::Sender<()>>,
 }
 
 /// Manages the lifecycle of all containers.
@@ -564,17 +567,29 @@ impl ContainerManager {
             self.published_ports.insert(pm.host_port, spec.name.clone());
         }
 
-        // Auto-add /etc/resolv.conf bind mount (read-only) so DNS works
+        // Auto-add /etc/resolv.conf bind mount (read-only) so DNS works.
+        // We copy the host's resolv.conf to a file under the runtime dir
+        // instead of bind-mounting it directly, because on many systems
+        // /etc/resolv.conf is a symlink to /run/... which is on tmpfs
+        // and fails idmap mount_setattr.
         if !spec
             .bind_mounts
             .iter()
             .any(|m| m.target == "/etc/resolv.conf")
         {
-            spec.bind_mounts.push(sandbox::protocol::BindMount {
-                source: "/etc/resolv.conf".to_string(),
-                target: "/etc/resolv.conf".to_string(),
-                readonly: true,
-            });
+            let resolv_copy = self
+                .mounts_dir
+                .parent()
+                .unwrap_or(&self.mounts_dir)
+                .join(format!("resolv-{}.conf", spec.name));
+            if let Ok(contents) = std::fs::read_to_string("/etc/resolv.conf") {
+                let _ = std::fs::write(&resolv_copy, contents);
+                spec.bind_mounts.push(sandbox::protocol::BindMount {
+                    source: resolv_copy.to_string_lossy().to_string(),
+                    target: "/etc/resolv.conf".to_string(),
+                    readonly: true,
+                });
+            }
         }
 
         Ok(())
@@ -1459,14 +1474,78 @@ impl ContainerManager {
             }
         }
 
+        // Build DNS name→IP map for inter-container resolution
+        let mut dns_names: HashMap<String, std::net::Ipv4Addr> = HashMap::new();
+        for svc in &def.containers {
+            let container_name = format!("{stack_name}-{}", svc.name);
+            if let Some(container) = self.containers.get(&container_name)
+                && let sandbox::protocol::NetworkMode::Bridged {
+                    address: Some(ip), ..
+                } = &container.spec.network
+            {
+                dns_names.insert(svc.name.clone(), *ip);
+                dns_names.insert(container_name.clone(), *ip);
+            }
+        }
+
+        // Start DNS responder on the gateway IP
+        let dns_shutdown = if let Some(net_config) = self.networks.get(&network_name) {
+            let gateway = net_config.gateway;
+            let listen_addr =
+                std::net::SocketAddr::new(std::net::IpAddr::V4(gateway), 53);
+            let upstream = sandbox::net::dns::parse_upstream_dns()
+                .unwrap_or_else(|| {
+                    std::net::SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
+                        53,
+                    )
+                });
+
+            let (tx, rx) = smol::channel::bounded::<()>(1);
+            smol::spawn(sandbox::net::dns::run_dns_responder(
+                listen_addr,
+                dns_names,
+                upstream,
+                rx,
+            ))
+            .detach();
+
+            // Write resolv.conf pointing to the gateway for each container
+            for cname in &container_names {
+                if let Some(container) = self.containers.get(cname) {
+                    if let Some(pid) = container.pid {
+                        let resolv_content = format!("nameserver {gateway}\n");
+                        let resolv_path =
+                            self.mounts_dir.parent().unwrap_or(&self.mounts_dir).join(
+                                format!("resolv-{}.conf", cname),
+                            );
+                        let _ = std::fs::write(&resolv_path, resolv_content);
+                        // Hot-mount the generated resolv.conf into the container
+                        let _ = sandbox::sys::hot_mount::hot_bind_mount(
+                            pid,
+                            &resolv_path,
+                            "/etc/resolv.conf",
+                            false,
+                        );
+                    }
+                }
+            }
+
+            Some(tx)
+        } else {
+            None
+        };
+
         // Track the stack
         self.stacks.insert(
             stack_name.clone(),
             StackState {
                 name: stack_name.clone(),
                 bridge: bridge_name,
+                network_name: network_name.clone(),
                 containers: container_names.clone(),
                 volumes: volume_names,
+                dns_shutdown,
             },
         );
 
@@ -1491,6 +1570,21 @@ impl ContainerManager {
                 });
             }
         };
+
+        // Stop the DNS responder
+        if let Some(tx) = stack.dns_shutdown {
+            let _ = tx.try_send(());
+        }
+
+        // Clean up generated resolv.conf files
+        for cname in &stack.containers {
+            let resolv_path = self
+                .mounts_dir
+                .parent()
+                .unwrap_or(&self.mounts_dir)
+                .join(format!("resolv-{cname}.conf"));
+            let _ = std::fs::remove_file(resolv_path);
+        }
 
         // Stop and destroy all containers
         for cname in &stack.containers {
