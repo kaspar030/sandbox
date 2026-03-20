@@ -416,12 +416,11 @@ impl Container {
             std::mem::forget(slave_owned);
         }
 
-        // Set environment variables.
-        // Clear inherited env from daemon, then apply image + user env.
+        // Clear ALL inherited environment from the daemon.
         // SAFETY: we're in a forked child process — single-threaded.
-        for (k, _) in std::env::vars() {
-            unsafe { std::env::remove_var(&k) };
-        }
+        // Using nix::env::clearenv() instead of iterating std::env::vars()
+        // because removing vars during iteration skips entries.
+        unsafe { nix::env::clearenv() }.map_err(|e| Error::Other(format!("clearenv: {e}")))?;
         if self.spec.env.is_empty() {
             // Sensible fallback if no env is configured
             unsafe {

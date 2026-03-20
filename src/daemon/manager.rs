@@ -1020,7 +1020,8 @@ impl ContainerManager {
             }
         };
 
-        match exec_in_container(pid, name, &command, detach, user) {
+        let env = container.spec.env.clone();
+        match exec_in_container(pid, name, &command, detach, user, &env) {
             Ok(result) => {
                 let response = Response::ExecStarted {
                     pid: result.pid as u32,
@@ -1227,6 +1228,7 @@ fn exec_in_container(
     command: &[String],
     detach: bool,
     user: Option<sandbox::protocol::ExecUser>,
+    env: &[String],
 ) -> Result<ExecResult> {
     use std::os::fd::FromRawFd;
 
@@ -1346,6 +1348,29 @@ fn exec_in_container(
         if let Err(e) = nix::unistd::setresuid(uid.into(), uid.into(), uid.into()) {
             eprintln!("setresuid({uid}) failed: {e}");
             std::process::exit(1);
+        }
+
+        // Clear daemon environment and apply container's env
+        unsafe { nix::env::clearenv() }.ok();
+        if env.is_empty() {
+            unsafe {
+                std::env::set_var(
+                    "PATH",
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                )
+            };
+            unsafe { std::env::set_var("HOME", "/root") };
+            unsafe { std::env::set_var("TERM", "xterm") };
+        } else {
+            for var in env {
+                if let Some((k, v)) = var.split_once('=') {
+                    unsafe { std::env::set_var(k, v) };
+                }
+            }
+            // Ensure TERM is set for interactive sessions
+            if !env.iter().any(|v| v.starts_with("TERM=")) {
+                unsafe { std::env::set_var("TERM", "xterm") };
+            }
         }
 
         // Set up PTY slave as stdin/stdout/stderr
