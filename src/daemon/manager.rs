@@ -1359,18 +1359,43 @@ fn exec_in_container(
                     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 )
             };
-            unsafe { std::env::set_var("HOME", "/root") };
-            unsafe { std::env::set_var("TERM", "xterm") };
         } else {
             for var in env {
                 if let Some((k, v)) = var.split_once('=') {
                     unsafe { std::env::set_var(k, v) };
                 }
             }
-            // Ensure TERM is set for interactive sessions
-            if !env.iter().any(|v| v.starts_with("TERM=")) {
-                unsafe { std::env::set_var("TERM", "xterm") };
+        }
+
+        // Set HOME, USER from /etc/passwd based on the target uid.
+        // After chroot, /etc/passwd is the container's.
+        if std::env::var("HOME").is_err() || std::env::var("USER").is_err() {
+            if let Some(pw) = sandbox::sys::passwd::lookup_uid(uid) {
+                if std::env::var("HOME").is_err() {
+                    unsafe { std::env::set_var("HOME", &pw.home) };
+                }
+                if std::env::var("USER").is_err() {
+                    unsafe { std::env::set_var("USER", &pw.name) };
+                }
+            } else {
+                if std::env::var("HOME").is_err() {
+                    unsafe { std::env::set_var("HOME", "/") };
+                }
             }
+        }
+
+        // Set HOSTNAME from the container's UTS namespace
+        if std::env::var("HOSTNAME").is_err() {
+            if let Ok(hn) = nix::unistd::gethostname() {
+                if let Some(hn) = hn.to_str() {
+                    unsafe { std::env::set_var("HOSTNAME", hn) };
+                }
+            }
+        }
+
+        // Ensure TERM is set for interactive sessions
+        if std::env::var("TERM").is_err() {
+            unsafe { std::env::set_var("TERM", "xterm") };
         }
 
         // Set up PTY slave as stdin/stdout/stderr

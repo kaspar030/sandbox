@@ -3,5 +3,6 @@ pub mod eventfd;
 pub mod hot_mount;
 pub mod idmap;
 pub mod mount_api;
+pub mod passwd;
 pub mod pty;
 pub mod scm_rights;

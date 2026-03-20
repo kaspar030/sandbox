@@ -429,7 +429,6 @@ impl Container {
                     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 )
             };
-            unsafe { std::env::set_var("HOME", "/root") };
             unsafe { std::env::set_var("TERM", "xterm") };
         } else {
             for var in &self.spec.env {
@@ -437,6 +436,35 @@ impl Container {
                     unsafe { std::env::set_var(k, v) };
                 }
             }
+        }
+
+        // Set HOME, USER from /etc/passwd if not already in env.
+        // Read from container's /etc/passwd (after pivot_root).
+        if std::env::var("HOME").is_err() || std::env::var("USER").is_err() {
+            if let Some(pw) = crate::sys::passwd::lookup_uid(0) {
+                if std::env::var("HOME").is_err() {
+                    unsafe { std::env::set_var("HOME", &pw.home) };
+                }
+                if std::env::var("USER").is_err() {
+                    unsafe { std::env::set_var("USER", &pw.name) };
+                }
+            } else {
+                // Fallback if passwd lookup fails
+                if std::env::var("HOME").is_err() {
+                    unsafe { std::env::set_var("HOME", "/root") };
+                }
+            }
+        }
+
+        // Set HOSTNAME
+        if std::env::var("HOSTNAME").is_err() {
+            let hostname = self.spec.hostname.as_deref().unwrap_or(&self.spec.name);
+            unsafe { std::env::set_var("HOSTNAME", hostname) };
+        }
+
+        // Ensure TERM is set for interactive sessions
+        if std::env::var("TERM").is_err() {
+            unsafe { std::env::set_var("TERM", "xterm") };
         }
 
         // Set working directory (after pivot_root so container paths work)
