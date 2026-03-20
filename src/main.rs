@@ -428,6 +428,19 @@ enum StackAction {
     /// List all stacks
     #[command(alias = "ls")]
     List,
+    /// Check a stack file for compatibility
+    #[command(alias = "validate")]
+    Check {
+        /// Path to stack file (default: docker-compose.yml)
+        #[arg(default_value = "docker-compose.yml")]
+        file: String,
+        /// Treat warnings as errors
+        #[arg(long)]
+        strict: bool,
+        /// No output, only exit code
+        #[arg(long, short)]
+        quiet: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -945,6 +958,64 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     _ => print_response(&resp),
+                }
+            }
+            StackAction::Check {
+                file,
+                strict,
+                quiet,
+            } => {
+                let path = std::path::Path::new(&file);
+                let contents = std::fs::read_to_string(path)
+                    .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
+                let result = sandbox::stack::compose::check(&contents);
+
+                if !quiet {
+                    println!("Checking {}...\n", path.display());
+                    println!("  Name: {}", result.name);
+                    if !result.services.is_empty() {
+                        println!(
+                            "  Services: {} ({})",
+                            result.services.len(),
+                            result.services.join(", ")
+                        );
+                    }
+                    if !result.volumes.is_empty() {
+                        println!(
+                            "  Volumes: {} ({})",
+                            result.volumes.len(),
+                            result.volumes.join(", ")
+                        );
+                    }
+
+                    if !result.supported.is_empty() {
+                        println!("\n  Supported:");
+                        println!("    \u{2713} {}", result.supported.join(", "));
+                    }
+
+                    if !result.warnings.is_empty() {
+                        println!("\n  Warnings:");
+                        for w in &result.warnings {
+                            println!("    \u{26a0} {w}");
+                        }
+                    }
+
+                    if !result.errors.is_empty() {
+                        println!("\n  Errors:");
+                        for e in &result.errors {
+                            println!("    \u{2717} {e}");
+                        }
+                    }
+
+                    println!(
+                        "\n  Result: {} error(s), {} warning(s)",
+                        result.errors.len(),
+                        result.warnings.len()
+                    );
+                }
+
+                if result.has_errors() || (strict && result.has_warnings()) {
+                    std::process::exit(1);
                 }
             }
         },

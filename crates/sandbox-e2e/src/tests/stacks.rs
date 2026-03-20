@@ -303,3 +303,91 @@ services:
 
     Ok(())
 }
+
+pub fn test_stack_check_valid(ctx: &TestContext) -> Result<(), String> {
+    let file = ctx.workdir.join("check-valid.yaml");
+    fs::write(
+        &file,
+        r#"
+name: check-valid
+services:
+  app:
+    image: alpine
+    command: ["echo", "hello"]
+    environment:
+      FOO: bar
+    ports:
+      - "8080:80"
+"#,
+    )
+    .unwrap();
+
+    let output = ctx.cli(&["stack", "check", file.to_str().unwrap()]);
+    if !output.status.success() {
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return Err(format!("check should pass: {combined}"));
+    }
+    Ok(())
+}
+
+pub fn test_stack_check_unsupported(ctx: &TestContext) -> Result<(), String> {
+    let file = ctx.workdir.join("check-unsupported.yaml");
+    fs::write(
+        &file,
+        r#"
+name: check-bad
+version: "3.8"
+services:
+  app:
+    image: alpine
+    healthcheck:
+      test: ["CMD", "true"]
+    restart: always
+"#,
+    )
+    .unwrap();
+
+    // Should fail (unknown field 'healthcheck')
+    let output = ctx.cli(&["stack", "check", file.to_str().unwrap()]);
+    if output.status.success() {
+        return Err("check should fail with unsupported fields".into());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !stdout.contains("healthcheck") {
+        return Err(format!(
+            "should report 'healthcheck' as unknown, got: {stdout}"
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn test_stack_check_quiet(ctx: &TestContext) -> Result<(), String> {
+    let file = ctx.workdir.join("check-quiet.yaml");
+    fs::write(
+        &file,
+        r#"
+name: check-quiet
+services:
+  app:
+    image: alpine
+"#,
+    )
+    .unwrap();
+
+    let output = ctx.cli(&["stack", "check", file.to_str().unwrap(), "--quiet"]);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !stdout.trim().is_empty() {
+        return Err(format!("--quiet should produce no output, got: {stdout}"));
+    }
+    if !output.status.success() {
+        return Err("check --quiet should succeed for valid file".into());
+    }
+
+    Ok(())
+}

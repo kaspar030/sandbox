@@ -389,6 +389,240 @@ where
     deserializer.deserialize_any(VolumesVisitor)
 }
 
+// --- Compatibility check ---
+
+/// Known fields at the top level of a stack YAML.
+const STACK_FIELDS: &[&str] = &[
+    "name",
+    "version",
+    "services",
+    "containers",
+    "networks",
+    "network",
+    "volumes",
+];
+
+/// Known fields for a service/container definition.
+const CONTAINER_FIELDS: &[&str] = &[
+    "image",
+    "command",
+    "entrypoint",
+    "env",
+    "environment",
+    "working_dir",
+    "hostname",
+    "user",
+    "volumes",
+    "bind",
+    "publish",
+    "ports",
+    "networks",
+    "depends_on",
+    "init",
+    "restart",
+    "cpus",
+    "memory",
+    "pids",
+];
+
+/// Known fields for a network definition.
+const NETWORK_FIELDS: &[&str] = &["subnet"];
+
+/// Result of checking a stack YAML file for compatibility.
+pub struct CheckResult {
+    pub name: String,
+    pub services: Vec<String>,
+    pub volumes: Vec<String>,
+    pub supported: Vec<String>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+impl CheckResult {
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+
+    pub fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+}
+
+/// Check a compose YAML string for compatibility without starting anything.
+///
+/// Reports supported features, warnings for partially supported features,
+/// and errors for unknown/unsupported fields.
+pub fn check(yaml: &str) -> CheckResult {
+    let mut result = CheckResult {
+        name: String::new(),
+        services: Vec::new(),
+        volumes: Vec::new(),
+        supported: Vec::new(),
+        warnings: Vec::new(),
+        errors: Vec::new(),
+    };
+
+    // Parse as generic YAML value first
+    let value: serde_yaml::Value = match serde_yaml::from_str(yaml) {
+        Ok(v) => v,
+        Err(e) => {
+            result.errors.push(format!("YAML syntax error: {e}"));
+            return result;
+        }
+    };
+
+    let mapping = match value.as_mapping() {
+        Some(m) => m,
+        None => {
+            result
+                .errors
+                .push("stack file must be a YAML mapping".into());
+            return result;
+        }
+    };
+
+    // Extract name
+    if let Some(name) = mapping.get("name").and_then(|v| v.as_str()) {
+        result.name = name.to_string();
+    } else {
+        result.errors.push("missing required field: 'name'".into());
+    }
+
+    // Check top-level fields
+    for (key, _) in mapping {
+        if let Some(key_str) = key.as_str() {
+            if !STACK_FIELDS.contains(&key_str) {
+                result
+                    .errors
+                    .push(format!("unknown top-level field: '{key_str}'"));
+            }
+        }
+    }
+
+    // Check version field
+    if mapping.contains_key("version") {
+        result
+            .warnings
+            .push("'version' field is deprecated and ignored".into());
+    }
+
+    // Check services/containers
+    let services = mapping
+        .get("services")
+        .or_else(|| mapping.get("containers"));
+
+    if let Some(svc_value) = services {
+        if let Some(svc_map) = svc_value.as_mapping() {
+            for (svc_key, svc_val) in svc_map {
+                let svc_name = svc_key.as_str().unwrap_or("?");
+                result.services.push(svc_name.to_string());
+
+                if let Some(svc_fields) = svc_val.as_mapping() {
+                    let mut svc_supported = Vec::new();
+
+                    for (field_key, _) in svc_fields {
+                        if let Some(field_str) = field_key.as_str() {
+                            if CONTAINER_FIELDS.contains(&field_str) {
+                                // Check partially supported fields
+                                if field_str == "restart" {
+                                    result.warnings.push(format!(
+                                        "service '{svc_name}': 'restart' accepted but not yet enforced"
+                                    ));
+                                }
+                                svc_supported.push(field_str.to_string());
+                            } else {
+                                result.errors.push(format!(
+                                    "service '{svc_name}': unknown field '{field_str}'"
+                                ));
+                            }
+                        }
+                    }
+
+                    // Check required field
+                    if !svc_fields.contains_key("image") {
+                        result.errors.push(format!(
+                            "service '{svc_name}': missing required field 'image'"
+                        ));
+                    }
+
+                    for s in svc_supported {
+                        if !result.supported.contains(&s) {
+                            result.supported.push(s);
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        result
+            .errors
+            .push("missing 'services' or 'containers' section".into());
+    }
+
+    // Check top-level volumes
+    if let Some(vol_value) = mapping.get("volumes") {
+        match vol_value {
+            serde_yaml::Value::Mapping(m) => {
+                for (k, _) in m {
+                    if let Some(name) = k.as_str() {
+                        result.volumes.push(name.to_string());
+                    }
+                }
+            }
+            serde_yaml::Value::Sequence(s) => {
+                for v in s {
+                    if let Some(name) = v.as_str() {
+                        result.volumes.push(name.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Check top-level networks
+    if let Some(net_value) = mapping.get("networks") {
+        if let Some(net_map) = net_value.as_mapping() {
+            for (net_key, net_val) in net_map {
+                if let Some(net_fields) = net_val.as_mapping() {
+                    for (field_key, _) in net_fields {
+                        if let Some(field_str) = field_key.as_str() {
+                            if !NETWORK_FIELDS.contains(&field_str) {
+                                let net_name = net_key.as_str().unwrap_or("?");
+                                result.errors.push(format!(
+                                    "network '{net_name}': unknown field '{field_str}'"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for multi-network containers
+    if let Some(svc_value) = services {
+        if let Some(svc_map) = svc_value.as_mapping() {
+            for (svc_key, svc_val) in svc_map {
+                let svc_name = svc_key.as_str().unwrap_or("?");
+                if let Some(svc_fields) = svc_val.as_mapping() {
+                    if let Some(nets) = svc_fields.get("networks") {
+                        if let Some(net_seq) = nets.as_sequence() {
+                            if net_seq.len() > 1 {
+                                result.warnings.push(format!(
+                                    "service '{svc_name}': multiple networks not yet supported, will use first"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,5 +778,70 @@ services:
         assert_eq!(stack.containers[0].cpus, "2.0");
         assert_eq!(stack.containers[0].memory, "512M");
         assert_eq!(stack.containers[0].pids, Some(100));
+    }
+
+    #[test]
+    fn test_check_valid() {
+        let yaml = r#"
+name: myapp
+services:
+  app:
+    image: alpine
+    command: ["echo", "hello"]
+"#;
+        let result = check(yaml);
+        assert!(!result.has_errors());
+        assert!(!result.has_warnings());
+        assert_eq!(result.services, vec!["app"]);
+    }
+
+    #[test]
+    fn test_check_unknown_fields() {
+        let yaml = r#"
+name: myapp
+services:
+  app:
+    image: alpine
+    healthcheck:
+      test: ["CMD", "true"]
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+"#;
+        let result = check(yaml);
+        assert!(result.has_errors());
+        assert!(result.errors.iter().any(|e| e.contains("healthcheck")));
+        assert!(result.errors.iter().any(|e| e.contains("deploy")));
+    }
+
+    #[test]
+    fn test_check_warnings() {
+        let yaml = r#"
+name: myapp
+version: "3.8"
+services:
+  app:
+    image: alpine
+    restart: unless-stopped
+"#;
+        let result = check(yaml);
+        assert!(!result.has_errors());
+        assert!(result.has_warnings());
+        assert!(result.warnings.iter().any(|w| w.contains("version")));
+        assert!(result.warnings.iter().any(|w| w.contains("restart")));
+    }
+
+    #[test]
+    fn test_check_missing_image() {
+        let yaml = r#"
+name: myapp
+services:
+  app:
+    command: ["echo", "hello"]
+"#;
+        let result = check(yaml);
+        assert!(result.has_errors());
+        assert!(result.errors.iter().any(|e| e.contains("image")));
     }
 }

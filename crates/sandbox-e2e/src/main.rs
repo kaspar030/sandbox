@@ -197,6 +197,21 @@ fn all_tests() -> Vec<Test> {
             "stack_strict_parsing",
             tests::stacks::test_stack_strict_parsing,
         ),
+        Test::Immutable(
+            "Stacks",
+            "stack_check_valid",
+            tests::stacks::test_stack_check_valid,
+        ),
+        Test::Immutable(
+            "Stacks",
+            "stack_check_unsupported",
+            tests::stacks::test_stack_check_unsupported,
+        ),
+        Test::Immutable(
+            "Stacks",
+            "stack_check_quiet",
+            tests::stacks::test_stack_check_quiet,
+        ),
         // Persistence (needs mutable context for restart)
         Test::Mutable(
             "Persistence",
