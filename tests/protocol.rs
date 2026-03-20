@@ -244,3 +244,38 @@ fn test_message_truncated_payload() {
     let result: std::result::Result<(Request, &[u8]), _> = decode_message(&buf);
     assert!(result.is_err());
 }
+
+/// Verify that a ContainerSpec JSON missing newer fields (volumes, publish, etc.)
+/// deserializes successfully with defaults — backward compatibility for persisted state.
+#[test]
+fn test_container_spec_backward_compat() {
+    // Minimal JSON that an old daemon version might have persisted
+    // (missing: volumes, publish, entrypoint, env, working_dir)
+    let old_json = r#"{
+        "name": "test-container",
+        "image": "alpine",
+        "command": ["/bin/sh"],
+        "hostname": null,
+        "uid_mappings": [],
+        "gid_mappings": [],
+        "cgroup": {},
+        "network": "Host",
+        "seccomp": "Default",
+        "capabilities": {"keep": []},
+        "bind_mounts": [],
+        "use_init": false,
+        "detach": false
+    }"#;
+
+    let spec: ContainerSpec = serde_json::from_str(old_json)
+        .expect("old ContainerSpec JSON should deserialize with defaults");
+
+    assert_eq!(spec.name, "test-container");
+    assert_eq!(spec.image, "alpine");
+    // New fields should have their defaults
+    assert!(spec.volumes.is_empty());
+    assert!(spec.publish.is_empty());
+    assert!(spec.entrypoint.is_empty());
+    assert!(spec.env.is_empty());
+    assert_eq!(spec.working_dir, "/");
+}

@@ -23,37 +23,63 @@ pub type Result<T> = std::result::Result<T, Error>;
 // -- Types --
 
 /// Container specification for creation.
+///
+/// All fields except `name` and `image` have `#[serde(default)]` to ensure
+/// backward compatibility — old persisted state files that are missing
+/// newer fields (e.g., `volumes`, `publish`) will deserialize successfully
+/// with default values instead of failing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerSpec {
     pub name: String,
     /// Image name (resolved by the daemon from the storage pool).
     pub image: String,
     /// Storage pool name (default: "main").
+    #[serde(default)]
     pub pool: Option<String>,
     /// Entrypoint from image config or --entrypoint override.
     /// Combined with command at exec time: exec(entrypoint + command).
+    #[serde(default)]
     pub entrypoint: Vec<String>,
+    #[serde(default)]
     pub command: Vec<String>,
     /// Environment variables: ["KEY=VALUE", ...].
+    #[serde(default)]
     pub env: Vec<String>,
     /// Working directory inside the container.
+    #[serde(default = "default_working_dir")]
     pub working_dir: String,
+    #[serde(default)]
     pub hostname: Option<String>,
+    #[serde(default)]
     pub uid_mappings: Vec<IdMapping>,
+    #[serde(default)]
     pub gid_mappings: Vec<IdMapping>,
+    #[serde(default)]
     pub cgroup: CgroupSpec,
+    #[serde(default)]
     pub network: NetworkMode,
+    #[serde(default)]
     pub seccomp: SeccompMode,
+    #[serde(default)]
     pub capabilities: CapabilitySpec,
+    #[serde(default)]
     pub bind_mounts: Vec<BindMount>,
     /// Named volume mounts.
+    #[serde(default)]
     pub volumes: Vec<VolumeMount>,
     /// Port mappings for bridged networking (host_port:container_port/proto).
+    #[serde(default)]
     pub publish: Vec<PortMapping>,
+    #[serde(default)]
     pub use_init: bool,
     /// If true, run detached (no PTY, no interactive I/O).
     /// If false (default), allocate a PTY and send master fd to client.
+    #[serde(default)]
     pub detach: bool,
+}
+
+fn default_working_dir() -> String {
+    "/".to_string()
 }
 
 impl Default for ContainerSpec {
@@ -164,9 +190,10 @@ pub struct CgroupSpec {
 }
 
 /// Network configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum NetworkMode {
     /// Share the host network namespace (fastest, no isolation).
+    #[default]
     Host,
     /// Create isolated network namespace with veth + bridge.
     /// Used internally after resolving a named network.
@@ -220,9 +247,10 @@ impl std::fmt::Display for PortProtocol {
 }
 
 /// Seccomp profile selection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum SeccompMode {
     /// Deny-by-default allowlist of common syscalls.
+    #[default]
     Default,
     /// No seccomp filtering.
     Disabled,
