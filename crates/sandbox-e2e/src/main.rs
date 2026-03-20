@@ -149,6 +149,18 @@ fn all_tests() -> Vec<Test> {
             "volume_remove_in_use",
             tests::volumes::test_volume_remove_in_use,
         ),
+        // Stacks
+        Test::Immutable("Stacks", "stack_up_down", tests::stacks::test_stack_up_down),
+        Test::Immutable(
+            "Stacks",
+            "stack_with_volumes",
+            tests::stacks::test_stack_with_volumes,
+        ),
+        Test::Immutable(
+            "Stacks",
+            "stack_with_networking",
+            tests::stacks::test_stack_with_networking,
+        ),
         // Persistence (needs mutable context for restart)
         Test::Mutable(
             "Persistence",

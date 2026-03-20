@@ -244,6 +244,12 @@ enum Commands {
         action: MountAction,
     },
 
+    /// Manage container stacks (groups of containers, networks, volumes)
+    Stack {
+        #[command(subcommand)]
+        action: StackAction,
+    },
+
     /// Manage named volumes
     Volume {
         #[command(subcommand)]
@@ -372,6 +378,29 @@ enum MountAction {
         /// Container name
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum StackAction {
+    /// Bring up a stack from a YAML definition file
+    Up {
+        /// Path to stack YAML file (default: sandbox-stack.yaml)
+        #[arg(default_value = "sandbox-stack.yaml")]
+        file: String,
+    },
+    /// Tear down a stack
+    Down {
+        /// Stack name
+        name: String,
+    },
+    /// List containers in a stack
+    Ps {
+        /// Stack name
+        name: String,
+    },
+    /// List all stacks
+    #[command(alias = "ls")]
+    List,
 }
 
 #[derive(Subcommand)]
@@ -784,6 +813,79 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        Commands::Stack { action } => match action {
+            StackAction::Up { file } => {
+                let path = std::path::Path::new(&file);
+                let def = sandbox::stack::parse_stack_file(path)?;
+                let mut client = Client::connect(cli.socket.as_deref())?;
+                let resp = client.request(&Request::StackUp(def))?;
+                match &resp {
+                    Response::StackUp { name, containers } => {
+                        println!("Stack '{name}' is up:");
+                        for c in containers {
+                            println!("  {c}");
+                        }
+                    }
+                    _ => print_response(&resp),
+                }
+            }
+            StackAction::Down { name } => {
+                let mut client = Client::connect(cli.socket.as_deref())?;
+                let resp = client.request(&Request::StackDown { name })?;
+                print_response(&resp);
+            }
+            StackAction::Ps { name } => {
+                let mut client = Client::connect(cli.socket.as_deref())?;
+                let resp = client.request(&Request::StackPs { name })?;
+                match &resp {
+                    Response::StackPs(containers) => {
+                        if containers.is_empty() {
+                            println!("No containers in stack");
+                        } else {
+                            println!("{:<25} {:<15} {:<10}", "NAME", "STATE", "PID");
+                            for c in containers {
+                                let state = match &c.state {
+                                    sandbox_proto::ContainerState::Created => "Created".to_string(),
+                                    sandbox_proto::ContainerState::Running => "Running".to_string(),
+                                    sandbox_proto::ContainerState::Stopped { exit_code } => {
+                                        format!("Stopped({exit_code})")
+                                    }
+                                };
+                                let pid = c
+                                    .pid
+                                    .map(|p| p.to_string())
+                                    .unwrap_or_else(|| "-".to_string());
+                                println!("{:<25} {:<15} {:<10}", c.name, state, pid);
+                            }
+                        }
+                    }
+                    _ => print_response(&resp),
+                }
+            }
+            StackAction::List => {
+                let mut client = Client::connect(cli.socket.as_deref())?;
+                let resp = client.request(&Request::StackList)?;
+                match &resp {
+                    Response::StackList(stacks) => {
+                        if stacks.is_empty() {
+                            println!("No stacks");
+                        } else {
+                            println!("{:<20} {:<15} {:<10}", "NAME", "BRIDGE", "CONTAINERS");
+                            for s in stacks {
+                                println!(
+                                    "{:<20} {:<15} {:<10}",
+                                    s.name,
+                                    s.bridge,
+                                    s.containers.len()
+                                );
+                            }
+                        }
+                    }
+                    _ => print_response(&resp),
+                }
+            }
+        },
+
         Commands::Volume { action } => {
             let mut client = Client::connect(cli.socket.as_deref())?;
             match action {
@@ -876,6 +978,12 @@ fn print_response(resp: &Response) {
         Response::ExecExited { exit_code } => println!("Exec exited with code {exit_code}"),
         Response::ImagePulled { name } => println!("Pulled image: {name}"),
         Response::Snapshotted { image_name } => println!("Snapshotted as image: {image_name}"),
+        Response::StackUp { name, containers } => {
+            println!("Stack '{name}' up ({} containers)", containers.len());
+        }
+        Response::StackDown { name } => println!("Stack '{name}' down"),
+        Response::StackPs(_) => {}   // handled inline
+        Response::StackList(_) => {} // handled inline
         Response::VolumeCreated { name } => println!("Created volume: {name}"),
         Response::VolumeRemoved { name } => println!("Removed volume: {name}"),
         Response::VolumeList(volumes) => {

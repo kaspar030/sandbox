@@ -44,6 +44,15 @@ impl HandleResult {
     }
 }
 
+/// State of an active stack.
+#[derive(Debug, Clone)]
+struct StackState {
+    name: String,
+    bridge: String,
+    containers: Vec<String>,
+    volumes: Vec<String>,
+}
+
 /// Manages the lifecycle of all containers.
 pub struct ContainerManager {
     containers: HashMap<String, Container>,
@@ -60,6 +69,8 @@ pub struct ContainerManager {
     published_ports: HashMap<u16, String>,
     /// Bridge reference counts: bridge_name → number of containers using it.
     bridge_refcounts: HashMap<String, u32>,
+    /// Active stacks: stack_name → StackState.
+    stacks: HashMap<String, StackState>,
     /// Derived paths.
     state_dir: PathBuf,
     ipam_dir: PathBuf,
@@ -91,6 +102,7 @@ impl ContainerManager {
             nft_available,
             published_ports: HashMap::new(),
             bridge_refcounts: HashMap::new(),
+            stacks: HashMap::new(),
             state_dir,
             ipam_dir,
             mounts_dir,
@@ -675,6 +687,10 @@ impl ContainerManager {
             Request::VolumeDetach { container, target } => {
                 self.handle_volume_detach(&container, &target)
             }
+            Request::StackUp(def) => self.handle_stack_up(def),
+            Request::StackDown { name } => self.handle_stack_down(&name),
+            Request::StackPs { name } => self.handle_stack_ps(&name),
+            Request::StackList => self.handle_stack_list(),
             Request::PoolList => self.handle_pool_list(),
             Request::Shutdown => {
                 tracing::info!("shutdown requested");
@@ -1191,6 +1207,300 @@ impl ContainerManager {
         HandleResult::response_only(Response::Snapshotted {
             image_name: image_name.to_string(),
         })
+    }
+
+    fn handle_stack_up(&mut self, def: sandbox::protocol::StackDefinition) -> HandleResult {
+        if self.stacks.contains_key(&def.name) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("stack '{}' already running", def.name),
+            });
+        }
+
+        let stack_name = def.name.clone();
+
+        // Generate bridge name if not specified (max 15 chars for Linux interface names)
+        let mut bridge_name = if def.network.bridge.is_empty() {
+            format!("sbr-{stack_name}")
+        } else {
+            def.network.bridge.clone()
+        };
+        bridge_name.truncate(15);
+
+        // Create volumes (prefixed with stack name)
+        let mut volume_names: Vec<String> = Vec::new();
+        for vol in &def.volumes {
+            let prefixed = format!("{stack_name}-{vol}");
+            if let Err(e) = self.handle_volume_create_inner(&prefixed, None) {
+                // Clean up already-created volumes
+                for v in &volume_names {
+                    let _ = self.handle_volume_remove_inner(v, None);
+                }
+                return HandleResult::response_only(Response::Error {
+                    message: format!("failed to create volume {prefixed}: {e}"),
+                });
+            }
+            volume_names.push(prefixed);
+        }
+
+        // Create containers
+        let mut container_names = Vec::new();
+        for svc in &def.containers {
+            let container_name = format!("{stack_name}-{}", svc.name);
+
+            // Build ContainerSpec
+            let mut spec = sandbox::protocol::ContainerSpec {
+                name: container_name.clone(),
+                image: svc.image.clone(),
+                command: if svc.command.is_empty() {
+                    vec!["/bin/sh".to_string()]
+                } else {
+                    svc.command.clone()
+                },
+                env: svc.env.clone(),
+                network: sandbox::protocol::NetworkMode::Bridged {
+                    bridge: bridge_name.clone(),
+                    address: None,
+                    gateway: None,
+                    prefix_len: 24,
+                },
+                use_init: svc.init,
+                detach: true, // stacks run detached
+                ..Default::default()
+            };
+
+            // Resolve volume mounts (prefix volume names with stack name)
+            for v in &svc.volumes {
+                let parts: Vec<&str> = v.splitn(3, ':').collect();
+                if parts.len() >= 2 {
+                    let vol_name = format!("{stack_name}-{}", parts[0]);
+                    let target = parts[1].to_string();
+                    let readonly = parts.get(2).is_some_and(|&s| s == "ro");
+                    spec.volumes.push(sandbox::protocol::VolumeMount {
+                        name: vol_name,
+                        target,
+                        readonly,
+                    });
+                }
+            }
+
+            // Parse bind mounts
+            for b in &svc.bind {
+                if let Ok((source, target, readonly)) = sandbox::stack::parse_bind_spec(b) {
+                    spec.bind_mounts.push(sandbox::protocol::BindMount {
+                        source,
+                        target,
+                        readonly,
+                    });
+                }
+            }
+
+            // Parse port mappings
+            for p in &svc.publish {
+                if let Ok(pm) = sandbox::stack::parse_port_spec(p) {
+                    spec.publish.push(pm);
+                }
+            }
+
+            // Apply image config
+            self.apply_image_config(&mut spec);
+
+            // Validate and set up networking
+            if let Err(e) = Self::validate_publish(&spec) {
+                self.cleanup_stack_partial(&container_names, &volume_names, &bridge_name);
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+            if let Err(e) = self.setup_bridged_networking(&mut spec) {
+                self.cleanup_stack_partial(&container_names, &volume_names, &bridge_name);
+                return HandleResult::response_only(Response::Error {
+                    message: format!("network setup for {}: {e}", svc.name),
+                });
+            }
+
+            // Resolve volumes to bind mounts
+            if let Err(e) = self.resolve_volumes(&mut spec) {
+                self.cleanup_stack_partial(&container_names, &volume_names, &bridge_name);
+                return HandleResult::response_only(Response::Error {
+                    message: format!("volume setup for {}: {e}", svc.name),
+                });
+            }
+
+            // Create + start the container
+            let mut container = Container::new(spec);
+            container.ephemeral = false; // stack containers are non-ephemeral
+
+            if let Err(e) = self.prepare_container_rootfs(&mut container) {
+                self.cleanup_stack_partial(&container_names, &volume_names, &bridge_name);
+                return HandleResult::response_only(Response::Error {
+                    message: format!("rootfs for {}: {e}", svc.name),
+                });
+            }
+
+            match container.start() {
+                Ok(()) => {
+                    Self::persist_container(&self.state_dir, &container_name, &container);
+                    self.containers.insert(container_name.clone(), container);
+                    container_names.push(container_name);
+                }
+                Err(e) => {
+                    let _ = container.destroy();
+                    self.cleanup_stack_partial(&container_names, &volume_names, &bridge_name);
+                    return HandleResult::response_only(Response::Error {
+                        message: format!("start {}: {e}", svc.name),
+                    });
+                }
+            }
+        }
+
+        // Track the stack
+        self.stacks.insert(
+            stack_name.clone(),
+            StackState {
+                name: stack_name.clone(),
+                bridge: bridge_name,
+                containers: container_names.clone(),
+                volumes: volume_names,
+            },
+        );
+
+        tracing::info!(
+            "stack '{}' up: {} container(s)",
+            stack_name,
+            container_names.len()
+        );
+
+        HandleResult::response_only(Response::StackUp {
+            name: stack_name,
+            containers: container_names,
+        })
+    }
+
+    fn handle_stack_down(&mut self, name: &str) -> HandleResult {
+        let stack = match self.stacks.remove(name) {
+            Some(s) => s,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("stack '{name}' not found"),
+                });
+            }
+        };
+
+        // Stop and destroy all containers
+        for cname in &stack.containers {
+            if let Some(container) = self.containers.get(cname) {
+                if container.state.is_running() {
+                    if let Some(pid) = container.pid {
+                        let _ = nix::sys::signal::kill(
+                            nix::unistd::Pid::from_raw(pid),
+                            nix::sys::signal::Signal::SIGTERM,
+                        );
+                    }
+                }
+            }
+        }
+
+        // Brief wait for SIGTERM
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        for cname in &stack.containers {
+            self.handle_container_exit(cname);
+            if let Some(mut c) = self.containers.remove(cname) {
+                self.cleanup_bridged_networking(&c.spec.clone());
+                persist::remove_state(&self.state_dir, cname);
+                let _ = c.destroy();
+                // Defer rootfs cleanup
+                if let Some(pool_name) = &c.pool_name {
+                    if let Some(pool) = self.storage.pool(pool_name) {
+                        let container_path = pool.container_path(cname);
+                        let fs_type = pool.fs_type.clone();
+                        self.spawn_deferred_cleanup(container_path, fs_type, cname.clone());
+                    }
+                }
+            }
+        }
+
+        // Remove volumes
+        for vol in &stack.volumes {
+            let _ = self.handle_volume_remove_inner(vol, None);
+        }
+
+        tracing::info!("stack '{}' down", name);
+
+        HandleResult::response_only(Response::StackDown {
+            name: name.to_string(),
+        })
+    }
+
+    fn handle_stack_ps(&self, name: &str) -> HandleResult {
+        let stack = match self.stacks.get(name) {
+            Some(s) => s,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("stack '{name}' not found"),
+                });
+            }
+        };
+
+        let infos: Vec<sandbox::protocol::ContainerInfo> = stack
+            .containers
+            .iter()
+            .filter_map(|cname| {
+                self.containers
+                    .get(cname)
+                    .map(|c| sandbox::protocol::ContainerInfo {
+                        name: cname.clone(),
+                        state: c.state.current().clone(),
+                        pid: c.pid.map(|p| p as u32),
+                    })
+            })
+            .collect();
+
+        HandleResult::response_only(Response::StackPs(infos))
+    }
+
+    fn handle_stack_list(&self) -> HandleResult {
+        let stacks: Vec<sandbox::protocol::StackInfo> = self
+            .stacks
+            .values()
+            .map(|s| sandbox::protocol::StackInfo {
+                name: s.name.clone(),
+                containers: s.containers.clone(),
+                bridge: s.bridge.clone(),
+            })
+            .collect();
+        HandleResult::response_only(Response::StackList(stacks))
+    }
+
+    /// Clean up a partially created stack (on error during stack up).
+    fn cleanup_stack_partial(&mut self, containers: &[String], volumes: &[String], _bridge: &str) {
+        for cname in containers {
+            if let Some(mut c) = self.containers.remove(cname) {
+                self.cleanup_bridged_networking(&c.spec.clone());
+                persist::remove_state(&self.state_dir, cname);
+                let _ = c.destroy();
+            }
+        }
+        for vol in volumes {
+            let _ = self.handle_volume_remove_inner(vol, None);
+        }
+    }
+
+    /// Internal volume create (doesn't produce HandleResult).
+    fn handle_volume_create_inner(&self, name: &str, pool: Option<&str>) -> Result<()> {
+        let pool = self.storage.resolve_pool(pool)?;
+        storage::volume::ensure_volumes_dir(pool)?;
+        storage::volume::create_volume(pool, name)
+    }
+
+    /// Internal volume remove (doesn't produce HandleResult).
+    fn handle_volume_remove_inner(&self, name: &str, pool: Option<&str>) -> Result<()> {
+        let pool = match self.storage.resolve_pool(pool) {
+            Ok(p) => p,
+            Err(_) => return Ok(()),
+        };
+        let _ = storage::volume::remove_volume(pool, name);
+        Ok(())
     }
 
     fn handle_volume_create(&self, name: &str, pool: Option<&str>) -> HandleResult {

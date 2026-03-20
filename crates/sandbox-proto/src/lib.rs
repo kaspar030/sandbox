@@ -382,8 +382,65 @@ pub enum Request {
     VolumeDetach { container: String, target: String },
     /// List storage pools.
     PoolList,
+    /// Bring up a stack (create network + volumes + containers).
+    StackUp(StackDefinition),
+    /// Tear down a stack.
+    StackDown { name: String },
+    /// List containers in a stack.
+    StackPs { name: String },
+    /// List all stacks.
+    StackList,
     /// Shut down the daemon.
     Shutdown,
+}
+
+/// Stack definition — describes a group of containers, network, and volumes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub network: StackNetwork,
+    #[serde(default)]
+    pub volumes: Vec<String>,
+    pub containers: Vec<StackContainer>,
+}
+
+/// Network configuration for a stack.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StackNetwork {
+    /// Subnet (e.g., "10.1.0.0/24"). Auto-allocated if empty.
+    #[serde(default)]
+    pub subnet: String,
+    /// Bridge name. Auto-generated if empty.
+    #[serde(default)]
+    pub bridge: String,
+}
+
+/// Container definition within a stack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackContainer {
+    pub name: String,
+    pub image: String,
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub volumes: Vec<String>,
+    #[serde(default)]
+    pub bind: Vec<String>,
+    #[serde(default)]
+    pub publish: Vec<String>,
+    #[serde(default)]
+    pub init: bool,
+}
+
+/// Information about a running stack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackInfo {
+    pub name: String,
+    pub containers: Vec<String>,
+    pub bridge: String,
 }
 
 /// Information about a bind mount.
@@ -431,6 +488,17 @@ pub enum Response {
     VolumeAttached { target: String },
     /// Volume detached from container.
     VolumeDetached { target: String },
+    /// Stack brought up.
+    StackUp {
+        name: String,
+        containers: Vec<String>,
+    },
+    /// Stack torn down.
+    StackDown { name: String },
+    /// Containers in a stack.
+    StackPs(Vec<ContainerInfo>),
+    /// List of all stacks.
+    StackList(Vec<StackInfo>),
     /// Pool list.
     PoolList(Vec<PoolInfo>),
     /// Container exited (sent after PTY EOF on interactive run).

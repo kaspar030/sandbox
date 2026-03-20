@@ -13,6 +13,7 @@ pub mod namespace;
 pub mod net;
 pub mod rootfs;
 pub mod security;
+pub mod stack;
 pub mod storage;
 pub mod sys;
 
