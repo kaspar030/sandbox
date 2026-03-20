@@ -15,6 +15,7 @@ pub mod image;
 pub mod layers;
 pub mod oci;
 pub mod unpack;
+pub mod volume;
 
 use crate::error::{Error, Result};
 use fs_detect::FsType;

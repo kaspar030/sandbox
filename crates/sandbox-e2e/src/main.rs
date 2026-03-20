@@ -128,6 +128,27 @@ fn all_tests() -> Vec<Test> {
             "bridged_dns",
             tests::networking::test_bridged_dns,
         ),
+        // Volumes
+        Test::Immutable(
+            "Volumes",
+            "volume_create_list_remove",
+            tests::volumes::test_volume_create_list_remove,
+        ),
+        Test::Immutable(
+            "Volumes",
+            "volume_mount_write_read",
+            tests::volumes::test_volume_mount_write_read,
+        ),
+        Test::Immutable(
+            "Volumes",
+            "volume_attach_detach",
+            tests::volumes::test_volume_attach_detach,
+        ),
+        Test::Immutable(
+            "Volumes",
+            "volume_remove_in_use",
+            tests::volumes::test_volume_remove_in_use,
+        ),
         // Persistence (needs mutable context for restart)
         Test::Mutable(
             "Persistence",

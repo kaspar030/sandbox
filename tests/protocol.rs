@@ -45,6 +45,7 @@ fn test_roundtrip_request_create() {
             target: "/mnt".to_string(),
             readonly: true,
         }],
+        volumes: Vec::new(),
         publish: Vec::new(),
         use_init: false,
         detach: false,

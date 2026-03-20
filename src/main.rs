@@ -88,6 +88,10 @@ enum Commands {
         #[arg(long = "publish", short = 'p')]
         publish: Vec<String>,
 
+        /// Mount a named volume (name:/path or name:/path:ro)
+        #[arg(long = "volume", short = 'v')]
+        volume: Vec<String>,
+
         /// Use built-in mini-init as PID 1
         #[arg(long)]
         init: bool,
@@ -142,6 +146,8 @@ enum Commands {
         bind: Vec<String>,
         #[arg(long = "publish", short = 'p')]
         publish: Vec<String>,
+        #[arg(long = "volume", short = 'v')]
+        volume: Vec<String>,
         #[arg(long)]
         init: bool,
 
@@ -236,6 +242,12 @@ enum Commands {
     Mount {
         #[command(subcommand)]
         action: MountAction,
+    },
+
+    /// Manage named volumes
+    Volume {
+        #[command(subcommand)]
+        action: VolumeAction,
     },
 
     /// Manage storage pools
@@ -363,6 +375,48 @@ enum MountAction {
 }
 
 #[derive(Subcommand)]
+enum VolumeAction {
+    /// Create a named volume
+    Create {
+        /// Volume name
+        name: String,
+        /// Storage pool (default: main)
+        #[arg(long)]
+        pool: Option<String>,
+    },
+    /// List volumes
+    #[command(alias = "ls")]
+    List {
+        /// Storage pool (default: main)
+        #[arg(long)]
+        pool: Option<String>,
+    },
+    /// Remove a volume
+    #[command(alias = "rm")]
+    Remove {
+        /// Volume name
+        name: String,
+        /// Storage pool (default: main)
+        #[arg(long)]
+        pool: Option<String>,
+    },
+    /// Attach a volume to a running container
+    Attach {
+        /// Container name
+        container: String,
+        /// Volume spec: name:/path or name:/path:ro
+        spec: String,
+    },
+    /// Detach a volume from a running container
+    Detach {
+        /// Container name
+        container: String,
+        /// Target path inside the container
+        target: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum PoolAction {
     /// List storage pools
     #[command(alias = "ls")]
@@ -411,6 +465,7 @@ fn main() -> anyhow::Result<()> {
             cap_add,
             bind,
             publish,
+            volume,
             init,
             detach,
             uid_map,
@@ -424,6 +479,7 @@ fn main() -> anyhow::Result<()> {
             )?;
             spec.detach = detach;
             spec.publish = parse_port_mappings(&publish)?;
+            spec.volumes = parse_volume_mounts(&volume)?;
             let mut client = Client::connect(cli.socket.as_deref())?;
 
             if detach {
@@ -462,6 +518,7 @@ fn main() -> anyhow::Result<()> {
             cap_add,
             bind,
             publish,
+            volume,
             init,
             start,
             detach,
@@ -475,6 +532,7 @@ fn main() -> anyhow::Result<()> {
                 seccomp, cap_add, bind, init, uid_map, gid_map, command,
             )?;
             spec.publish = parse_port_mappings(&publish)?;
+            spec.volumes = parse_volume_mounts(&volume)?;
             let mut client = Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Create(spec))?;
 
@@ -726,6 +784,50 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        Commands::Volume { action } => {
+            let mut client = Client::connect(cli.socket.as_deref())?;
+            match action {
+                VolumeAction::Create { name, pool } => {
+                    let resp = client.request(&Request::VolumeCreate { name, pool })?;
+                    print_response(&resp);
+                }
+                VolumeAction::List { pool } => {
+                    let resp = client.request(&Request::VolumeList { pool })?;
+                    match &resp {
+                        Response::VolumeList(volumes) => {
+                            if volumes.is_empty() {
+                                println!("No volumes");
+                            } else {
+                                println!("{:<25} {:<10}", "NAME", "POOL");
+                                for v in volumes {
+                                    println!("{:<25} {:<10}", v.name, v.pool);
+                                }
+                            }
+                        }
+                        _ => print_response(&resp),
+                    }
+                }
+                VolumeAction::Remove { name, pool } => {
+                    let resp = client.request(&Request::VolumeRemove { name, pool })?;
+                    print_response(&resp);
+                }
+                VolumeAction::Attach { container, spec } => {
+                    let vm = parse_volume_spec(&spec)?;
+                    let resp = client.request(&Request::VolumeAttach {
+                        container,
+                        volume_name: vm.name,
+                        target: vm.target,
+                        readonly: vm.readonly,
+                    })?;
+                    print_response(&resp);
+                }
+                VolumeAction::Detach { container, target } => {
+                    let resp = client.request(&Request::VolumeDetach { container, target })?;
+                    print_response(&resp);
+                }
+            }
+        }
+
         Commands::Pool { action } => {
             let mut client = Client::connect(cli.socket.as_deref())?;
             match action {
@@ -774,6 +876,15 @@ fn print_response(resp: &Response) {
         Response::ExecExited { exit_code } => println!("Exec exited with code {exit_code}"),
         Response::ImagePulled { name } => println!("Pulled image: {name}"),
         Response::Snapshotted { image_name } => println!("Snapshotted as image: {image_name}"),
+        Response::VolumeCreated { name } => println!("Created volume: {name}"),
+        Response::VolumeRemoved { name } => println!("Removed volume: {name}"),
+        Response::VolumeList(volumes) => {
+            for v in volumes {
+                println!("{}", v.name);
+            }
+        }
+        Response::VolumeAttached { target } => println!("Volume attached at: {target}"),
+        Response::VolumeDetached { target } => println!("Volume detached from: {target}"),
         Response::ImageInspect(detail) => print_image_inspect(detail),
         Response::MountAdded { target } => println!("Mount added: {target}"),
         Response::MountRemoved { target } => println!("Mount removed: {target}"),
@@ -909,6 +1020,7 @@ fn build_spec(
             caps
         },
         bind_mounts,
+        volumes: Vec::new(), // populated by caller from --volume flags
         publish: Vec::new(), // populated by caller from --publish flags
         use_init: init,
         detach: false,
@@ -932,6 +1044,29 @@ fn parse_exec_user(s: &str) -> anyhow::Result<sandbox_proto::ExecUser> {
 }
 
 /// Parse a mount spec: "SOURCE:TARGET" or "SOURCE:TARGET:ro"
+/// Parse volume mount specs: "name:/path" or "name:/path:ro"
+fn parse_volume_mounts(specs: &[String]) -> anyhow::Result<Vec<sandbox_proto::VolumeMount>> {
+    specs.iter().map(|s| parse_volume_spec(s)).collect()
+}
+
+/// Parse a single volume spec: "name:/path" or "name:/path:ro"
+fn parse_volume_spec(spec: &str) -> anyhow::Result<sandbox_proto::VolumeMount> {
+    let parts: Vec<&str> = spec.splitn(3, ':').collect();
+    match parts.len() {
+        2 => Ok(sandbox_proto::VolumeMount {
+            name: parts[0].to_string(),
+            target: parts[1].to_string(),
+            readonly: false,
+        }),
+        3 => Ok(sandbox_proto::VolumeMount {
+            name: parts[0].to_string(),
+            target: parts[1].to_string(),
+            readonly: parts[2] == "ro",
+        }),
+        _ => anyhow::bail!("invalid volume spec: {spec} (expected name:/path or name:/path:ro)"),
+    }
+}
+
 /// Parse port mapping specs: "hostPort:containerPort[/tcp|/udp]"
 fn parse_port_mappings(specs: &[String]) -> anyhow::Result<Vec<sandbox_proto::PortMapping>> {
     specs.iter().map(|s| parse_port_mapping(s)).collect()

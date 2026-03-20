@@ -379,6 +379,34 @@ impl ContainerManager {
     ///
     /// Allocates an IP from IPAM if not specified, validates port mappings,
     /// sets up NAT masquerade + port forwarding, and adds resolv.conf bind mount.
+    /// Resolve volume mounts to bind mounts by looking up volume paths.
+    fn resolve_volumes(&self, spec: &mut ContainerSpec) -> Result<()> {
+        if spec.volumes.is_empty() {
+            return Ok(());
+        }
+
+        let pool = self.storage.resolve_pool(spec.pool.as_deref())?;
+
+        for vol in &spec.volumes {
+            let vol_path = storage::volume::volume_path(pool, &vol.name);
+            if !vol_path.is_dir() {
+                return Err(Error::Other(format!(
+                    "volume '{}' not found (create it with: sandbox volume create {})",
+                    vol.name, vol.name
+                )));
+            }
+
+            // Add as a bind mount — the existing bind mount mechanism handles the rest
+            spec.bind_mounts.push(sandbox::protocol::BindMount {
+                source: vol_path.to_string_lossy().to_string(),
+                target: vol.target.clone(),
+                readonly: vol.readonly,
+            });
+        }
+
+        Ok(())
+    }
+
     fn setup_bridged_networking(&mut self, spec: &mut ContainerSpec) -> Result<()> {
         let (bridge, address, gateway, prefix_len) = match &spec.network {
             sandbox::protocol::NetworkMode::Bridged {
@@ -631,6 +659,22 @@ impl ContainerManager {
             } => self.handle_mount_add(&name, &source, &target, readonly),
             Request::MountRemove { name, target } => self.handle_mount_remove(&name, &target),
             Request::MountList { name } => self.handle_mount_list(&name),
+            Request::VolumeCreate { name, pool } => {
+                self.handle_volume_create(&name, pool.as_deref())
+            }
+            Request::VolumeRemove { name, pool } => {
+                self.handle_volume_remove(&name, pool.as_deref())
+            }
+            Request::VolumeList { pool } => self.handle_volume_list(pool.as_deref()),
+            Request::VolumeAttach {
+                container,
+                volume_name,
+                target,
+                readonly,
+            } => self.handle_volume_attach(&container, &volume_name, &target, readonly),
+            Request::VolumeDetach { container, target } => {
+                self.handle_volume_detach(&container, &target)
+            }
             Request::PoolList => self.handle_pool_list(),
             Request::Shutdown => {
                 tracing::info!("shutdown requested");
@@ -765,6 +809,13 @@ impl ContainerManager {
             });
         }
 
+        // Resolve volumes to bind mounts
+        if let Err(e) = self.resolve_volumes(&mut spec) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("{e}"),
+            });
+        }
+
         let mut container = Container::new(spec);
 
         // Prepare rootfs (copy image + idmap mount)
@@ -799,6 +850,13 @@ impl ContainerManager {
         if let Err(e) = self.setup_bridged_networking(&mut spec) {
             return HandleResult::response_only(Response::Error {
                 message: format!("network setup failed: {e}"),
+            });
+        }
+
+        // Resolve volumes to bind mounts
+        if let Err(e) = self.resolve_volumes(&mut spec) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("{e}"),
             });
         }
 
@@ -1132,6 +1190,197 @@ impl ContainerManager {
 
         HandleResult::response_only(Response::Snapshotted {
             image_name: image_name.to_string(),
+        })
+    }
+
+    fn handle_volume_create(&self, name: &str, pool: Option<&str>) -> HandleResult {
+        let pool = match self.storage.resolve_pool(pool) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
+
+        if let Err(e) = storage::volume::ensure_volumes_dir(pool) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("{e}"),
+            });
+        }
+
+        match storage::volume::create_volume(pool, name) {
+            Ok(()) => HandleResult::response_only(Response::VolumeCreated {
+                name: name.to_string(),
+            }),
+            Err(e) => HandleResult::response_only(Response::Error {
+                message: format!("{e}"),
+            }),
+        }
+    }
+
+    fn handle_volume_remove(&self, name: &str, pool: Option<&str>) -> HandleResult {
+        let pool = match self.storage.resolve_pool(pool) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
+
+        // Check if any container is using this volume
+        for (cname, container) in &self.containers {
+            if container.spec.volumes.iter().any(|v| v.name == name) {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("volume '{name}' is in use by container '{cname}'"),
+                });
+            }
+        }
+
+        match storage::volume::remove_volume(pool, name) {
+            Ok(()) => HandleResult::response_only(Response::VolumeRemoved {
+                name: name.to_string(),
+            }),
+            Err(e) => HandleResult::response_only(Response::Error {
+                message: format!("{e}"),
+            }),
+        }
+    }
+
+    fn handle_volume_list(&self, pool: Option<&str>) -> HandleResult {
+        let pool = match self.storage.resolve_pool(pool) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
+
+        match storage::volume::list_volumes(pool) {
+            Ok(volumes) => HandleResult::response_only(Response::VolumeList(volumes)),
+            Err(e) => HandleResult::response_only(Response::Error {
+                message: format!("{e}"),
+            }),
+        }
+    }
+
+    fn handle_volume_attach(
+        &mut self,
+        container_name: &str,
+        volume_name: &str,
+        target: &str,
+        readonly: bool,
+    ) -> HandleResult {
+        // Resolve the volume path
+        let container = match self.containers.get(container_name) {
+            Some(c) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {container_name} not found"),
+                });
+            }
+        };
+
+        if !container.state.is_running() {
+            return HandleResult::response_only(Response::Error {
+                message: format!("container {container_name} is not running"),
+            });
+        }
+
+        let pid = match container.pid {
+            Some(p) => p,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: "container has no PID".to_string(),
+                });
+            }
+        };
+
+        let pool = match self.storage.resolve_pool(container.spec.pool.as_deref()) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
+
+        let vol_path = storage::volume::volume_path(pool, volume_name);
+        if !vol_path.is_dir() {
+            return HandleResult::response_only(Response::Error {
+                message: format!("volume '{volume_name}' not found"),
+            });
+        }
+
+        // Mount via hot_bind_mount
+        if let Err(e) = sandbox::sys::hot_mount::hot_bind_mount(pid, &vol_path, target, readonly) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("volume attach failed: {e}"),
+            });
+        }
+
+        // Track the volume mount
+        let container = self.containers.get_mut(container_name).unwrap();
+        container.spec.volumes.push(sandbox::protocol::VolumeMount {
+            name: volume_name.to_string(),
+            target: target.to_string(),
+            readonly,
+        });
+        Self::persist_container(&self.state_dir, container_name, container);
+
+        HandleResult::response_only(Response::VolumeAttached {
+            target: target.to_string(),
+        })
+    }
+
+    fn handle_volume_detach(&mut self, container_name: &str, target: &str) -> HandleResult {
+        let container = match self.containers.get(container_name) {
+            Some(c) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {container_name} not found"),
+                });
+            }
+        };
+
+        if !container.state.is_running() {
+            return HandleResult::response_only(Response::Error {
+                message: format!("container {container_name} is not running"),
+            });
+        }
+
+        let pid = match container.pid {
+            Some(p) => p,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: "container has no PID".to_string(),
+                });
+            }
+        };
+
+        // Check volume exists in spec
+        if !container.spec.volumes.iter().any(|v| v.target == target) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("no volume mounted at {target}"),
+            });
+        }
+
+        // Unmount
+        if let Err(e) = sandbox::sys::hot_mount::hot_unmount(pid, target) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("volume detach failed: {e}"),
+            });
+        }
+
+        // Remove from tracking
+        let container = self.containers.get_mut(container_name).unwrap();
+        container.spec.volumes.retain(|v| v.target != target);
+        Self::persist_container(&self.state_dir, container_name, container);
+
+        HandleResult::response_only(Response::VolumeDetached {
+            target: target.to_string(),
         })
     }
 

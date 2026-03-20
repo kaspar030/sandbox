@@ -199,4 +199,58 @@ impl Client {
             _ => Err(Error::Other("unexpected response".to_string())),
         }
     }
+
+    // -- Volume convenience methods --
+
+    /// Create a named volume.
+    pub fn volume_create(&mut self, name: &str, pool: Option<&str>) -> Result<Response> {
+        self.request(&Request::VolumeCreate {
+            name: name.to_string(),
+            pool: pool.map(|s| s.to_string()),
+        })
+    }
+
+    /// Remove a named volume.
+    pub fn volume_remove(&mut self, name: &str, pool: Option<&str>) -> Result<Response> {
+        self.request(&Request::VolumeRemove {
+            name: name.to_string(),
+            pool: pool.map(|s| s.to_string()),
+        })
+    }
+
+    /// List named volumes.
+    pub fn volume_list(&mut self, pool: Option<&str>) -> Result<Vec<sandbox_proto::VolumeInfo>> {
+        let resp = self.request(&Request::VolumeList {
+            pool: pool.map(|s| s.to_string()),
+        })?;
+        match resp {
+            Response::VolumeList(volumes) => Ok(volumes),
+            Response::Error { message } => Err(Error::Other(message)),
+            _ => Err(Error::Other("unexpected response".to_string())),
+        }
+    }
+
+    /// Attach a volume to a running container.
+    pub fn volume_attach(
+        &mut self,
+        container: &str,
+        volume_name: &str,
+        target: &str,
+        readonly: bool,
+    ) -> Result<Response> {
+        self.request(&Request::VolumeAttach {
+            container: container.to_string(),
+            volume_name: volume_name.to_string(),
+            target: target.to_string(),
+            readonly,
+        })
+    }
+
+    /// Detach a volume from a running container.
+    pub fn volume_detach(&mut self, container: &str, target: &str) -> Result<Response> {
+        self.request(&Request::VolumeDetach {
+            container: container.to_string(),
+            target: target.to_string(),
+        })
+    }
 }

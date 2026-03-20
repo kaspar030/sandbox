@@ -46,6 +46,8 @@ pub struct ContainerSpec {
     pub seccomp: SeccompMode,
     pub capabilities: CapabilitySpec,
     pub bind_mounts: Vec<BindMount>,
+    /// Named volume mounts.
+    pub volumes: Vec<VolumeMount>,
     /// Port mappings for bridged networking (host_port:container_port/proto).
     pub publish: Vec<PortMapping>,
     pub use_init: bool,
@@ -72,6 +74,7 @@ impl Default for ContainerSpec {
             seccomp: SeccompMode::Default,
             capabilities: CapabilitySpec::default(),
             bind_mounts: Vec::new(),
+            volumes: Vec::new(),
             publish: Vec::new(),
             use_init: false,
             detach: false,
@@ -250,6 +253,21 @@ pub struct BindMount {
     pub readonly: bool,
 }
 
+/// Named volume mount specification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeMount {
+    pub name: String,
+    pub target: String,
+    pub readonly: bool,
+}
+
+/// Information about a named volume.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeInfo {
+    pub name: String,
+    pub pool: String,
+}
+
 /// User identity for exec commands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecUser {
@@ -347,6 +365,21 @@ pub enum Request {
         /// Overwrite existing image, adding a new layer on CoW filesystems.
         update: bool,
     },
+    /// Create a named volume.
+    VolumeCreate { name: String, pool: Option<String> },
+    /// Remove a named volume.
+    VolumeRemove { name: String, pool: Option<String> },
+    /// List named volumes.
+    VolumeList { pool: Option<String> },
+    /// Attach a volume to a running container.
+    VolumeAttach {
+        container: String,
+        volume_name: String,
+        target: String,
+        readonly: bool,
+    },
+    /// Detach a volume from a running container.
+    VolumeDetach { container: String, target: String },
     /// List storage pools.
     PoolList,
     /// Shut down the daemon.
@@ -388,6 +421,16 @@ pub enum Response {
     ImageInspect(ImageDetail),
     /// Image removed.
     ImageRemoved { name: String },
+    /// Volume created.
+    VolumeCreated { name: String },
+    /// Volume removed.
+    VolumeRemoved { name: String },
+    /// Volume list.
+    VolumeList(Vec<VolumeInfo>),
+    /// Volume attached to container.
+    VolumeAttached { target: String },
+    /// Volume detached from container.
+    VolumeDetached { target: String },
     /// Pool list.
     PoolList(Vec<PoolInfo>),
     /// Container exited (sent after PTY EOF on interactive run).
