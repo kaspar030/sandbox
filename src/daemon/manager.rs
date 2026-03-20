@@ -7,7 +7,9 @@ use super::persist;
 use sandbox::container::Container;
 use sandbox::error::{Error, Result};
 use sandbox::namespace::user;
-use sandbox::protocol::{ContainerInfo, ContainerSpec, PoolInfo, Request, Response};
+use sandbox::protocol::{
+    ContainerDetail, ContainerInfo, ContainerSpec, PoolInfo, Request, Response,
+};
 use sandbox::storage::fs_detect::FsType;
 use sandbox::storage::{self, StorageManager};
 use sandbox::sys::idmap;
@@ -734,6 +736,7 @@ impl ContainerManager {
                 update,
             } => self.handle_snapshot(&name, &image_name, force, update),
             Request::List => self.handle_list(),
+            Request::Inspect { name } => self.handle_inspect(&name),
             Request::Exec {
                 name,
                 command,
@@ -2136,6 +2139,49 @@ impl ContainerManager {
             .collect();
 
         HandleResult::response_only(Response::ContainerList(list))
+    }
+
+    fn handle_inspect(&self, name: &str) -> HandleResult {
+        let container = match self.containers.get(name) {
+            Some(c) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {name} not found"),
+                });
+            }
+        };
+
+        let detail = ContainerDetail {
+            name: container.spec.name.clone(),
+            image: container.spec.image.clone(),
+            pool: container
+                .pool_name
+                .clone()
+                .or_else(|| container.spec.pool.clone())
+                .unwrap_or_else(|| "main".to_string()),
+            state: container.state.current().clone(),
+            pid: container.pid.map(|p| p as u32),
+            ephemeral: container.ephemeral,
+            command: container.spec.command.clone(),
+            entrypoint: container.spec.entrypoint.clone(),
+            env: container.spec.env.clone(),
+            working_dir: container.spec.working_dir.clone(),
+            hostname: container.spec.hostname.clone(),
+            use_init: container.spec.use_init,
+            network: container.spec.network.clone(),
+            bind_mounts: container.spec.bind_mounts.clone(),
+            volumes: container.spec.volumes.clone(),
+            publish: container.spec.publish.clone(),
+            cgroup: container.spec.cgroup.clone(),
+            seccomp: container.spec.seccomp.clone(),
+            rootfs_path: container
+                .rootfs_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            cgroup_path: format!("/sys/fs/cgroup/sandbox/{name}"),
+        };
+
+        HandleResult::response_only(Response::ContainerInspect(Box::new(detail)))
     }
 
     fn handle_exec(

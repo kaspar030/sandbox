@@ -221,6 +221,16 @@ enum Commands {
     #[command(alias = "ls")]
     List,
 
+    /// Show detailed information about a container
+    Inspect {
+        /// Container name
+        name: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Execute a command in a running container
     Exec {
         /// Container name
@@ -757,6 +767,25 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        Commands::Inspect { name, json } => {
+            let mut client = Client::connect(cli.socket.as_deref())?;
+            let resp = client.request(&Request::Inspect { name })?;
+            match &resp {
+                Response::ContainerInspect(detail) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(detail)
+                                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
+                        );
+                    } else {
+                        print_container_inspect(detail);
+                    }
+                }
+                _ => print_response(&resp),
+            }
+        }
+
         Commands::Exec {
             name,
             user,
@@ -1157,6 +1186,7 @@ fn print_response(resp: &Response) {
         Response::ImageImported { name } => println!("Imported image: {name}"),
         Response::ImageRemoved { name } => println!("Removed image: {name}"),
         Response::ContainerList(_) => {}
+        Response::ContainerInspect(detail) => print_container_inspect(detail),
         Response::ImageList(_) => {}
         Response::PoolList(_) => {}
         Response::ContainerExited { exit_code } => {
@@ -1197,6 +1227,114 @@ fn print_response(resp: &Response) {
             std::process::exit(1);
         }
     }
+}
+
+fn print_container_inspect(d: &sandbox_proto::ContainerDetail) {
+    let state_str = match &d.state {
+        sandbox_proto::ContainerState::Created => "Created".to_string(),
+        sandbox_proto::ContainerState::Running => "Running".to_string(),
+        sandbox_proto::ContainerState::Stopped { exit_code } => {
+            format!("Stopped (exit code {exit_code})")
+        }
+    };
+    let pid_str = d
+        .pid
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    println!("Name:       {}", d.name);
+    println!("Image:      {}", d.image);
+    println!("Pool:       {}", d.pool);
+    println!("State:      {state_str}");
+    println!("PID:        {pid_str}");
+    println!("Ephemeral:  {}", if d.ephemeral { "yes" } else { "no" });
+    println!("Init:       {}", if d.use_init { "yes" } else { "no" });
+
+    if !d.entrypoint.is_empty() {
+        println!("Entrypoint: {}", d.entrypoint.join(" "));
+    }
+    println!("Command:    {}", d.command.join(" "));
+    println!("WorkingDir: {}", d.working_dir);
+
+    if let Some(ref h) = d.hostname {
+        println!("Hostname:   {h}");
+    }
+
+    // Network
+    match &d.network {
+        sandbox_proto::NetworkMode::Host => println!("Network:    host"),
+        sandbox_proto::NetworkMode::None => println!("Network:    none"),
+        sandbox_proto::NetworkMode::Named { name } => println!("Network:    {name}"),
+        sandbox_proto::NetworkMode::Bridged {
+            bridge,
+            address,
+            gateway,
+            prefix_len,
+        } => {
+            let addr = address
+                .map(|a| format!("{a}/{prefix_len}"))
+                .unwrap_or_else(|| "auto".to_string());
+            let gw = gateway
+                .map(|g| g.to_string())
+                .unwrap_or_else(|| "auto".to_string());
+            println!("Network:    bridged ({addr}, gw {gw}, br {bridge})");
+        }
+    }
+
+    if !d.env.is_empty() {
+        println!("Env:");
+        for e in &d.env {
+            println!("  {e}");
+        }
+    }
+
+    if !d.bind_mounts.is_empty() {
+        println!("Mounts:");
+        for m in &d.bind_mounts {
+            let ro = if m.readonly { " (ro)" } else { "" };
+            println!("  {}:{}{ro}", m.source, m.target);
+        }
+    }
+
+    if !d.volumes.is_empty() {
+        println!("Volumes:");
+        for v in &d.volumes {
+            let ro = if v.readonly { " (ro)" } else { "" };
+            println!("  {}:{}{ro}", v.name, v.target);
+        }
+    }
+
+    if !d.publish.is_empty() {
+        println!("Ports:");
+        for p in &d.publish {
+            println!("  {}:{}/{}", p.host_port, p.container_port, p.protocol);
+        }
+    }
+
+    // Cgroup limits (only print non-default)
+    let cg = &d.cgroup;
+    if cg.memory_max.is_some() || cg.cpu_max.is_some() || cg.pids_max.is_some() {
+        println!("Cgroup:");
+        if let Some(mem) = cg.memory_max {
+            println!("  memory: {}", format_size(mem));
+        }
+        if let Some((quota, period)) = cg.cpu_max {
+            println!("  cpus:   {:.1}", quota as f64 / period as f64);
+        }
+        if let Some(pids) = cg.pids_max {
+            println!("  pids:   {pids}");
+        }
+    }
+
+    match d.seccomp {
+        sandbox_proto::SeccompMode::Default => println!("Seccomp:    default"),
+        sandbox_proto::SeccompMode::Disabled => println!("Seccomp:    disabled"),
+    }
+
+    if let Some(ref rp) = d.rootfs_path {
+        println!("Rootfs:     {rp}");
+    }
+    println!("Cgroup:     {}", d.cgroup_path);
 }
 
 /// Resolve environment variable arguments.

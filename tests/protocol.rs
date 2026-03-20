@@ -122,6 +122,9 @@ fn test_roundtrip_all_request_variants() {
             name: "foo".to_string(),
         },
         Request::List,
+        Request::Inspect {
+            name: "foo".to_string(),
+        },
         Request::Exec {
             name: "foo".to_string(),
             command: vec!["/bin/ls".to_string(), "-la".to_string()],
@@ -165,6 +168,28 @@ fn test_roundtrip_all_response_variants() {
             message: "something went wrong".to_string(),
         },
         Response::ContainerList(vec![]),
+        Response::ContainerInspect(Box::new(ContainerDetail {
+            name: "test".to_string(),
+            image: "alpine".to_string(),
+            pool: "main".to_string(),
+            state: ContainerState::Running,
+            pid: Some(42),
+            ephemeral: false,
+            command: vec!["/bin/sh".to_string()],
+            entrypoint: Vec::new(),
+            env: vec!["FOO=bar".to_string()],
+            working_dir: "/".to_string(),
+            hostname: None,
+            use_init: false,
+            network: NetworkMode::Host,
+            bind_mounts: Vec::new(),
+            volumes: Vec::new(),
+            publish: Vec::new(),
+            cgroup: CgroupSpec::default(),
+            seccomp: SeccompMode::Default,
+            rootfs_path: Some("/pool/fs/test".to_string()),
+            cgroup_path: "/sys/fs/cgroup/sandbox/test".to_string(),
+        })),
     ];
 
     for resp in &responses {

@@ -91,3 +91,66 @@ pub fn test_list_containers(ctx: &TestContext) -> Result<(), String> {
     }
     Ok(())
 }
+
+pub fn test_inspect(ctx: &TestContext) -> Result<(), String> {
+    let name = "inspect-test";
+    let test_dir = ctx.workdir.join("inspect-bind-src");
+    std::fs::create_dir_all(&test_dir).unwrap();
+    let src = test_dir.to_str().unwrap();
+    let bind_spec = format!("{src}:/mnt/data");
+
+    ctx.cli_ok(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "alpine",
+        "-e",
+        "MYKEY=myval",
+        "--bind",
+        &bind_spec,
+        "--",
+        "sleep",
+        "30",
+    ]);
+
+    // Human-readable inspect
+    let output = ctx.cli_ok(&["inspect", name]);
+    if !output.contains("Name:") || !output.contains(name) {
+        ctx.cli_ok(&["destroy", name]);
+        return Err(format!("missing Name field in inspect output: {output}"));
+    }
+    if !output.contains("Image:") || !output.contains("alpine") {
+        ctx.cli_ok(&["destroy", name]);
+        return Err(format!("missing Image field in inspect output: {output}"));
+    }
+    if !output.contains("MYKEY=myval") {
+        ctx.cli_ok(&["destroy", name]);
+        return Err(format!("missing env in inspect output: {output}"));
+    }
+    if !output.contains("/mnt/data") {
+        ctx.cli_ok(&["destroy", name]);
+        return Err(format!("missing bind mount in inspect output: {output}"));
+    }
+
+    // JSON inspect
+    let json_output = ctx.cli_ok(&["inspect", "--json", name]);
+    // Verify it parses as valid JSON
+    let parsed: serde_json::Value = serde_json::from_str(&json_output).map_err(|e| {
+        ctx.cli_ok(&["destroy", name]);
+        format!("invalid JSON from inspect --json: {e}\noutput: {json_output}")
+    })?;
+
+    // Check key fields in JSON
+    if parsed["name"].as_str() != Some(name) {
+        ctx.cli_ok(&["destroy", name]);
+        return Err(format!("JSON name mismatch: {:?}", parsed["name"]));
+    }
+    if parsed["image"].as_str() != Some("alpine") {
+        ctx.cli_ok(&["destroy", name]);
+        return Err(format!("JSON image mismatch: {:?}", parsed["image"]));
+    }
+
+    ctx.cli_ok(&["destroy", name]);
+    Ok(())
+}

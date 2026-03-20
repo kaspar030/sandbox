@@ -1469,6 +1469,7 @@ dependencies = [
  "nix",
  "sandbox-client",
  "sandbox-proto",
+ "serde_json",
 ]
 
 [[package]]

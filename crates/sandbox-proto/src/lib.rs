@@ -333,6 +333,31 @@ pub struct ContainerInfo {
     pub pid: Option<u32>,
 }
 
+/// Detailed container information (for inspect view).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerDetail {
+    pub name: String,
+    pub image: String,
+    pub pool: String,
+    pub state: ContainerState,
+    pub pid: Option<u32>,
+    pub ephemeral: bool,
+    pub command: Vec<String>,
+    pub entrypoint: Vec<String>,
+    pub env: Vec<String>,
+    pub working_dir: String,
+    pub hostname: Option<String>,
+    pub use_init: bool,
+    pub network: NetworkMode,
+    pub bind_mounts: Vec<BindMount>,
+    pub volumes: Vec<VolumeMount>,
+    pub publish: Vec<PortMapping>,
+    pub cgroup: CgroupSpec,
+    pub seccomp: SeccompMode,
+    pub rootfs_path: Option<String>,
+    pub cgroup_path: String,
+}
+
 // -- Wire protocol messages --
 
 /// Request from CLI client to daemon.
@@ -353,6 +378,8 @@ pub enum Request {
     Destroy { name: String },
     /// List all containers.
     List,
+    /// Inspect a container (detailed info).
+    Inspect { name: String },
     /// Execute a command in a running container's namespaces.
     Exec {
         name: String,
@@ -541,6 +568,8 @@ pub enum Response {
     Stopped { name: String, exit_code: i32 },
     /// Container list.
     ContainerList(Vec<ContainerInfo>),
+    /// Container detail (inspect).
+    ContainerInspect(Box<ContainerDetail>),
     /// Container was destroyed.
     Destroyed { name: String },
     /// Exec started. PTY fd follows via SCM_RIGHTS.

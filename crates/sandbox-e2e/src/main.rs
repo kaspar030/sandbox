@@ -71,6 +71,7 @@ fn all_tests() -> Vec<Test> {
             "list_containers",
             tests::lifecycle::test_list_containers,
         ),
+        Test::Immutable("Lifecycle", "inspect", tests::lifecycle::test_inspect),
         // Images
         Test::Immutable("Images", "image_list", tests::images::test_image_list),
         Test::Immutable("Images", "image_inspect", tests::images::test_image_inspect),
