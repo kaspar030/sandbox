@@ -4,7 +4,16 @@ pub fn test_daemon_restart_recovery(ctx: &mut TestContext) -> Result<(), String>
     let name = "persist-test";
 
     // Create and start a non-ephemeral container (state is persisted on start)
-    let output = ctx.cli(&["create", "--name", name, "--image", "alpine", "--init"]);
+    let output = ctx.cli(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "alpine",
+        "--init",
+        "--restart",
+        "no",
+    ]);
     if !output.status.success() {
         return Err(format!(
             "create failed: {}",

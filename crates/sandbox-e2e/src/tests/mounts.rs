@@ -93,7 +93,16 @@ pub fn test_mount_stopped(ctx: &TestContext) -> Result<(), String> {
 
     // Create container (stopped)
     ctx.cli_ok(&[
-        "create", "--name", name, "--image", "alpine", "--", "sleep", "30",
+        "create",
+        "--name",
+        name,
+        "--image",
+        "alpine",
+        "--restart",
+        "no",
+        "--",
+        "sleep",
+        "30",
     ]);
 
     // Add mount while stopped
@@ -120,7 +129,7 @@ pub fn test_mount_stopped(ctx: &TestContext) -> Result<(), String> {
     }
 
     // Stop, remove mount while stopped
-    ctx.cli_ok(&["stop", name]);
+    ctx.cli_ok(&["stop", "--timeout", "1", name]);
     ctx.cli_ok(&["mount", "rm", name, "/mnt/added"]);
 
     // Verify mount is gone from list

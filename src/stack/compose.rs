@@ -61,6 +61,7 @@ pub fn parse(yaml: &str) -> Result<StackDefinition> {
         network,
         volumes,
         containers,
+        restart: raw.restart.unwrap_or_default(),
     })
 }
 
@@ -153,6 +154,10 @@ struct StackYaml {
     /// Top-level volumes (map or list).
     #[serde(default, deserialize_with = "deserialize_volumes")]
     volumes: Vec<String>,
+    /// Default restart policy for all services in this stack.
+    /// Per-service `restart:` overrides this.
+    #[serde(default)]
+    restart: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -400,6 +405,7 @@ const STACK_FIELDS: &[&str] = &[
     "networks",
     "network",
     "volumes",
+    "restart",
 ];
 
 /// Known fields for a service/container definition.
@@ -523,12 +529,6 @@ pub fn check(yaml: &str) -> CheckResult {
                     for (field_key, _) in svc_fields {
                         if let Some(field_str) = field_key.as_str() {
                             if CONTAINER_FIELDS.contains(&field_str) {
-                                // Check partially supported fields
-                                if field_str == "restart" {
-                                    result.warnings.push(format!(
-                                        "service '{svc_name}': 'restart' accepted but not yet enforced"
-                                    ));
-                                }
                                 svc_supported.push(field_str.to_string());
                             } else {
                                 result.errors.push(format!(
@@ -829,7 +829,7 @@ services:
         assert!(!result.has_errors());
         assert!(result.has_warnings());
         assert!(result.warnings.iter().any(|w| w.contains("version")));
-        assert!(result.warnings.iter().any(|w| w.contains("restart")));
+        // restart is now fully enforced, no warning expected
     }
 
     #[test]

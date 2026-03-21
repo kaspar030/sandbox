@@ -233,6 +233,28 @@ fn all_tests() -> Vec<Test> {
             "stack_check_quiet",
             tests::stacks::test_stack_check_quiet,
         ),
+        // Restart policies
+        Test::Immutable(
+            "Restart",
+            "restart_always",
+            tests::restart::test_restart_always,
+        ),
+        Test::Immutable(
+            "Restart",
+            "restart_on_failure",
+            tests::restart::test_restart_on_failure,
+        ),
+        Test::Immutable(
+            "Restart",
+            "restart_unless_stopped",
+            tests::restart::test_restart_unless_stopped,
+        ),
+        Test::Immutable("Restart", "restart_no", tests::restart::test_restart_no),
+        Test::Immutable(
+            "Restart",
+            "restart_inspect",
+            tests::restart::test_restart_inspect,
+        ),
         // Persistence (needs mutable context for restart)
         Test::Mutable(
             "Persistence",

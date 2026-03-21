@@ -50,6 +50,7 @@ fn test_roundtrip_request_create() {
         use_init: false,
         detach: false,
         user: Some("1000:1000".to_string()),
+        restart_policy: RestartPolicy::UnlessStopped,
     };
 
     let req = Request::Create(spec);
@@ -189,6 +190,7 @@ fn test_roundtrip_all_response_variants() {
             publish: Vec::new(),
             cgroup: CgroupSpec::default(),
             seccomp: SeccompMode::Default,
+            restart_policy: RestartPolicy::Always,
             rootfs_path: Some("/pool/fs/test".to_string()),
             cgroup_path: "/sys/fs/cgroup/sandbox/test".to_string(),
         })),
@@ -306,6 +308,50 @@ fn test_container_spec_backward_compat() {
     assert!(spec.entrypoint.is_empty());
     assert!(spec.env.is_empty());
     assert_eq!(spec.working_dir, "/");
+    // restart_policy should default to No for old specs
+    assert_eq!(spec.restart_policy, RestartPolicy::No);
+}
+
+/// Verify that RestartPolicy serializes/deserializes with kebab-case.
+#[test]
+fn test_restart_policy_serde() {
+    let policies = vec![
+        (RestartPolicy::No, "\"no\""),
+        (RestartPolicy::Always, "\"always\""),
+        (RestartPolicy::OnFailure, "\"on-failure\""),
+        (RestartPolicy::UnlessStopped, "\"unless-stopped\""),
+    ];
+
+    for (policy, expected_json) in &policies {
+        let json = serde_json::to_string(policy).unwrap();
+        assert_eq!(&json, *expected_json, "serialize {policy}");
+        let deserialized: RestartPolicy = serde_json::from_str(expected_json).unwrap();
+        assert_eq!(&deserialized, policy, "deserialize {expected_json}");
+    }
+}
+
+/// Verify that RestartPolicy::should_restart works correctly.
+#[test]
+fn test_restart_policy_should_restart() {
+    // No: never restart
+    assert!(!RestartPolicy::No.should_restart(0, false));
+    assert!(!RestartPolicy::No.should_restart(1, false));
+
+    // Always: always restart
+    assert!(RestartPolicy::Always.should_restart(0, false));
+    assert!(RestartPolicy::Always.should_restart(1, false));
+    assert!(RestartPolicy::Always.should_restart(0, true));
+
+    // OnFailure: only on non-zero exit
+    assert!(!RestartPolicy::OnFailure.should_restart(0, false));
+    assert!(RestartPolicy::OnFailure.should_restart(1, false));
+    assert!(RestartPolicy::OnFailure.should_restart(137, false));
+
+    // UnlessStopped: restart unless manually stopped
+    assert!(RestartPolicy::UnlessStopped.should_restart(0, false));
+    assert!(RestartPolicy::UnlessStopped.should_restart(1, false));
+    assert!(!RestartPolicy::UnlessStopped.should_restart(0, true));
+    assert!(!RestartPolicy::UnlessStopped.should_restart(1, true));
 }
 
 /// Verify that an Exec request with env roundtrips correctly.

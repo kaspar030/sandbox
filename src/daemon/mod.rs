@@ -85,6 +85,7 @@ pub fn run_daemon(
 
     // Recover from previous crash: clean up leftover containers, cgroups, mounts
     mgr.recover_from_crash();
+    let containers_to_restart = mgr.containers_to_restart();
 
     let mgr = Arc::new(smol::lock::Mutex::new(mgr));
 
@@ -119,6 +120,34 @@ pub fn run_daemon(
             }
         })
         .detach();
+
+        // Auto-restart recovered containers that have a restart policy
+        for name in containers_to_restart {
+            let mgr_restart = Arc::clone(&mgr);
+            let name_clone = name.clone();
+            smol::spawn(async move {
+                // Brief delay to let the daemon fully initialize
+                smol::Timer::after(Duration::from_secs(1)).await;
+
+                let restart_result = {
+                    let mut m = mgr_restart.lock().await;
+                    m.restart_container(&name_clone)
+                };
+
+                match restart_result {
+                    Ok(pidfd) => {
+                        tracing::info!("auto-restarted recovered container {name_clone}");
+                        await_pidfd_and_reap(pidfd, &name_clone, Arc::clone(&mgr_restart)).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "failed to auto-restart recovered container {name_clone}: {e}"
+                        );
+                    }
+                }
+            })
+            .detach();
+        }
 
         // Accept loop: race accept() vs shutdown signal
         loop {
@@ -394,7 +423,9 @@ async fn handle_stop_async(
     }
 
     // Reap and update state (brief mutex hold)
-    let exit_code = {
+    // Note: manually_stopped is already set in initiate_stop(), so
+    // the restart policy won't trigger for user-initiated stops.
+    let result = {
         let mut m = mgr.lock().await;
         m.handle_container_exit(name)
     };
@@ -403,7 +434,7 @@ async fn handle_stop_async(
         stream,
         &Response::Stopped {
             name: name.to_string(),
-            exit_code,
+            exit_code: result.exit_code,
         },
     )
     .await?;
@@ -412,17 +443,85 @@ async fn handle_stop_async(
 }
 
 /// Wait for a container pidfd to become readable (child exited), then reap
-/// and update state. Returns the exit code.
+/// and update state. If the container has a restart policy, restart it
+/// with exponential backoff and continue monitoring.
+/// Returns the final exit code (when the container is not restarted).
 async fn await_pidfd_and_reap(
     pidfd: std::os::fd::OwnedFd,
     name: &str,
     mgr: Arc<smol::lock::Mutex<manager::ContainerManager>>,
 ) -> i32 {
-    if let Ok(async_fd) = Async::new(pidfd) {
-        let _ = async_fd.readable().await;
+    let mut current_pidfd = pidfd;
+    let mut backoff = Duration::from_secs(1);
+    let max_backoff = Duration::from_secs(30);
+    let healthy_threshold = Duration::from_secs(10);
+
+    loop {
+        let start_time = std::time::Instant::now();
+
+        // Wait for the container to exit
+        if let Ok(async_fd) = Async::new(current_pidfd) {
+            let _ = async_fd.readable().await;
+        }
+
+        // Reap and check restart policy
+        let result = {
+            let mut m = mgr.lock().await;
+            m.handle_container_exit(name)
+        };
+
+        if !result.should_restart {
+            return result.exit_code;
+        }
+
+        // Reset backoff if the container ran for a healthy duration
+        let run_duration = start_time.elapsed();
+        if run_duration > healthy_threshold {
+            backoff = Duration::from_secs(1);
+        }
+
+        tracing::info!(
+            "restarting container {name} in {:.1}s (backoff)",
+            backoff.as_secs_f64()
+        );
+        smol::Timer::after(backoff).await;
+
+        // Increase backoff for next crash (cap at max)
+        backoff = std::cmp::min(backoff * 2, max_backoff);
+
+        // Check if the container was manually stopped during the backoff
+        {
+            let m = mgr.lock().await;
+            if let Some(c) = m.get_container(name) {
+                if c.manually_stopped {
+                    tracing::info!(
+                        "container {name} was stopped during restart backoff, aborting restart"
+                    );
+                    return result.exit_code;
+                }
+            } else {
+                // Container was destroyed during backoff
+                return result.exit_code;
+            }
+        }
+
+        // Restart the container and get new pidfd
+        let new_pidfd = {
+            let mut m = mgr.lock().await;
+            m.restart_container(name)
+        };
+
+        match new_pidfd {
+            Ok(pidfd) => {
+                current_pidfd = pidfd;
+                // Continue the loop to monitor the new process
+            }
+            Err(e) => {
+                tracing::error!("failed to restart container {name}: {e}");
+                return result.exit_code;
+            }
+        }
     }
-    let mut m = mgr.lock().await;
-    m.handle_container_exit(name)
 }
 
 /// Wait for an exec child pidfd to become readable, then reap it.

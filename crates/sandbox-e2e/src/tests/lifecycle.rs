@@ -29,7 +29,15 @@ pub fn test_create_start_stop_destroy(ctx: &TestContext) -> Result<(), String> {
     let name = "lifecycle-test";
 
     // Create
-    if ctx.cli_fails(&["create", "--name", name, "--image", "alpine"]) {
+    if ctx.cli_fails(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "alpine",
+        "--restart",
+        "no",
+    ]) {
         return Err("create failed".into());
     }
 
@@ -45,8 +53,8 @@ pub fn test_create_start_stop_destroy(ctx: &TestContext) -> Result<(), String> {
         return Err("start failed".into());
     }
 
-    // Stop
-    if ctx.cli_fails(&["stop", name]) {
+    // Stop (short timeout — sleep as PID 1 ignores SIGTERM)
+    if ctx.cli_fails(&["stop", "--timeout", "1", name]) {
         let _ = ctx.cli(&["destroy", name]);
         return Err("stop failed".into());
     }
@@ -77,8 +85,24 @@ pub fn test_list_containers(ctx: &TestContext) -> Result<(), String> {
     let name1 = "list-test-1";
     let name2 = "list-test-2";
 
-    ctx.cli_ok(&["create", "--name", name1, "--image", "alpine"]);
-    ctx.cli_ok(&["create", "--name", name2, "--image", "alpine"]);
+    ctx.cli_ok(&[
+        "create",
+        "--name",
+        name1,
+        "--image",
+        "alpine",
+        "--restart",
+        "no",
+    ]);
+    ctx.cli_ok(&[
+        "create",
+        "--name",
+        name2,
+        "--image",
+        "alpine",
+        "--restart",
+        "no",
+    ]);
 
     let list = ctx.cli_ok(&["list"]);
     let ok = list.contains(name1) && list.contains(name2);
@@ -109,6 +133,8 @@ pub fn test_inspect(ctx: &TestContext) -> Result<(), String> {
         "MYKEY=myval",
         "--bind",
         &bind_spec,
+        "--restart",
+        "no",
         "--",
         "sleep",
         "30",

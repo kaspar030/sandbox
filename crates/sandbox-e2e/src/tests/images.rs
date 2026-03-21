@@ -27,7 +27,15 @@ pub fn test_snapshot(ctx: &TestContext) -> Result<(), String> {
     let image = "snap-image";
 
     // Create a container, make a change, snapshot it
-    ctx.cli_ok(&["create", "--name", container, "--image", "alpine"]);
+    ctx.cli_ok(&[
+        "create",
+        "--name",
+        container,
+        "--image",
+        "alpine",
+        "--restart",
+        "no",
+    ]);
     ctx.cli_ok(&["snapshot", container, image]);
 
     // Verify image exists
@@ -48,7 +56,15 @@ pub fn test_snapshot_update(ctx: &TestContext) -> Result<(), String> {
     let container = "snap-update-test";
     let image = "snap-update-image";
 
-    ctx.cli_ok(&["create", "--name", container, "--image", "alpine"]);
+    ctx.cli_ok(&[
+        "create",
+        "--name",
+        container,
+        "--image",
+        "alpine",
+        "--restart",
+        "no",
+    ]);
     ctx.cli_ok(&["snapshot", container, image]);
 
     // Update should work

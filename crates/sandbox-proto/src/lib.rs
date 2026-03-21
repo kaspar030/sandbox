@@ -80,6 +80,10 @@ pub struct ContainerSpec {
     /// Resolved from image config if not set by CLI. Default: root (uid 0).
     #[serde(default)]
     pub user: Option<String>,
+    /// Restart policy. Default: No (for backward compatibility with old specs).
+    /// CLI `create` defaults to UnlessStopped; `run` always uses No.
+    #[serde(default)]
+    pub restart_policy: RestartPolicy,
 }
 
 fn default_working_dir() -> String {
@@ -109,6 +113,7 @@ impl Default for ContainerSpec {
             use_init: false,
             detach: false,
             user: None,
+            restart_policy: RestartPolicy::No,
         }
     }
 }
@@ -332,6 +337,56 @@ pub enum ContainerState {
     Stopped { exit_code: i32 },
 }
 
+/// Restart policy for containers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestartPolicy {
+    /// Never restart (default for ephemeral `run` containers).
+    #[default]
+    No,
+    /// Always restart regardless of exit code.
+    Always,
+    /// Restart only on non-zero exit code.
+    OnFailure,
+    /// Restart unless explicitly stopped by the user.
+    /// Default for non-ephemeral `create` containers and stack services.
+    UnlessStopped,
+}
+
+impl std::fmt::Display for RestartPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::No => write!(f, "no"),
+            Self::Always => write!(f, "always"),
+            Self::OnFailure => write!(f, "on-failure"),
+            Self::UnlessStopped => write!(f, "unless-stopped"),
+        }
+    }
+}
+
+impl RestartPolicy {
+    /// Parse from a string (Docker-compatible values).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "no" | "" => Some(Self::No),
+            "always" => Some(Self::Always),
+            "on-failure" => Some(Self::OnFailure),
+            "unless-stopped" => Some(Self::UnlessStopped),
+            _ => None,
+        }
+    }
+
+    /// Whether this policy can trigger a restart for the given exit code.
+    pub fn should_restart(&self, exit_code: i32, manually_stopped: bool) -> bool {
+        match self {
+            Self::No => false,
+            Self::Always => true,
+            Self::OnFailure => exit_code != 0,
+            Self::UnlessStopped => !manually_stopped,
+        }
+    }
+}
+
 /// Information about a container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerInfo {
@@ -362,6 +417,7 @@ pub struct ContainerDetail {
     pub publish: Vec<PortMapping>,
     pub cgroup: CgroupSpec,
     pub seccomp: SeccompMode,
+    pub restart_policy: RestartPolicy,
     pub rootfs_path: Option<String>,
     pub cgroup_path: String,
 }
@@ -492,6 +548,10 @@ pub struct StackDefinition {
     #[serde(default)]
     pub volumes: Vec<String>,
     pub containers: Vec<StackContainer>,
+    /// Default restart policy for all containers in this stack.
+    /// Per-service `restart` overrides this. Defaults to "unless-stopped".
+    #[serde(default)]
+    pub restart: String,
 }
 
 /// Network configuration for a stack.

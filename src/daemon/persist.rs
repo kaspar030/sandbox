@@ -28,6 +28,10 @@ pub struct ContainerRecord {
     pub rootfs_path: Option<PathBuf>,
     pub pool_name: Option<String>,
     pub ephemeral: bool,
+    /// True if the user explicitly stopped this container.
+    /// Used by `UnlessStopped` restart policy to inhibit restart.
+    #[serde(default)]
+    pub manually_stopped: bool,
 }
 
 /// Ensure the state directory exists.
@@ -54,20 +58,6 @@ pub fn save_state(state_dir: &Path, name: &str, record: &ContainerRecord) -> std
 
     fs::rename(&tmp_path, &path)?;
     Ok(())
-}
-
-/// Update only the state field of an existing record. Read-modify-write.
-pub fn update_state(
-    state_dir: &Path,
-    name: &str,
-    new_state: ContainerState,
-) -> std::io::Result<()> {
-    let path = state_path(state_dir, name);
-    let json = fs::read_to_string(&path)?;
-    let mut record: ContainerRecord = serde_json::from_str(&json)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    record.state = new_state;
-    save_state(state_dir, name, &record)
 }
 
 /// Remove a container's state file.

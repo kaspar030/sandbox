@@ -38,6 +38,9 @@ pub struct Container {
     /// If true, the container is automatically removed from the daemon
     /// registry when it exits. Set for containers created via `run`.
     pub ephemeral: bool,
+    /// Set to true when the user explicitly stops the container.
+    /// Used by `UnlessStopped` restart policy to inhibit restart.
+    pub manually_stopped: bool,
     /// Path to the idmapped mount for this container (under /run/sandbox/mounts/).
     /// Set by the daemon before start(). Cleaned up on destroy().
     pub idmap_mount: Option<std::path::PathBuf>,
@@ -59,6 +62,7 @@ impl Container {
             cgroup: None,
             pty_master: None,
             ephemeral: false,
+            manually_stopped: false,
             idmap_mount: None,
             rootfs_path: None,
             pool_name: None,
@@ -73,6 +77,7 @@ impl Container {
         rootfs_path: Option<std::path::PathBuf>,
         pool_name: Option<String>,
         ephemeral: bool,
+        manually_stopped: bool,
     ) -> Self {
         Self {
             spec,
@@ -82,6 +87,7 @@ impl Container {
             cgroup: None,
             pty_master: None,
             ephemeral,
+            manually_stopped,
             idmap_mount: None,
             rootfs_path,
             pool_name,

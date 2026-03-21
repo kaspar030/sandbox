@@ -18,6 +18,13 @@ use std::net::Ipv4Addr;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Result of handling a container exit.
+pub struct ExitResult {
+    pub exit_code: i32,
+    /// If true, the container should be restarted by the async layer.
+    pub should_restart: bool,
+}
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Parse a subnet string like "10.1.0.0/24" into (addr, prefix_len).
@@ -254,6 +261,7 @@ impl ContainerManager {
                         record.rootfs_path,
                         record.pool_name,
                         false,
+                        record.manually_stopped,
                     );
                     // Update state file to Created
                     Self::persist_container(&self.state_dir, &name, &container);
@@ -387,6 +395,26 @@ impl ContainerManager {
         self.containers.get_mut(name)?.pidfd.take()
     }
 
+    /// Get a reference to a container by name.
+    pub fn get_container(&self, name: &str) -> Option<&Container> {
+        self.containers.get(name)
+    }
+
+    /// Get names of recovered containers that should be auto-restarted.
+    /// These are non-ephemeral containers with a restart policy that allows
+    /// restart and that are currently in Created state (after recovery).
+    pub fn containers_to_restart(&self) -> Vec<String> {
+        self.containers
+            .iter()
+            .filter(|(_, c)| {
+                c.state.is_created()
+                    && !c.ephemeral
+                    && c.spec.restart_policy.should_restart(0, c.manually_stopped)
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// Get all running containers as (name, pid) pairs.
     pub fn running_containers(&self) -> Vec<(String, i32)> {
         self.containers
@@ -411,6 +439,12 @@ impl ContainerManager {
                 });
             }
         };
+
+        // Mark as manually stopped (inhibits UnlessStopped restart).
+        // Set this even if the container is stopped (between restart cycles)
+        // to prevent the restart loop from re-starting it.
+        container.manually_stopped = true;
+        Self::persist_container(&self.state_dir, name, container);
 
         if !container.state.is_running() {
             return Err(Response::Error {
@@ -447,6 +481,7 @@ impl ContainerManager {
             rootfs_path: container.rootfs_path.clone(),
             pool_name: container.pool_name.clone(),
             ephemeral: container.ephemeral,
+            manually_stopped: container.manually_stopped,
         };
         if let Err(e) = persist::save_state(state_dir, name, &record) {
             tracing::warn!("failed to persist state for {name}: {e}");
@@ -648,15 +683,24 @@ impl ContainerManager {
     }
 
     /// Handle a container exit: reap the child, update state, clean up resources.
+    /// Returns the exit code and whether the container should be restarted.
     #[tracing::instrument(skip_all, level = "debug", fields(name = name))]
-    pub fn handle_container_exit(&mut self, name: &str) -> i32 {
+    pub fn handle_container_exit(&mut self, name: &str) -> ExitResult {
         let container = match self.containers.get_mut(name) {
             Some(c) => c,
-            None => return 1,
+            None => {
+                return ExitResult {
+                    exit_code: 1,
+                    should_restart: false,
+                };
+            }
         };
 
         if !container.state.is_running() {
-            return 1;
+            return ExitResult {
+                exit_code: 1,
+                should_restart: false,
+            };
         }
 
         let exit_code = if let Some(pid) = container.pid {
@@ -672,17 +716,18 @@ impl ContainerManager {
 
         let _ = container.state.stop(exit_code);
         let is_ephemeral = container.ephemeral;
+        let manually_stopped = container.manually_stopped;
+        let restart_policy = container.spec.restart_policy.clone();
+
         tracing::info!("container {name} exited with code {exit_code}");
+
+        // Check if we should restart
+        let should_restart =
+            !is_ephemeral && restart_policy.should_restart(exit_code, manually_stopped);
 
         // Persist updated state (Stopped) for non-ephemeral containers
         if !is_ephemeral {
-            if let Err(e) = persist::update_state(
-                &self.state_dir,
-                name,
-                sandbox::protocol::ContainerState::Stopped { exit_code },
-            ) {
-                tracing::warn!("failed to persist exit state for {name}: {e}");
-            }
+            Self::persist_container(&self.state_dir, name, container);
         }
 
         // Clean up cgroup
@@ -690,6 +735,7 @@ impl ContainerManager {
             let _ = cgroup.destroy();
         }
         container.cgroup = None;
+        container.pid = None;
 
         // Auto-remove ephemeral containers
         if is_ephemeral {
@@ -710,9 +756,56 @@ impl ContainerManager {
                 let _ = c.destroy();
             }
             tracing::info!("ephemeral container {name} auto-removed");
+        } else if should_restart {
+            tracing::info!(
+                "container {name} will be restarted (policy: {restart_policy}, exit: {exit_code})"
+            );
         }
 
-        exit_code
+        ExitResult {
+            exit_code,
+            should_restart,
+        }
+    }
+
+    /// Restart a stopped container. Resets state to Created and starts it.
+    /// Returns the new pidfd on success.
+    pub fn restart_container(&mut self, name: &str) -> std::result::Result<OwnedFd, String> {
+        let container = match self.containers.get_mut(name) {
+            Some(c) => c,
+            None => return Err(format!("container {name} not found")),
+        };
+
+        // Reset state: Stopped → Created
+        if let Err(e) = container.state.reset() {
+            return Err(format!("cannot restart {name}: {e}"));
+        }
+
+        // Clear the manually_stopped flag for the new lifecycle
+        container.manually_stopped = false;
+
+        // Re-create idmap mount if needed
+        if container.idmap_mount.is_none() {
+            if let Err(e) = Self::ensure_idmap_mount(container, &self.mounts_dir) {
+                return Err(format!("idmap mount for {name}: {e}"));
+            }
+        }
+
+        // Start the container
+        match container.start() {
+            Ok(()) => {
+                let pid = container.pid.unwrap_or(0);
+                tracing::info!("restarted container {name} (PID {pid})");
+                Self::persist_container(&self.state_dir, name, container);
+
+                // Take the pidfd so the async layer can monitor it
+                container
+                    .pidfd
+                    .take()
+                    .ok_or_else(|| format!("no pidfd for restarted {name}"))
+            }
+            Err(e) => Err(format!("restart {name}: {e}")),
+        }
     }
 
     /// Handle a request and return a response + optional PTY fd.
@@ -1032,6 +1125,12 @@ impl ContainerManager {
                 });
             }
         };
+
+        // Allow re-starting a stopped container
+        if container.state.is_stopped() {
+            let _ = container.state.reset();
+            container.manually_stopped = false;
+        }
 
         if let Some(cmd) = command {
             container.spec.command = cmd;
@@ -1410,6 +1509,20 @@ impl ContainerManager {
                 },
                 use_init: svc.init,
                 detach: true, // stacks run detached
+                restart_policy: {
+                    // Per-service restart overrides stack-level, which overrides default
+                    let restart_str = if svc.restart.is_empty() {
+                        if def.restart.is_empty() {
+                            "unless-stopped"
+                        } else {
+                            &def.restart
+                        }
+                    } else {
+                        &svc.restart
+                    };
+                    sandbox::protocol::RestartPolicy::parse(restart_str)
+                        .unwrap_or(sandbox::protocol::RestartPolicy::UnlessStopped)
+                },
                 ..Default::default()
             };
 
@@ -2179,6 +2292,7 @@ impl ContainerManager {
             publish: container.spec.publish.clone(),
             cgroup: container.spec.cgroup.clone(),
             seccomp: container.spec.seccomp.clone(),
+            restart_policy: container.spec.restart_policy.clone(),
             rootfs_path: container
                 .rootfs_path
                 .as_ref()

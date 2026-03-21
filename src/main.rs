@@ -165,6 +165,10 @@ enum Commands {
         #[arg(long)]
         init: bool,
 
+        /// Restart policy: no, always, on-failure, unless-stopped (default: unless-stopped)
+        #[arg(long, default_value = "unless-stopped")]
+        restart: String,
+
         /// Start the container immediately after creation
         #[arg(long)]
         start: bool,
@@ -640,6 +644,7 @@ fn main() -> anyhow::Result<()> {
             env,
             user,
             init,
+            restart,
             start,
             detach,
             uid_map,
@@ -648,6 +653,12 @@ fn main() -> anyhow::Result<()> {
         } => {
             let name = name.unwrap_or_else(|| petname::petname(2, "-").unwrap());
             let resolved_env = resolve_env(&env);
+            let restart_policy = sandbox_proto::RestartPolicy::parse(&restart)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown restart policy: {restart} (expected: no, always, on-failure, unless-stopped)"
+                    )
+                })?;
             let mut spec = build_spec(
                 name,
                 image,
@@ -672,6 +683,7 @@ fn main() -> anyhow::Result<()> {
             )?;
             spec.publish = parse_port_mappings(&publish)?;
             spec.volumes = parse_volume_mounts(&volume)?;
+            spec.restart_policy = restart_policy;
             let mut client = Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::Create(spec))?;
 
@@ -1259,6 +1271,7 @@ fn print_container_inspect(d: &sandbox_proto::ContainerDetail) {
     println!("State:      {state_str}");
     println!("PID:        {pid_str}");
     println!("Ephemeral:  {}", if d.ephemeral { "yes" } else { "no" });
+    println!("Restart:    {}", d.restart_policy);
     println!("Init:       {}", if d.use_init { "yes" } else { "no" });
     println!(
         "User:       {}",
@@ -1491,6 +1504,7 @@ fn build_spec(
         use_init: init,
         detach: false,
         user,
+        restart_policy: sandbox_proto::RestartPolicy::No, // caller sets this
     })
 }
 

@@ -1,9 +1,9 @@
 //! Container state machine.
 //!
 //! States: Created -> Running -> Stopped
-//!                       |
-//!                       v
-//!                    Stopped (on error or exit)
+//!                       |          |
+//!                       v          | (restart)
+//!                    Stopped ------+-> Created
 
 use crate::protocol::ContainerState;
 
@@ -54,6 +54,20 @@ impl State {
             other => Err(InvalidTransition {
                 from: format!("{other:?}"),
                 to: "Stopped".to_string(),
+            }),
+        }
+    }
+
+    /// Reset from Stopped back to Created (for restart).
+    pub fn reset(&mut self) -> Result<(), InvalidTransition> {
+        match &self.current {
+            ContainerState::Stopped { .. } => {
+                self.current = ContainerState::Created;
+                Ok(())
+            }
+            other => Err(InvalidTransition {
+                from: format!("{other:?}"),
+                to: "Created".to_string(),
             }),
         }
     }
