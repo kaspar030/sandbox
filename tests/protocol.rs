@@ -49,6 +49,7 @@ fn test_roundtrip_request_create() {
         publish: Vec::new(),
         use_init: false,
         detach: false,
+        user: Some("1000:1000".to_string()),
     };
 
     let req = Request::Create(spec);
@@ -175,6 +176,7 @@ fn test_roundtrip_all_response_variants() {
             state: ContainerState::Running,
             pid: Some(42),
             ephemeral: false,
+            user: Some("1000".to_string()),
             command: vec!["/bin/sh".to_string()],
             entrypoint: Vec::new(),
             env: vec!["FOO=bar".to_string()],

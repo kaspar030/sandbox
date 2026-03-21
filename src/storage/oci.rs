@@ -160,6 +160,10 @@ pub struct ContainerConfig {
     #[serde(rename = "WorkingDir")]
     #[serde(default)]
     pub working_dir: Option<String>,
+    /// User to run as (e.g., "1000", "1000:1000", "nobody", "nobody:nogroup").
+    #[serde(rename = "User")]
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

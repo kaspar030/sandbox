@@ -46,8 +46,13 @@ pub fn allocate_pty_with_size(rows: u16, cols: u16) -> Result<(OwnedFd, OwnedFd)
 /// 3. dup2 slave → stdin/stdout/stderr
 /// 4. Close the original slave fd (and master fd if leaked)
 pub fn setup_slave_pty(slave_fd: &OwnedFd, master_fd_raw: i32) -> Result<()> {
-    // 1. Create a new session (detach from parent's controlling terminal)
-    setsid().map_err(|e| Error::Other(format!("setsid failed: {e}")))?;
+    // 1. Create a new session (detach from parent's controlling terminal).
+    // Ignore EPERM — caller may already be session leader (e.g., exec path).
+    match setsid() {
+        Ok(_) => {}
+        Err(nix::errno::Errno::EPERM) => {} // already session leader
+        Err(e) => return Err(Error::Other(format!("setsid failed: {e}"))),
+    }
 
     // 2. Set the slave PTY as the controlling terminal
     unsafe {

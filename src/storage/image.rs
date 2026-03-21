@@ -292,12 +292,14 @@ pub fn inspect_image(pool: &StoragePool, name: &str) -> Result<ImageDetail> {
             cmd: m.config.cmd.clone(),
             env: m.config.env.clone(),
             working_dir: m.config.working_dir.clone(),
+            user: m.config.user.clone(),
         })
         .unwrap_or_else(|| ImageConfigDetail {
             entrypoint: Vec::new(),
             cmd: Vec::new(),
             env: Vec::new(),
             working_dir: "/".to_string(),
+            user: None,
         });
 
     let layer_details = if let Some(ref m) = meta {

@@ -96,6 +96,10 @@ enum Commands {
         #[arg(short = 'e', long = "env")]
         env: Vec<String>,
 
+        /// Run as user (UID, UID:GID, name, or name:group)
+        #[arg(short = 'u', long)]
+        user: Option<String>,
+
         /// Use built-in mini-init as PID 1
         #[arg(long)]
         init: bool,
@@ -155,6 +159,9 @@ enum Commands {
         /// Set environment variable (KEY=VALUE or KEY to pass from host)
         #[arg(short = 'e', long = "env")]
         env: Vec<String>,
+        /// Run as user (UID, UID:GID, name, or name:group)
+        #[arg(short = 'u', long)]
+        user: Option<String>,
         #[arg(long)]
         init: bool,
 
@@ -557,6 +564,7 @@ fn main() -> anyhow::Result<()> {
             publish,
             volume,
             env,
+            user,
             init,
             detach,
             uid_map,
@@ -581,6 +589,7 @@ fn main() -> anyhow::Result<()> {
                 cap_add,
                 bind,
                 resolved_env,
+                user,
                 init,
                 uid_map,
                 gid_map,
@@ -629,6 +638,7 @@ fn main() -> anyhow::Result<()> {
             publish,
             volume,
             env,
+            user,
             init,
             start,
             detach,
@@ -654,6 +664,7 @@ fn main() -> anyhow::Result<()> {
                 cap_add,
                 bind,
                 resolved_env,
+                user,
                 init,
                 uid_map,
                 gid_map,
@@ -1249,6 +1260,10 @@ fn print_container_inspect(d: &sandbox_proto::ContainerDetail) {
     println!("PID:        {pid_str}");
     println!("Ephemeral:  {}", if d.ephemeral { "yes" } else { "no" });
     println!("Init:       {}", if d.use_init { "yes" } else { "no" });
+    println!(
+        "User:       {}",
+        d.user.as_deref().unwrap_or("root (default)")
+    );
 
     if !d.entrypoint.is_empty() {
         println!("Entrypoint: {}", d.entrypoint.join(" "));
@@ -1371,6 +1386,7 @@ fn build_spec(
     cap_add: Vec<String>,
     bind: Vec<String>,
     env: Vec<String>,
+    user: Option<String>,
     init: bool,
     uid_map: Vec<String>,
     gid_map: Vec<String>,
@@ -1474,6 +1490,7 @@ fn build_spec(
         publish: Vec::new(), // populated by caller from --publish flags
         use_init: init,
         detach: false,
+        user,
     })
 }
 

@@ -76,6 +76,10 @@ pub struct ContainerSpec {
     /// If false (default), allocate a PTY and send master fd to client.
     #[serde(default)]
     pub detach: bool,
+    /// User to run as (e.g., "1000", "1000:1000", "nobody").
+    /// Resolved from image config if not set by CLI. Default: root (uid 0).
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 fn default_working_dir() -> String {
@@ -104,6 +108,7 @@ impl Default for ContainerSpec {
             publish: Vec::new(),
             use_init: false,
             detach: false,
+            user: None,
         }
     }
 }
@@ -156,6 +161,8 @@ pub struct ImageConfigDetail {
     pub cmd: Vec<String>,
     pub env: Vec<String>,
     pub working_dir: String,
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 /// Information about a storage pool.
@@ -342,6 +349,7 @@ pub struct ContainerDetail {
     pub state: ContainerState,
     pub pid: Option<u32>,
     pub ephemeral: bool,
+    pub user: Option<String>,
     pub command: Vec<String>,
     pub entrypoint: Vec<String>,
     pub env: Vec<String>,

@@ -85,6 +85,14 @@ fn all_tests() -> Vec<Test> {
         Test::Immutable("Exec", "exec_basic", tests::exec::test_exec_basic),
         Test::Immutable("Exec", "exec_user", tests::exec::test_exec_user),
         Test::Immutable("Exec", "exec_env_clean", tests::exec::test_exec_env_clean),
+        Test::Immutable("Exec", "exec_setpgid", tests::exec::test_exec_setpgid),
+        Test::Immutable("Exec", "exec_groups", tests::exec::test_exec_groups),
+        Test::Immutable("Exec", "run_user", tests::exec::test_run_user),
+        Test::Immutable(
+            "Exec",
+            "run_user_by_name",
+            tests::exec::test_run_user_by_name,
+        ),
         // Mounts
         Test::Immutable(
             "Mounts",

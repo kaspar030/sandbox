@@ -438,10 +438,24 @@ impl Container {
             }
         }
 
+        // Resolve target user from spec (image USER or --user flag).
+        // Default: uid 0 (root). Must be resolved after pivot_root so we
+        // read the container's /etc/passwd and /etc/group.
+        let (target_uid, target_gid) = if let Some(ref user_spec) = self.spec.user {
+            if let Some(resolved) = crate::sys::passwd::resolve_user_spec(user_spec) {
+                (resolved.uid, resolved.gid)
+            } else {
+                // Spec exists but resolution failed — use root
+                (0u32, 0u32)
+            }
+        } else {
+            (0u32, 0u32)
+        };
+
         // Set HOME, USER from /etc/passwd if not already in env.
         // Read from container's /etc/passwd (after pivot_root).
         if std::env::var("HOME").is_err() || std::env::var("USER").is_err() {
-            if let Some(pw) = crate::sys::passwd::lookup_uid(0) {
+            if let Some(pw) = crate::sys::passwd::lookup_uid(target_uid) {
                 if std::env::var("HOME").is_err() {
                     unsafe { std::env::set_var("HOME", &pw.home) };
                 }
@@ -472,11 +486,43 @@ impl Container {
             let _ = std::env::set_current_dir(&self.spec.working_dir);
         }
 
-        // Apply seccomp filter
+        // Apply seccomp filter (must be before uid switch, needs prctl)
         seccomp::apply_seccomp(&self.spec.seccomp)?;
 
         // Drop capabilities (must be after seccomp to avoid blocking prctl)
         capabilities::drop_capabilities(&self.spec.capabilities)?;
+
+        // Switch to target user (if not root). Must be AFTER seccomp/capabilities
+        // because setresuid from uid 0 to non-0 clears the capability sets.
+        if target_uid != 0 || target_gid != 0 {
+            // Set supplementary groups
+            let mut sup_gids = vec![nix::unistd::Gid::from_raw(target_gid)];
+            if let Some(pw) = crate::sys::passwd::lookup_uid(target_uid) {
+                if pw.gid != target_gid {
+                    sup_gids.push(nix::unistd::Gid::from_raw(pw.gid));
+                }
+                for g in crate::sys::passwd::lookup_supplementary_groups(&pw.name) {
+                    let gid_val = nix::unistd::Gid::from_raw(g);
+                    if !sup_gids.contains(&gid_val) {
+                        sup_gids.push(gid_val);
+                    }
+                }
+            }
+            let _ = nix::unistd::setgroups(&sup_gids);
+
+            nix::unistd::setresgid(
+                nix::unistd::Gid::from_raw(target_gid),
+                nix::unistd::Gid::from_raw(target_gid),
+                nix::unistd::Gid::from_raw(target_gid),
+            )
+            .map_err(|e| Error::Other(format!("setresgid({target_gid}) failed: {e}")))?;
+            nix::unistd::setresuid(
+                nix::unistd::Uid::from_raw(target_uid),
+                nix::unistd::Uid::from_raw(target_uid),
+                nix::unistd::Uid::from_raw(target_uid),
+            )
+            .map_err(|e| Error::Other(format!("setresuid({target_uid}) failed: {e}")))?;
+        }
 
         // Merge entrypoint + command for exec
         let exec_args = if self.spec.entrypoint.is_empty() {

@@ -903,6 +903,10 @@ impl ContainerManager {
             if spec.working_dir == "/" && !meta.config.working_dir.is_empty() {
                 spec.working_dir = meta.config.working_dir;
             }
+            // User: use image default if CLI didn't set one
+            if spec.user.is_none() {
+                spec.user = meta.config.user;
+            }
         }
     }
 
@@ -2162,6 +2166,7 @@ impl ContainerManager {
             state: container.state.current().clone(),
             pid: container.pid.map(|p| p as u32),
             ephemeral: container.ephemeral,
+            user: container.spec.user.clone(),
             command: container.spec.command.clone(),
             entrypoint: container.spec.entrypoint.clone(),
             env: container.spec.env.clone(),
@@ -2560,11 +2565,36 @@ fn exec_in_container(
         }
         let _ = std::env::set_current_dir("/");
 
+        // Become a session leader so that bash job control (setpgid) works.
+        // setsid() detaches from the daemon's session/process group.
+        // setup_slave_pty() will skip its own setsid() if we're already a leader.
+        let _ = nix::unistd::setsid();
+
         // Switch to target user (default: container root)
         let (uid, gid) = match &user {
             Some(u) => (u.uid, u.gid),
             None => (0, 0),
         };
+
+        // Set supplementary groups from /etc/group (after chroot so we read container's file).
+        // Look up the username for this UID, then find all groups they belong to.
+        {
+            let mut sup_gids: Vec<nix::unistd::Gid> = vec![nix::unistd::Gid::from_raw(gid)];
+            if let Some(pw) = sandbox::sys::passwd::lookup_uid(uid) {
+                // Add primary GID from passwd if different
+                if pw.gid != gid {
+                    sup_gids.push(nix::unistd::Gid::from_raw(pw.gid));
+                }
+                for g in sandbox::sys::passwd::lookup_supplementary_groups(&pw.name) {
+                    let gid_val = nix::unistd::Gid::from_raw(g);
+                    if !sup_gids.contains(&gid_val) {
+                        sup_gids.push(gid_val);
+                    }
+                }
+            }
+            let _ = nix::unistd::setgroups(&sup_gids);
+        }
+
         if let Err(e) = nix::unistd::setresgid(gid.into(), gid.into(), gid.into()) {
             eprintln!("setresgid({gid}) failed: {e}");
             std::process::exit(1);

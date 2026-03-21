@@ -72,6 +72,9 @@ pub struct ImageConfigMeta {
     pub env: Vec<String>,
     #[serde(default)]
     pub working_dir: String,
+    /// User from image config (e.g., "1000", "1000:1000", "nobody").
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 impl ImageConfigMeta {
@@ -84,6 +87,7 @@ impl ImageConfigMeta {
             working_dir: cc
                 .and_then(|c| c.working_dir.clone())
                 .unwrap_or_else(|| "/".to_string()),
+            user: cc.and_then(|c| c.user.clone()),
         }
     }
 }
