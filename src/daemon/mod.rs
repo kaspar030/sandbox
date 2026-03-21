@@ -313,14 +313,17 @@ async fn handle_client(
     // Send response
     write_async_message(&mut stream, &result.response).await?;
 
-    // If we have a PTY master fd, send it via SCM_RIGHTS
+    // If we have a PTY master fd, send it via SCM_RIGHTS.
+    // Don't fail the connection if the client disconnected (e.g., non-interactive
+    // `start` command that just prints "Started" and exits). The pidfd monitoring
+    // must still be set up even if the PTY send fails.
     if let Some(ref pty_master) = result.pty_master {
         let socket_ref = stream.get_ref();
-        scm_rights::send_fd(socket_ref, pty_master).map_err(|e| {
-            tracing::error!("failed to send PTY fd via SCM_RIGHTS: {e}");
-            e
-        })?;
-        tracing::debug!("sent PTY master fd to client");
+        if let Err(e) = scm_rights::send_fd(socket_ref, pty_master) {
+            tracing::debug!("PTY fd send failed (client may have disconnected): {e}");
+        } else {
+            tracing::debug!("sent PTY master fd to client");
+        }
     }
 
     // Interactive container start: monitor pidfd and send exit code to client

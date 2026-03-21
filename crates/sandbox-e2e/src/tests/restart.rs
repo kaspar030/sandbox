@@ -44,11 +44,13 @@ pub fn test_restart_always(ctx: &TestContext) -> Result<(), String> {
         ));
     }
 
-    // Stop and destroy — the container restarts, so stop may need a retry
-    let _ = ctx.cli(&["stop", name]);
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    let _ = ctx.cli(&["stop", name]);
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Stop and destroy — the container restarts, so stop may need retries.
+    // The stop sets manually_stopped which prevents further restarts,
+    // but we need to wait for the restart loop to notice.
+    for _ in 0..3 {
+        let _ = ctx.cli(&["stop", "--timeout", "2", name]);
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
     let _ = ctx.cli(&["destroy", name]);
     Ok(())
 }
@@ -81,12 +83,12 @@ pub fn test_restart_on_failure(ctx: &TestContext) -> Result<(), String> {
     std::thread::sleep(std::time::Duration::from_secs(3));
 
     // Should be stopped (exit 0, no restart)
-    let list = ctx.cli_ok(&["list"]);
-    if !list.contains("Stopped(0)") {
-        let _ = ctx.cli(&["stop", name]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("Stopped (exit code 0)") {
+        let _ = ctx.cli(&["stop", "--timeout", "1", name]);
         let _ = ctx.cli(&["destroy", name]);
         return Err(format!(
-            "expected Stopped(0) (no restart for exit 0), got: {list}"
+            "expected Stopped (exit code 0) (no restart for exit 0), got: {inspect}"
         ));
     }
 
@@ -112,10 +114,10 @@ pub fn test_restart_on_failure(ctx: &TestContext) -> Result<(), String> {
         ));
     }
 
-    let _ = ctx.cli(&["stop", name]);
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    let _ = ctx.cli(&["stop", name]);
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    for _ in 0..3 {
+        let _ = ctx.cli(&["stop", "--timeout", "2", name]);
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
     let _ = ctx.cli(&["destroy", name]);
     Ok(())
 }
@@ -183,12 +185,12 @@ pub fn test_restart_no(ctx: &TestContext) -> Result<(), String> {
     // Wait for exit
     std::thread::sleep(std::time::Duration::from_secs(4));
 
-    // Should stay stopped
-    let list = ctx.cli_ok(&["list"]);
-    if list.contains("Running") {
-        let _ = ctx.cli(&["stop", name]);
+    // Should stay stopped — use inspect for this specific container
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if inspect.contains("State:      Running") {
+        let _ = ctx.cli(&["stop", "--timeout", "1", name]);
         let _ = ctx.cli(&["destroy", name]);
-        return Err(format!("expected Stopped (restart=no), got: {list}"));
+        return Err(format!("expected Stopped (restart=no), got: {inspect}"));
     }
 
     let _ = ctx.cli(&["destroy", name]);
