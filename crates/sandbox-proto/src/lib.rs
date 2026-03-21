@@ -259,7 +259,7 @@ impl std::fmt::Display for PortProtocol {
 }
 
 /// Seccomp profile selection.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SeccompMode {
     /// Deny-by-default allowlist of common syscalls.
     #[default]
@@ -375,9 +375,11 @@ pub enum ContainerState {
 /// Partial update for a container's configuration.
 ///
 /// All fields are optional — only specified (Some) fields are applied.
-/// Used by the `update` command to modify a stopped container's spec.
+/// Used by the `update` command to modify a container's spec.
+/// Cgroup changes are applied live on running containers.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContainerUpdate {
+    // -- Cgroup limits --
     /// New restart policy.
     pub restart_policy: Option<RestartPolicy>,
     /// New memory limit in bytes (memory.max).
@@ -386,6 +388,67 @@ pub struct ContainerUpdate {
     pub cpu_max: Option<(u64, u64)>,
     /// New PID limit.
     pub pids_max: Option<u32>,
+
+    // -- Environment --
+    /// Environment variables to set/override (KEY=VALUE).
+    #[serde(default)]
+    pub env_set: Vec<String>,
+    /// Environment variable keys to remove.
+    #[serde(default)]
+    pub env_remove: Vec<String>,
+    /// If true, clear all env vars before applying env_set.
+    #[serde(default)]
+    pub env_clear: bool,
+
+    // -- Command / Entrypoint --
+    /// New command. Some(vec![]) = clear, None = no change.
+    pub command: Option<Vec<String>>,
+    /// New entrypoint. Some(vec![]) = clear, None = no change.
+    pub entrypoint: Option<Vec<String>>,
+
+    // -- Container identity --
+    /// New user (UID, UID:GID, etc.). Some(Some("1000")) = set, Some(None) = clear.
+    pub user: Option<Option<String>>,
+    /// New hostname. Some(Some("host")) = set, Some(None) = clear.
+    pub hostname: Option<Option<String>>,
+    /// New working directory.
+    pub working_dir: Option<String>,
+
+    // -- Init --
+    /// Enable/disable init. Some(true) = enable, Some(false) = disable.
+    pub use_init: Option<bool>,
+
+    // -- Security --
+    /// New seccomp mode.
+    pub seccomp: Option<SeccompMode>,
+    /// Capabilities to add.
+    #[serde(default)]
+    pub cap_add: Vec<String>,
+    /// Capabilities to drop.
+    #[serde(default)]
+    pub cap_drop: Vec<String>,
+}
+
+impl ContainerUpdate {
+    /// Returns true if no fields are set (no updates to apply).
+    pub fn is_empty(&self) -> bool {
+        self.restart_policy.is_none()
+            && self.memory_max.is_none()
+            && self.cpu_max.is_none()
+            && self.pids_max.is_none()
+            && self.env_set.is_empty()
+            && self.env_remove.is_empty()
+            && !self.env_clear
+            && self.command.is_none()
+            && self.entrypoint.is_none()
+            && self.user.is_none()
+            && self.hostname.is_none()
+            && self.working_dir.is_none()
+            && self.use_init.is_none()
+            && self.seccomp.is_none()
+            && self.cap_add.is_empty()
+            && self.cap_drop.is_empty()
+    }
 }
 
 /// Restart policy for containers.

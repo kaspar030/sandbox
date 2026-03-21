@@ -187,12 +187,13 @@ enum Commands {
         command: Vec<String>,
     },
 
-    /// Update a container's configuration (container must be stopped)
+    /// Update a container's configuration
     Update {
         /// Container name
         #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
 
+        // -- Cgroup limits --
         /// Restart policy (no|always|on-failure|unless-stopped)
         #[arg(long, value_parser = ["no", "always", "on-failure", "unless-stopped"])]
         restart: Option<String>,
@@ -208,6 +209,71 @@ enum Commands {
         /// Maximum number of processes
         #[arg(long)]
         pids_max: Option<u32>,
+
+        // -- Environment --
+        /// Set/override environment variable (KEY=VALUE or KEY to pass from host)
+        #[arg(short = 'e', long = "env")]
+        env: Vec<String>,
+
+        /// Remove environment variable by key
+        #[arg(long = "env-rm")]
+        env_rm: Vec<String>,
+
+        /// Clear all environment variables (apply before -e)
+        #[arg(long)]
+        clear_env: bool,
+
+        // -- Command / Entrypoint --
+        /// Set default command
+        #[arg(long)]
+        command: Vec<String>,
+
+        /// Clear the command (revert to idle init if no entrypoint)
+        #[arg(long, conflicts_with = "command")]
+        no_command: bool,
+
+        /// Set entrypoint
+        #[arg(long)]
+        entrypoint: Vec<String>,
+
+        /// Clear the entrypoint
+        #[arg(long, conflicts_with = "entrypoint")]
+        no_entrypoint: bool,
+
+        // -- Container identity --
+        /// Run as user (UID, UID:GID, name, or name:group)
+        #[arg(short = 'u', long)]
+        user: Option<String>,
+
+        /// Set container hostname
+        #[arg(long)]
+        hostname: Option<String>,
+
+        /// Set working directory
+        #[arg(long)]
+        workdir: Option<String>,
+
+        // -- Init --
+        /// Enable init process
+        #[arg(long)]
+        init: bool,
+
+        /// Disable init process
+        #[arg(long, conflicts_with = "init")]
+        no_init: bool,
+
+        // -- Security --
+        /// Seccomp mode (default|disabled)
+        #[arg(long, value_parser = ["default", "disabled"])]
+        seccomp: Option<String>,
+
+        /// Add capability
+        #[arg(long = "cap-add")]
+        cap_add: Vec<String>,
+
+        /// Drop capability
+        #[arg(long = "cap-drop")]
+        cap_drop: Vec<String>,
     },
 
     /// Start a previously created container
@@ -799,15 +865,22 @@ fn main() -> anyhow::Result<()> {
             memory,
             cpus,
             pids_max,
+            env,
+            env_rm,
+            clear_env,
+            command,
+            no_command,
+            entrypoint,
+            no_entrypoint,
+            user,
+            hostname,
+            workdir,
+            init,
+            no_init,
+            seccomp,
+            cap_add,
+            cap_drop,
         } => {
-            // At least one flag must be specified
-            if restart.is_none() && memory.is_none() && cpus.is_none() && pids_max.is_none() {
-                eprintln!(
-                    "Error: no update flags specified (use --restart, --memory, --cpus, or --pids-max)"
-                );
-                std::process::exit(1);
-            }
-
             let restart_policy = restart
                 .map(|r| {
                     sandbox_proto::RestartPolicy::parse(&r).ok_or_else(|| {
@@ -824,12 +897,72 @@ fn main() -> anyhow::Result<()> {
                 (quota, 100_000u64)
             });
 
+            // Resolve env vars (pass-through from host for KEY without =)
+            let env_set = resolve_env(&env);
+
+            // Command: --no-command → clear, --command args → set, neither → no change
+            let command_update = if no_command {
+                Some(Vec::new())
+            } else if !command.is_empty() {
+                Some(command)
+            } else {
+                None
+            };
+
+            // Entrypoint: same pattern
+            let entrypoint_update = if no_entrypoint {
+                Some(Vec::new())
+            } else if !entrypoint.is_empty() {
+                Some(entrypoint)
+            } else {
+                None
+            };
+
+            // User: --user VALUE → set (Some(Some)), omitted → no change (None)
+            let user_update = user.map(Some);
+
+            // Hostname: same
+            let hostname_update = hostname.map(Some);
+
+            // Init: --init → Some(true), --no-init → Some(false), neither → None
+            let use_init = if init {
+                Some(true)
+            } else if no_init {
+                Some(false)
+            } else {
+                None
+            };
+
+            // Seccomp
+            let seccomp_mode = seccomp.map(|s| match s.as_str() {
+                "disabled" => sandbox_proto::SeccompMode::Disabled,
+                _ => sandbox_proto::SeccompMode::Default,
+            });
+
             let update = sandbox_proto::ContainerUpdate {
                 restart_policy,
                 memory_max,
                 cpu_max,
                 pids_max,
+                env_set,
+                env_remove: env_rm,
+                env_clear: clear_env,
+                command: command_update,
+                entrypoint: entrypoint_update,
+                user: user_update,
+                hostname: hostname_update,
+                working_dir: workdir,
+                use_init,
+                seccomp: seccomp_mode,
+                cap_add,
+                cap_drop,
             };
+
+            // Check at least one flag was given
+            if update.is_empty() {
+                eprintln!("Error: no update flags specified");
+                std::process::exit(1);
+            }
 
             let mut client = Client::connect(cli.socket.as_deref())?;
             let resp = client.request(&Request::UpdateContainer { name, update })?;

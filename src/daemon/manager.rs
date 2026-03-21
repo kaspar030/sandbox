@@ -1168,7 +1168,7 @@ impl ContainerManager {
 
         let is_running = container.state.is_running();
 
-        // Apply spec-level updates
+        // -- Cgroup limits --
         if let Some(policy) = update.restart_policy {
             container.spec.restart_policy = policy;
         }
@@ -1182,7 +1182,66 @@ impl ContainerManager {
             container.spec.cgroup.pids_max = Some(pids);
         }
 
-        // If running, also apply cgroup changes live
+        // -- Environment --
+        // Order: clear → remove → set
+        if update.env_clear {
+            container.spec.env.clear();
+        }
+        for key in &update.env_remove {
+            container
+                .spec
+                .env
+                .retain(|e| !e.starts_with(&format!("{key}=")));
+        }
+        for kv in &update.env_set {
+            if let Some(key) = kv.split('=').next() {
+                // Remove existing value for this key, then add new
+                container
+                    .spec
+                    .env
+                    .retain(|e| !e.starts_with(&format!("{key}=")));
+            }
+            container.spec.env.push(kv.clone());
+        }
+
+        // -- Command / Entrypoint --
+        if let Some(cmd) = update.command {
+            container.spec.command = cmd;
+        }
+        if let Some(ep) = update.entrypoint {
+            container.spec.entrypoint = ep;
+        }
+
+        // -- Container identity --
+        if let Some(u) = update.user {
+            container.spec.user = u;
+        }
+        if let Some(h) = update.hostname {
+            container.spec.hostname = h;
+        }
+        if let Some(wd) = update.working_dir {
+            container.spec.working_dir = wd;
+        }
+
+        // -- Init --
+        if let Some(init) = update.use_init {
+            container.spec.use_init = init;
+        }
+
+        // -- Security --
+        if let Some(seccomp) = update.seccomp {
+            container.spec.seccomp = seccomp;
+        }
+        for cap in &update.cap_add {
+            if !container.spec.capabilities.keep.contains(cap) {
+                container.spec.capabilities.keep.push(cap.clone());
+            }
+        }
+        for cap in &update.cap_drop {
+            container.spec.capabilities.keep.retain(|c| c != cap);
+        }
+
+        // If running, apply cgroup changes live
         if is_running {
             let cgroup_path = PathBuf::from("/sys/fs/cgroup/sandbox").join(name);
             if let Some(mem) = update.memory_max {

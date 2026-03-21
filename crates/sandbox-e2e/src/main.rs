@@ -329,6 +329,18 @@ fn all_tests() -> Vec<Test> {
             "update_multiple",
             tests::update::test_update_multiple,
         ),
+        Test::Immutable("Update", "update_env", tests::update::test_update_env),
+        Test::Immutable(
+            "Update",
+            "update_command",
+            tests::update::test_update_command,
+        ),
+        Test::Immutable(
+            "Update",
+            "update_identity",
+            tests::update::test_update_identity,
+        ),
+        Test::Immutable("Update", "update_init", tests::update::test_update_init),
         Test::Mutable(
             "Update",
             "update_persists",

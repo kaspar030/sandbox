@@ -142,8 +142,7 @@ fn test_roundtrip_all_request_variants() {
             update: ContainerUpdate {
                 restart_policy: Some(RestartPolicy::Always),
                 memory_max: Some(1024),
-                cpu_max: None,
-                pids_max: None,
+                ..Default::default()
             },
         },
         Request::Shutdown,
@@ -402,6 +401,7 @@ fn test_roundtrip_update_container() {
             memory_max: Some(256 * 1024 * 1024),
             cpu_max: Some((150_000, 100_000)),
             pids_max: Some(128),
+            ..Default::default()
         },
     };
 
@@ -428,9 +428,7 @@ fn test_roundtrip_update_container_partial() {
         name: "partial".to_string(),
         update: ContainerUpdate {
             restart_policy: Some(RestartPolicy::OnFailure),
-            memory_max: None,
-            cpu_max: None,
-            pids_max: None,
+            ..Default::default()
         },
     };
 
@@ -445,6 +443,75 @@ fn test_roundtrip_update_container_partial() {
             assert!(update.memory_max.is_none());
             assert!(update.cpu_max.is_none());
             assert!(update.pids_max.is_none());
+        }
+        _ => panic!("expected UpdateContainer request"),
+    }
+}
+
+/// Verify that ContainerUpdate with all new fields roundtrips correctly.
+#[test]
+fn test_roundtrip_update_container_full() {
+    let req = Request::UpdateContainer {
+        name: "full".to_string(),
+        update: ContainerUpdate {
+            restart_policy: Some(RestartPolicy::Always),
+            memory_max: Some(1024),
+            cpu_max: Some((50_000, 100_000)),
+            pids_max: Some(64),
+            env_set: vec!["FOO=bar".to_string(), "BAZ=qux".to_string()],
+            env_remove: vec!["OLD_VAR".to_string()],
+            env_clear: true,
+            command: Some(vec!["/bin/zsh".to_string()]),
+            entrypoint: Some(vec!["/entrypoint.sh".to_string()]),
+            user: Some(Some("1000:1000".to_string())),
+            hostname: Some(Some("myhost".to_string())),
+            working_dir: Some("/app".to_string()),
+            use_init: Some(true),
+            seccomp: Some(SeccompMode::Disabled),
+            cap_add: vec!["NET_RAW".to_string()],
+            cap_drop: vec!["SYS_ADMIN".to_string()],
+        },
+    };
+
+    let encoded = encode_message(&req).unwrap();
+    let (decoded, rest): (Request, &[u8]) = decode_message(&encoded).unwrap();
+    assert!(rest.is_empty());
+
+    match decoded {
+        Request::UpdateContainer { name, update } => {
+            assert_eq!(name, "full");
+            assert_eq!(update.env_set, vec!["FOO=bar", "BAZ=qux"]);
+            assert_eq!(update.env_remove, vec!["OLD_VAR"]);
+            assert!(update.env_clear);
+            assert_eq!(update.command, Some(vec!["/bin/zsh".to_string()]));
+            assert_eq!(update.entrypoint, Some(vec!["/entrypoint.sh".to_string()]));
+            assert_eq!(update.user, Some(Some("1000:1000".to_string())));
+            assert_eq!(update.hostname, Some(Some("myhost".to_string())));
+            assert_eq!(update.working_dir, Some("/app".to_string()));
+            assert_eq!(update.use_init, Some(true));
+            assert_eq!(update.cap_add, vec!["NET_RAW"]);
+            assert_eq!(update.cap_drop, vec!["SYS_ADMIN"]);
+        }
+        _ => panic!("expected UpdateContainer request"),
+    }
+}
+
+/// Verify that an empty ContainerUpdate roundtrips with defaults.
+#[test]
+fn test_roundtrip_update_container_empty_defaults() {
+    let req = Request::UpdateContainer {
+        name: "empty".to_string(),
+        update: ContainerUpdate::default(),
+    };
+
+    let encoded = encode_message(&req).unwrap();
+    let (decoded, rest): (Request, &[u8]) = decode_message(&encoded).unwrap();
+    assert!(rest.is_empty());
+
+    match decoded {
+        Request::UpdateContainer { name, update } => {
+            assert_eq!(name, "empty");
+            assert!(update.is_empty());
         }
         _ => panic!("expected UpdateContainer request"),
     }

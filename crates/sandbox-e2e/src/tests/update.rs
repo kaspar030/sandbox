@@ -216,6 +216,166 @@ pub fn test_update_multiple(ctx: &TestContext) -> Result<(), String> {
     }
 }
 
+/// Test updating environment variables.
+pub fn test_update_env(ctx: &TestContext) -> Result<(), String> {
+    let name = "update-env";
+
+    if ctx.cli_fails(&[
+        "create", "--name", name, "--image", "alpine", "-e", "A=1", "-e", "B=2",
+    ]) {
+        return Err("create failed".into());
+    }
+
+    // Verify initial env
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("A=1") || !inspect.contains("B=2") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("initial env not set. inspect:\n{inspect}"));
+    }
+
+    // Override A, add C, remove B
+    ctx.cli_ok(&["update", name, "-e", "A=new", "-e", "C=3", "--env-rm", "B"]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("A=new") || !inspect.contains("C=3") || inspect.contains("B=2") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("env update failed. inspect:\n{inspect}"));
+    }
+
+    // Clear all env, set one new
+    ctx.cli_ok(&["update", name, "--clear-env", "-e", "ONLY=one"]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("ONLY=one") || inspect.contains("A=") || inspect.contains("C=") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("clear-env failed. inspect:\n{inspect}"));
+    }
+
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
+
+/// Test updating command and entrypoint.
+pub fn test_update_command(ctx: &TestContext) -> Result<(), String> {
+    let name = "update-cmd";
+
+    if ctx.cli_fails(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "alpine",
+        "--restart",
+        "no",
+    ]) {
+        return Err("create failed".into());
+    }
+
+    // Set a command
+    ctx.cli_ok(&["update", name, "--command", "/bin/echo", "hello"]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("Command:    /bin/echo hello") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("command not set. inspect:\n{inspect}"));
+    }
+
+    // Set entrypoint
+    ctx.cli_ok(&["update", name, "--entrypoint", "/bin/sh", "-c"]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("Entrypoint: /bin/sh -c") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("entrypoint not set. inspect:\n{inspect}"));
+    }
+
+    // Clear command
+    ctx.cli_ok(&["update", name, "--no-command"]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if inspect.contains("Command:    /bin/echo") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("command not cleared. inspect:\n{inspect}"));
+    }
+
+    // Clear entrypoint
+    ctx.cli_ok(&["update", name, "--no-entrypoint"]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if inspect.contains("Entrypoint:") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("entrypoint not cleared. inspect:\n{inspect}"));
+    }
+
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
+
+/// Test updating user, hostname, and working directory.
+pub fn test_update_identity(ctx: &TestContext) -> Result<(), String> {
+    let name = "update-ident";
+
+    if ctx.cli_fails(&["create", "--name", name, "--image", "alpine"]) {
+        return Err("create failed".into());
+    }
+
+    // Update user
+    ctx.cli_ok(&["update", name, "-u", "1000:1000"]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("User:       1000:1000") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("user not set. inspect:\n{inspect}"));
+    }
+
+    // Update hostname
+    ctx.cli_ok(&["update", name, "--hostname", "myhost"]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("Hostname:   myhost") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("hostname not set. inspect:\n{inspect}"));
+    }
+
+    // Update workdir
+    ctx.cli_ok(&["update", name, "--workdir", "/app"]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("WorkingDir: /app") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("workdir not set. inspect:\n{inspect}"));
+    }
+
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
+
+/// Test updating init mode.
+pub fn test_update_init(ctx: &TestContext) -> Result<(), String> {
+    let name = "update-init";
+
+    // Create with explicit --init
+    if ctx.cli_fails(&["create", "--name", name, "--image", "alpine", "--init"]) {
+        return Err("create failed".into());
+    }
+
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("Init:       yes") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("init not enabled. inspect:\n{inspect}"));
+    }
+
+    // Disable init
+    ctx.cli_ok(&["update", name, "--no-init"]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("Init:       no") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("init not disabled. inspect:\n{inspect}"));
+    }
+
+    // Re-enable init
+    ctx.cli_ok(&["update", name, "--init"]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("Init:       yes") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("init not re-enabled. inspect:\n{inspect}"));
+    }
+
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
+
 /// Test that update persists across daemon restart.
 pub fn test_update_persists(ctx: &mut TestContext) -> Result<(), String> {
     let name = "update-persist";
