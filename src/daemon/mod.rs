@@ -207,8 +207,11 @@ async fn graceful_shutdown(mgr: &Arc<smol::lock::Mutex<manager::ContainerManager
         running.len()
     );
 
-    // Send SIGTERM to all running containers
+    // Kill all processes in each container's cgroup, then send SIGTERM to PID 1
     for (name, pid) in &running {
+        // cgroup.kill ensures ALL processes (including exec'd) are killed
+        let cgroup_kill = format!("/sys/fs/cgroup/sandbox/{name}/cgroup.kill");
+        let _ = std::fs::write(&cgroup_kill, "1");
         let pid = nix::unistd::Pid::from_raw(*pid);
         if let Err(e) = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM) {
             tracing::warn!("failed to SIGTERM container {name}: {e}");

@@ -93,6 +93,11 @@ fn all_tests() -> Vec<Test> {
             "run_user_by_name",
             tests::exec::test_run_user_by_name,
         ),
+        Test::Immutable(
+            "Exec",
+            "exec_killed_on_stop",
+            tests::exec::test_exec_killed_on_stop,
+        ),
         // Mounts
         Test::Immutable(
             "Mounts",

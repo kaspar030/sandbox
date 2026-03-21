@@ -454,6 +454,11 @@ impl ContainerManager {
 
         let pid = container.pid.unwrap_or(0);
 
+        // Kill all processes in the cgroup (belt-and-suspenders: ensures exec'd
+        // processes die even if they somehow escaped the PID namespace)
+        let cgroup_kill_path = format!("/sys/fs/cgroup/sandbox/{name}/cgroup.kill");
+        let _ = std::fs::write(&cgroup_kill_path, "1");
+
         // Send SIGTERM
         if let Err(e) = container.signal(libc::SIGTERM) {
             return Err(Response::Error {
@@ -2827,6 +2832,19 @@ fn merge_env(container_env: &[String], exec_env: &[String]) -> Vec<String> {
 /// Forks a child that joins the container's namespaces, optionally sets up
 /// a PTY for interactive use, writes itself into the container's cgroup, and
 /// execs the command. Returns a pidfd for monitoring + optional PTY master.
+/// PID of the exec grandchild, used by the intermediate child to forward signals.
+static EXEC_GRANDCHILD_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Signal handler for the intermediate exec child: forward signals to grandchild.
+extern "C" fn exec_forward_signal(sig: libc::c_int) {
+    let pid = EXEC_GRANDCHILD_PID.load(std::sync::atomic::Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            libc::kill(pid, sig);
+        }
+    }
+}
+
 fn exec_in_container(
     container_pid: libc::pid_t,
     container_name: &str,
@@ -2905,7 +2923,12 @@ fn exec_in_container(
         Ok(nix::unistd::ForkResult::Child) => {}
     }
 
-    // === CHILD ===
+    // === CHILD (intermediate) ===
+    //
+    // This process joins the container's namespaces (including PID), then
+    // forks again. The grandchild is truly in the container's PID namespace
+    // (setns(CLONE_NEWPID) only takes effect for children). The intermediate
+    // child waits for the grandchild and proxies its exit code.
     {
         // Die if daemon dies
         let _ = nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL);
@@ -2914,7 +2937,6 @@ fn exec_in_container(
         // since the host cgroupfs is not visible inside the container)
         if let Err(e) = std::fs::write(&cgroup_procs, format!("{}", std::process::id())) {
             eprintln!("failed to join cgroup: {e}");
-            // Non-fatal — continue without cgroup membership
         }
 
         // Join the container's namespaces
@@ -2934,6 +2956,47 @@ fn exec_in_container(
                 std::process::exit(1);
             }
         }
+        // Drop all namespace fds before forking — grandchild doesn't need them
+        drop(ns_fds);
+
+        // Fork again: the grandchild will be in the container's PID namespace.
+        // setns(CLONE_NEWPID) only affects children, not the caller itself.
+        match unsafe { nix::unistd::fork() } {
+            Err(e) => {
+                eprintln!("double-fork failed: {e}");
+                std::process::exit(1);
+            }
+            Ok(nix::unistd::ForkResult::Parent { child }) => {
+                // Intermediate child: close PTY fds, wait for grandchild, exit
+                drop(pty);
+                // Forward signals to grandchild so that SIGTERM from daemon reaches it
+                let grandchild_pid = child.as_raw();
+                unsafe {
+                    EXEC_GRANDCHILD_PID.store(grandchild_pid, std::sync::atomic::Ordering::SeqCst);
+                    for &sig in &[libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+                        libc::signal(sig, exec_forward_signal as *const () as libc::sighandler_t);
+                    }
+                }
+                loop {
+                    match nix::sys::wait::waitpid(child, None) {
+                        Ok(nix::sys::wait::WaitStatus::Exited(_, code)) => {
+                            std::process::exit(code);
+                        }
+                        Ok(nix::sys::wait::WaitStatus::Signaled(_, sig, _)) => {
+                            std::process::exit(128 + sig as i32);
+                        }
+                        Err(nix::errno::Errno::EINTR) => continue,
+                        _ => std::process::exit(1),
+                    }
+                }
+            }
+            Ok(nix::unistd::ForkResult::Child) => {
+                // Grandchild: actually in the container's PID namespace.
+                // Fall through to exec setup below.
+            }
+        }
+
+        // === GRANDCHILD (in container PID namespace) ===
 
         if let Err(e) = nix::unistd::chroot("/") {
             eprintln!("chroot failed: {e}");
@@ -2942,8 +3005,6 @@ fn exec_in_container(
         let _ = std::env::set_current_dir("/");
 
         // Become a session leader so that bash job control (setpgid) works.
-        // setsid() detaches from the daemon's session/process group.
-        // setup_slave_pty() will skip its own setsid() if we're already a leader.
         let _ = nix::unistd::setsid();
 
         // Switch to target user (default: container root)
@@ -2953,11 +3014,9 @@ fn exec_in_container(
         };
 
         // Set supplementary groups from /etc/group (after chroot so we read container's file).
-        // Look up the username for this UID, then find all groups they belong to.
         {
             let mut sup_gids: Vec<nix::unistd::Gid> = vec![nix::unistd::Gid::from_raw(gid)];
             if let Some(pw) = sandbox::sys::passwd::lookup_uid(uid) {
-                // Add primary GID from passwd if different
                 if pw.gid != gid {
                     sup_gids.push(nix::unistd::Gid::from_raw(pw.gid));
                 }
@@ -2998,7 +3057,6 @@ fn exec_in_container(
         }
 
         // Set HOME, USER from /etc/passwd based on the target uid.
-        // After chroot, /etc/passwd is the container's.
         if std::env::var("HOME").is_err() || std::env::var("USER").is_err() {
             if let Some(pw) = sandbox::sys::passwd::lookup_uid(uid) {
                 if std::env::var("HOME").is_err() {
@@ -3007,10 +3065,8 @@ fn exec_in_container(
                 if std::env::var("USER").is_err() {
                     unsafe { std::env::set_var("USER", &pw.name) };
                 }
-            } else {
-                if std::env::var("HOME").is_err() {
-                    unsafe { std::env::set_var("HOME", "/") };
-                }
+            } else if std::env::var("HOME").is_err() {
+                unsafe { std::env::set_var("HOME", "/") };
             }
         }
 
@@ -3030,7 +3086,6 @@ fn exec_in_container(
 
         // Set up PTY slave as stdin/stdout/stderr
         if let Some((_master, slave)) = pty {
-            // Drop master in child
             drop(_master);
             if let Err(e) = sandbox::sys::pty::setup_slave_pty(&slave, -1) {
                 eprintln!("pty setup failed: {e}");

@@ -163,3 +163,62 @@ pub fn test_run_user_by_name(ctx: &TestContext) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Test that exec'd processes die when the container is stopped.
+pub fn test_exec_killed_on_stop(ctx: &TestContext) -> Result<(), String> {
+    let name = "exec-kill-test";
+    ctx.cli_ok(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "alpine",
+        "--init",
+        "--restart",
+        "no",
+        "--",
+        "sleep",
+        "300",
+    ]);
+    ctx.cli_ok(&["start", name]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Start a detached exec process
+    let exec_output = ctx.cli(&["exec", "-d", name, "--", "sleep", "200"]);
+    if !exec_output.status.success() {
+        let _ = ctx.cli(&["stop", name]);
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!(
+            "exec failed: {}",
+            String::from_utf8_lossy(&exec_output.stderr)
+        ));
+    }
+
+    // Read the exec PID from output ("Exec started (PID NNNN)")
+    let exec_stdout = String::from_utf8_lossy(&exec_output.stdout);
+    let exec_pid: Option<u32> = exec_stdout.lines().find_map(|l| {
+        l.strip_prefix("Exec started (PID ")
+            .and_then(|s| s.strip_suffix(')'))
+            .and_then(|s| s.parse().ok())
+    });
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Stop the container
+    let _ = ctx.cli(&["stop", name]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Verify exec process is dead (check /proc/<pid> on the host)
+    if let Some(pid) = exec_pid {
+        let proc_path = format!("/proc/{pid}");
+        if std::path::Path::new(&proc_path).exists() {
+            let _ = ctx.cli(&["destroy", name]);
+            return Err(format!(
+                "exec PID {pid} SURVIVED container stop (should have been killed)"
+            ));
+        }
+    }
+
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
