@@ -409,6 +409,10 @@ enum DaemonAction {
         /// Data directory (default: /var/lib/sandbox)
         #[arg(long)]
         data_dir: Option<String>,
+
+        /// Group that owns the daemon socket (default: root)
+        #[arg(long, default_value = "root")]
+        socket_group: String,
     },
     /// Stop the daemon
     Stop,
@@ -675,8 +679,14 @@ fn main() -> anyhow::Result<()> {
             DaemonAction::Start {
                 foreground,
                 data_dir,
+                socket_group,
             } => {
-                daemon::run_daemon(cli.socket.as_deref(), foreground, data_dir.as_deref())?;
+                daemon::run_daemon(
+                    cli.socket.as_deref(),
+                    foreground,
+                    data_dir.as_deref(),
+                    &socket_group,
+                )?;
             }
             DaemonAction::Stop => {
                 let mut client = Client::connect(cli.socket.as_deref())?;

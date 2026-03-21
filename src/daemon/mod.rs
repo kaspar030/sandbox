@@ -19,6 +19,7 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook_async_std::Signals;
 use smol::io::{AsyncReadExt, AsyncWriteExt};
 use smol::stream::StreamExt;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::Arc;
@@ -36,6 +37,7 @@ pub fn run_daemon(
     socket_path: Option<&str>,
     foreground: bool,
     data_dir: Option<&str>,
+    socket_group: &str,
 ) -> Result<()> {
     let socket_path = socket_path.unwrap_or(DEFAULT_SOCKET_PATH);
     let data_dir = data_dir.unwrap_or(DEFAULT_DATA_DIR);
@@ -68,6 +70,9 @@ pub fn run_daemon(
     // Bind the listener (std, then wrap in Async)
     let listener = UnixListener::bind(socket_path).map_err(Error::Connection)?;
     let listener = Async::new(listener).map_err(Error::Connection)?;
+
+    // Set socket ownership and permissions for group-based access control
+    apply_socket_permissions(socket_path, socket_group);
 
     tracing::info!("sandbox daemon listening on {socket_path}");
 
@@ -605,4 +610,38 @@ async fn write_async_message<T: serde::Serialize>(
     stream.write_all(&data).await.map_err(Error::Connection)?;
     stream.flush().await.map_err(Error::Connection)?;
     Ok(())
+}
+
+/// Set socket ownership/permissions for group-based access.
+///
+/// Chowns the socket to `root:<group>` with mode 0660. If the group does not
+/// exist, logs a warning and leaves permissions unchanged. The parent directory
+/// is left as-is since it contains the mounts/ subdirectory which must remain
+/// accessible.
+fn apply_socket_permissions(socket_path: &str, group_name: &str) {
+    let group = match nix::unistd::Group::from_name(group_name) {
+        Ok(Some(g)) => g,
+        Ok(None) => {
+            tracing::warn!("socket group '{group_name}' not found, skipping permission setup");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("failed to resolve socket group '{group_name}': {e}");
+            return;
+        }
+    };
+
+    let gid = Some(group.gid);
+    let socket = Path::new(socket_path);
+
+    if let Err(e) = nix::unistd::chown(socket, Some(nix::unistd::Uid::from_raw(0)), gid) {
+        tracing::warn!("failed to chown socket: {e}");
+        return;
+    }
+    if let Err(e) = std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o660)) {
+        tracing::warn!("failed to chmod socket: {e}");
+        return;
+    }
+
+    tracing::info!("socket owned by root:{group_name} (gid {gid:?}), mode 0660");
 }
