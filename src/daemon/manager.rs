@@ -834,10 +834,6 @@ impl ContainerManager {
                 let _ = c.destroy();
             }
             tracing::info!("ephemeral container {name} auto-removed");
-        } else if should_restart {
-            tracing::info!(
-                "container {name} will be restarted (policy: {restart_policy}, exit: {exit_code})"
-            );
         }
 
         ExitResult {
