@@ -8,4 +8,5 @@ pub mod networks;
 pub mod persistence;
 pub mod restart;
 pub mod stacks;
+pub mod update;
 pub mod volumes;

@@ -275,6 +275,34 @@ fn all_tests() -> Vec<Test> {
             "restart_inspect",
             tests::restart::test_restart_inspect,
         ),
+        // Update
+        Test::Immutable(
+            "Update",
+            "update_restart_policy",
+            tests::update::test_update_restart_policy,
+        ),
+        Test::Immutable("Update", "update_memory", tests::update::test_update_memory),
+        Test::Immutable("Update", "update_cpus", tests::update::test_update_cpus),
+        Test::Immutable(
+            "Update",
+            "update_pids_max",
+            tests::update::test_update_pids_max,
+        ),
+        Test::Immutable(
+            "Update",
+            "update_running",
+            tests::update::test_update_running,
+        ),
+        Test::Immutable(
+            "Update",
+            "update_multiple",
+            tests::update::test_update_multiple,
+        ),
+        Test::Mutable(
+            "Update",
+            "update_persists",
+            tests::update::test_update_persists,
+        ),
         // Persistence (needs mutable context for restart)
         Test::Mutable(
             "Persistence",

@@ -137,6 +137,15 @@ fn test_roundtrip_all_request_variants() {
             }),
             env: vec!["FOO=bar".to_string()],
         },
+        Request::UpdateContainer {
+            name: "foo".to_string(),
+            update: ContainerUpdate {
+                restart_policy: Some(RestartPolicy::Always),
+                memory_max: Some(1024),
+                cpu_max: None,
+                pids_max: None,
+            },
+        },
         Request::Shutdown,
     ];
 
@@ -170,6 +179,9 @@ fn test_roundtrip_all_response_variants() {
             message: "something went wrong".to_string(),
         },
         Response::ContainerList(vec![]),
+        Response::ContainerUpdated {
+            name: "test".to_string(),
+        },
         Response::ContainerInspect(Box::new(ContainerDetail {
             name: "test".to_string(),
             image: "alpine".to_string(),
@@ -352,6 +364,81 @@ fn test_restart_policy_should_restart() {
     assert!(RestartPolicy::UnlessStopped.should_restart(1, false));
     assert!(!RestartPolicy::UnlessStopped.should_restart(0, true));
     assert!(!RestartPolicy::UnlessStopped.should_restart(1, true));
+}
+
+/// Verify that UpdateContainer request roundtrips correctly.
+#[test]
+fn test_roundtrip_update_container() {
+    let req = Request::UpdateContainer {
+        name: "mycontainer".to_string(),
+        update: ContainerUpdate {
+            restart_policy: Some(RestartPolicy::Always),
+            memory_max: Some(256 * 1024 * 1024),
+            cpu_max: Some((150_000, 100_000)),
+            pids_max: Some(128),
+        },
+    };
+
+    let encoded = encode_message(&req).unwrap();
+    let (decoded, rest): (Request, &[u8]) = decode_message(&encoded).unwrap();
+    assert!(rest.is_empty());
+
+    match decoded {
+        Request::UpdateContainer { name, update } => {
+            assert_eq!(name, "mycontainer");
+            assert_eq!(update.restart_policy, Some(RestartPolicy::Always));
+            assert_eq!(update.memory_max, Some(256 * 1024 * 1024));
+            assert_eq!(update.cpu_max, Some((150_000, 100_000)));
+            assert_eq!(update.pids_max, Some(128));
+        }
+        _ => panic!("expected UpdateContainer request"),
+    }
+}
+
+/// Verify that ContainerUpdate with partial fields roundtrips correctly.
+#[test]
+fn test_roundtrip_update_container_partial() {
+    let req = Request::UpdateContainer {
+        name: "partial".to_string(),
+        update: ContainerUpdate {
+            restart_policy: Some(RestartPolicy::OnFailure),
+            memory_max: None,
+            cpu_max: None,
+            pids_max: None,
+        },
+    };
+
+    let encoded = encode_message(&req).unwrap();
+    let (decoded, rest): (Request, &[u8]) = decode_message(&encoded).unwrap();
+    assert!(rest.is_empty());
+
+    match decoded {
+        Request::UpdateContainer { name, update } => {
+            assert_eq!(name, "partial");
+            assert_eq!(update.restart_policy, Some(RestartPolicy::OnFailure));
+            assert!(update.memory_max.is_none());
+            assert!(update.cpu_max.is_none());
+            assert!(update.pids_max.is_none());
+        }
+        _ => panic!("expected UpdateContainer request"),
+    }
+}
+
+/// Verify that ContainerUpdated response roundtrips correctly.
+#[test]
+fn test_roundtrip_container_updated_response() {
+    let resp = Response::ContainerUpdated {
+        name: "test".to_string(),
+    };
+
+    let encoded = encode_message(&resp).unwrap();
+    let (decoded, rest): (Response, &[u8]) = decode_message(&encoded).unwrap();
+    assert!(rest.is_empty());
+
+    match decoded {
+        Response::ContainerUpdated { name } => assert_eq!(name, "test"),
+        _ => panic!("expected ContainerUpdated response"),
+    }
 }
 
 /// Verify that an Exec request with env roundtrips correctly.
