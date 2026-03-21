@@ -372,6 +372,22 @@ pub enum ContainerState {
     Stopped { exit_code: i32 },
 }
 
+/// Partial update for a container's configuration.
+///
+/// All fields are optional — only specified (Some) fields are applied.
+/// Used by the `update` command to modify a stopped container's spec.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContainerUpdate {
+    /// New restart policy.
+    pub restart_policy: Option<RestartPolicy>,
+    /// New memory limit in bytes (memory.max).
+    pub memory_max: Option<u64>,
+    /// New CPU limit as (quota_us, period_us).
+    pub cpu_max: Option<(u64, u64)>,
+    /// New PID limit.
+    pub pids_max: Option<u32>,
+}
+
 /// Restart policy for containers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -588,6 +604,11 @@ pub enum Request {
     StackPs { name: String },
     /// List all stacks.
     StackList,
+    /// Update a container's configuration (must be stopped or created).
+    UpdateContainer {
+        name: String,
+        update: ContainerUpdate,
+    },
     /// Shut down the daemon.
     Shutdown,
 }
@@ -748,6 +769,8 @@ pub enum Response {
     MountList(Vec<MountInfo>),
     /// Container rootfs snapshotted as image.
     Snapshotted { image_name: String },
+    /// Container configuration updated.
+    ContainerUpdated { name: String },
     /// Error response.
     Error { message: String },
 }

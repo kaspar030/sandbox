@@ -257,6 +257,18 @@ impl Client {
         })
     }
 
+    /// Update a container's configuration (must be stopped or created).
+    pub fn update_container(
+        &mut self,
+        name: &str,
+        update: sandbox_proto::ContainerUpdate,
+    ) -> Result<Response> {
+        self.request(&Request::UpdateContainer {
+            name: name.to_string(),
+            update,
+        })
+    }
+
     /// Mount a block device inside a container (daemon-assisted).
     pub fn mount_block(
         &mut self,

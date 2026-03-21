@@ -75,7 +75,7 @@ enum Commands {
         gateway: Option<String>,
 
         /// Seccomp mode: default, disabled
-        #[arg(long, default_value = "default")]
+        #[arg(long, default_value = "default", value_parser = ["default", "disabled"])]
         seccomp: String,
 
         /// Capabilities to keep (can be specified multiple times)
@@ -148,7 +148,7 @@ enum Commands {
         ip: Option<String>,
         #[arg(long)]
         gateway: Option<String>,
-        #[arg(long, default_value = "default")]
+        #[arg(long, default_value = "default", value_parser = ["default", "disabled"])]
         seccomp: String,
         #[arg(long = "cap-add")]
         cap_add: Vec<String>,
@@ -168,7 +168,7 @@ enum Commands {
         init: bool,
 
         /// Restart policy: no, always, on-failure, unless-stopped (default: unless-stopped)
-        #[arg(long, default_value = "unless-stopped")]
+        #[arg(long, default_value = "unless-stopped", value_parser = ["no", "always", "on-failure", "unless-stopped"])]
         restart: String,
 
         /// Start the container immediately after creation
@@ -185,6 +185,29 @@ enum Commands {
         gid_map: Vec<String>,
         #[arg(last = true)]
         command: Vec<String>,
+    },
+
+    /// Update a container's configuration (container must be stopped)
+    Update {
+        /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
+        name: String,
+
+        /// Restart policy (no|always|on-failure|unless-stopped)
+        #[arg(long, value_parser = ["no", "always", "on-failure", "unless-stopped"])]
+        restart: Option<String>,
+
+        /// Memory limit (e.g., 512M, 1G)
+        #[arg(long)]
+        memory: Option<String>,
+
+        /// CPU limit as fraction (e.g., 0.5 = half a core)
+        #[arg(long)]
+        cpus: Option<f64>,
+
+        /// Maximum number of processes
+        #[arg(long)]
+        pids_max: Option<u32>,
     },
 
     /// Start a previously created container
@@ -765,6 +788,49 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        Commands::Update {
+            name,
+            restart,
+            memory,
+            cpus,
+            pids_max,
+        } => {
+            // At least one flag must be specified
+            if restart.is_none() && memory.is_none() && cpus.is_none() && pids_max.is_none() {
+                eprintln!(
+                    "Error: no update flags specified (use --restart, --memory, --cpus, or --pids-max)"
+                );
+                std::process::exit(1);
+            }
+
+            let restart_policy = restart
+                .map(|r| {
+                    sandbox_proto::RestartPolicy::parse(&r).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "unknown restart policy: {r} (expected: no, always, on-failure, unless-stopped)"
+                        )
+                    })
+                })
+                .transpose()?;
+
+            let memory_max = memory.map(parse_size).transpose()?;
+            let cpu_max = cpus.map(|c| {
+                let quota = (c * 100_000.0) as u64;
+                (quota, 100_000u64)
+            });
+
+            let update = sandbox_proto::ContainerUpdate {
+                restart_policy,
+                memory_max,
+                cpu_max,
+                pids_max,
+            };
+
+            let mut client = Client::connect(cli.socket.as_deref())?;
+            let resp = client.request(&Request::UpdateContainer { name, update })?;
+            print_response(&resp);
+        }
+
         Commands::Start { name, command } => {
             let cmd = if command.is_empty() {
                 None
@@ -1317,6 +1383,7 @@ fn print_response(resp: &Response) {
         Response::ExecExited { exit_code } => println!("Exec exited with code {exit_code}"),
         Response::ImagePulled { name } => println!("Pulled image: {name}"),
         Response::Snapshotted { image_name } => println!("Snapshotted as image: {image_name}"),
+        Response::ContainerUpdated { name } => println!("Updated container: {name}"),
         Response::StackUp { name, containers } => {
             println!("Stack '{name}' up ({} containers)", containers.len());
         }

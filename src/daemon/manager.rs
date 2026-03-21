@@ -965,6 +965,9 @@ impl ContainerManager {
             } => {
                 self.handle_mount_block(&container, &device, &target, &fs_type, options.as_deref())
             }
+            Request::UpdateContainer { name, update } => {
+                self.handle_update_container(&name, update)
+            }
             Request::StackUp(def) => self.handle_stack_up(def),
             Request::StackDown { name } => self.handle_stack_down(&name),
             Request::StackPs { name } => self.handle_stack_ps(&name),
@@ -1134,6 +1137,64 @@ impl ContainerManager {
 
         self.containers.insert(name.clone(), container);
         HandleResult::response_only(Response::Created { name })
+    }
+
+    fn handle_update_container(
+        &mut self,
+        name: &str,
+        update: sandbox::protocol::ContainerUpdate,
+    ) -> HandleResult {
+        let container = match self.containers.get_mut(name) {
+            Some(c) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {name} not found"),
+                });
+            }
+        };
+
+        let is_running = container.state.is_running();
+
+        // Apply spec-level updates
+        if let Some(policy) = update.restart_policy {
+            container.spec.restart_policy = policy;
+        }
+        if let Some(mem) = update.memory_max {
+            container.spec.cgroup.memory_max = Some(mem);
+        }
+        if let Some(cpu) = update.cpu_max {
+            container.spec.cgroup.cpu_max = Some(cpu);
+        }
+        if let Some(pids) = update.pids_max {
+            container.spec.cgroup.pids_max = Some(pids);
+        }
+
+        // If running, also apply cgroup changes live
+        if is_running {
+            let cgroup_path = PathBuf::from("/sys/fs/cgroup/sandbox").join(name);
+            if let Some(mem) = update.memory_max {
+                if let Err(e) = sandbox::cgroup::memory::set_memory_max(&cgroup_path, mem) {
+                    tracing::warn!("failed to apply live memory limit for {name}: {e}");
+                }
+            }
+            if let Some((quota, period)) = update.cpu_max {
+                if let Err(e) = sandbox::cgroup::cpu::set_cpu_max(&cgroup_path, quota, period) {
+                    tracing::warn!("failed to apply live cpu limit for {name}: {e}");
+                }
+            }
+            if let Some(pids) = update.pids_max {
+                if let Err(e) = sandbox::cgroup::pids::set_pids_max(&cgroup_path, pids) {
+                    tracing::warn!("failed to apply live pids limit for {name}: {e}");
+                }
+            }
+        }
+
+        // Persist the updated spec
+        Self::persist_container(&self.state_dir, name, container);
+
+        HandleResult::response_only(Response::ContainerUpdated {
+            name: name.to_string(),
+        })
     }
 
     #[tracing::instrument(skip_all, level = "debug", fields(name = %spec.name))]
