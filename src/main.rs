@@ -1047,6 +1047,7 @@ fn main() -> anyhow::Result<()> {
                     print_response(&resp);
                 }
                 MountAction::Remove { name, target } => {
+                    let target = make_absolute(&target);
                     let resp = client.request(&Request::MountRemove { name, target })?;
                     print_response(&resp);
                 }
