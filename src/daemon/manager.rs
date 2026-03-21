@@ -1208,6 +1208,9 @@ impl ContainerManager {
             container.spec.entrypoint = ep;
         }
 
+        // Implicit init: if command+entrypoint are now empty, enable init (idle mode)
+        Self::apply_implicit_init(&mut container.spec);
+
         // -- Container identity --
         if let Some(u) = update.user {
             container.spec.user = u;

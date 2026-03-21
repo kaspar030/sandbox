@@ -512,13 +512,20 @@ async fn await_pidfd_and_reap(
         // Increase backoff for next crash (cap at max)
         backoff = std::cmp::min(backoff * 2, max_backoff);
 
-        // Check if the container was manually stopped during the backoff
+        // Check if the container state changed during the backoff
         {
             let m = mgr.lock().await;
             if let Some(c) = m.get_container(name) {
                 if c.manually_stopped {
                     tracing::info!(
                         "container {name} was stopped during restart backoff, aborting restart"
+                    );
+                    return result.exit_code;
+                }
+                if c.state.is_running() {
+                    // User manually started it — another task is monitoring
+                    tracing::info!(
+                        "container {name} was manually started during restart backoff, aborting restart"
                     );
                     return result.exit_code;
                 }
