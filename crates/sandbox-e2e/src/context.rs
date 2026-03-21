@@ -258,6 +258,9 @@ impl Drop for TestContext {
                     .args(["destroy", "-r", &dataset])
                     .output();
             }
+            // Try bcachefs subvolume cleanup — delete all subvolumes under
+            // the workdir before removing the directory tree.
+            cleanup_bcachefs_subvolumes(&self.workdir);
             // Also try btrfs subvolume delete for btrfs pools
             let _ = Command::new("btrfs")
                 .args(["subvolume", "delete", "--"])
@@ -265,6 +268,54 @@ impl Drop for TestContext {
                 .output();
             let _ = std::fs::remove_dir_all(&self.workdir);
         }
+    }
+}
+
+/// Clean up bcachefs subvolumes under a directory tree (best-effort).
+///
+/// Uses `bcachefs subvolume list` to find subvolumes, then deletes them
+/// in reverse depth order (deepest first). Silently does nothing if
+/// bcachefs is not available or the path is not on bcachefs.
+fn cleanup_bcachefs_subvolumes(workdir: &Path) {
+    // List subvolumes under the workdir
+    let output = Command::new("bcachefs")
+        .args(["subvolume", "list", "--"])
+        .arg(workdir)
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return, // bcachefs not available or not a bcachefs filesystem
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Collect subvolume paths and sort by depth (deepest first)
+    let mut subvols: Vec<PathBuf> = stdout
+        .lines()
+        .filter_map(|line| {
+            // bcachefs subvolume list output may vary; try to extract paths
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let path = Path::new(trimmed);
+            if path.is_absolute() && path.starts_with(workdir) {
+                Some(path.to_path_buf())
+            } else {
+                // Might be a relative path or a table with columns
+                None
+            }
+        })
+        .collect();
+
+    // Sort deepest first so children are deleted before parents
+    subvols.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+
+    for subvol in &subvols {
+        let _ = Command::new("bcachefs")
+            .args(["subvolume", "delete", "--"])
+            .arg(subvol)
+            .output();
     }
 }
 
