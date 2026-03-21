@@ -324,6 +324,32 @@ fn test_container_spec_backward_compat() {
     assert_eq!(spec.restart_policy, RestartPolicy::No);
 }
 
+/// Verify that a ContainerSpec JSON with no "command" field deserializes to empty vec.
+#[test]
+fn test_container_spec_no_command_defaults_empty() {
+    let json = r#"{
+        "name": "idle-test",
+        "image": "alpine",
+        "hostname": null,
+        "uid_mappings": [],
+        "gid_mappings": [],
+        "cgroup": {},
+        "network": "Host",
+        "seccomp": "Default",
+        "capabilities": {"keep": []},
+        "bind_mounts": [],
+        "use_init": true,
+        "detach": false
+    }"#;
+
+    let spec: ContainerSpec =
+        serde_json::from_str(json).expect("ContainerSpec without command should deserialize");
+
+    assert_eq!(spec.name, "idle-test");
+    assert!(spec.command.is_empty());
+    assert!(spec.use_init);
+}
+
 /// Verify that RestartPolicy serializes/deserializes with kebab-case.
 #[test]
 fn test_restart_policy_serde() {

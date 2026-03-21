@@ -668,6 +668,11 @@ fn main() -> anyhow::Result<()> {
                 gid_map,
                 command,
             )?;
+            // For `run` (interactive), default to /bin/sh if no command given
+            if spec.command.is_empty() {
+                spec.command = vec!["/bin/sh".to_string()];
+                spec.use_init = init; // respect explicit --init only
+            }
             spec.detach = detach;
             spec.publish = parse_port_mappings(&publish)?;
             spec.volumes = parse_volume_mounts(&volume)?;
@@ -1629,18 +1634,12 @@ fn build_spec(
             .collect::<anyhow::Result<Vec<_>>>()?
     };
 
-    let cmd = if command.is_empty() {
-        vec!["/bin/sh".to_string()]
-    } else {
-        command
-    };
-
     Ok(ContainerSpec {
         name,
         image,
         pool,
         entrypoint: Vec::new(),
-        command: cmd,
+        command,
         env,
         working_dir: "/".to_string(),
         hostname,

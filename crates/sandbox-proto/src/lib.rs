@@ -97,7 +97,7 @@ impl Default for ContainerSpec {
             image: String::new(),
             pool: None,
             entrypoint: Vec::new(),
-            command: vec!["/bin/sh".to_string()],
+            command: Vec::new(),
             env: Vec::new(),
             working_dir: "/".to_string(),
             hostname: None,

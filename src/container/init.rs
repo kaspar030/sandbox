@@ -1,18 +1,28 @@
 //! Mini-init process for PID 1 inside the container.
 //!
 //! When --init is specified, this runs as PID 1 and:
-//! 1. Forwards signals to the child process
+//! 1. Forwards signals to the child process (or handles them in idle mode)
 //! 2. Reaps zombie processes
-//! 3. Exits with the child's exit code
+//! 3. Exits with the child's exit code (or 0 on SIGTERM in idle mode)
 
 /// Run as PID 1 inside the container.
 ///
-/// Forks the actual command as a child, then:
+/// If `command` is empty, runs in **idle mode**: no child process is forked,
+/// init just stays alive as PID 1, reaps zombies from `exec`'d processes,
+/// and exits cleanly on SIGTERM. This is the default for `sandbox create`
+/// without a command — the container stays alive for `sandbox exec`.
+///
+/// If `command` is non-empty, forks the command as a child, then:
 /// - Forwards SIGTERM, SIGINT, SIGHUP, SIGUSR1, SIGUSR2 to the child
 /// - Reaps zombies via waitpid(-1, WNOHANG)
 /// - Waits for the main child to exit
 /// - Exits with the child's exit code
 pub fn run_init(command: &[String]) -> ! {
+    // Idle mode: no command, just be PID 1
+    if command.is_empty() {
+        run_idle();
+    }
+
     // Set up signal forwarding
     let child_pid = match unsafe { nix::unistd::fork() } {
         Ok(nix::unistd::ForkResult::Child) => {
@@ -55,6 +65,41 @@ pub fn run_init(command: &[String]) -> ! {
             Err(_) => continue,
         }
     }
+}
+
+/// Idle mode: PID 1 with no child process.
+///
+/// Reaps zombies (from exec'd processes) and exits on SIGTERM/SIGINT.
+fn run_idle() -> ! {
+    // Set up signal handlers that cause clean exit
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            idle_exit_handler as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            idle_exit_handler as *const () as libc::sighandler_t,
+        );
+    }
+
+    use nix::sys::wait::{WaitPidFlag, waitpid};
+
+    // Main loop: reap zombies, sleep when no children
+    loop {
+        match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
+            Ok(nix::sys::wait::WaitStatus::StillAlive) | Err(nix::Error::ECHILD) => {
+                // No children to reap — sleep until signal
+                nix::unistd::pause();
+            }
+            Err(nix::Error::EINTR) => continue,
+            _ => continue, // reaped a zombie, check for more
+        }
+    }
+}
+
+extern "C" fn idle_exit_handler(_sig: libc::c_int) {
+    std::process::exit(0);
 }
 
 fn setup_signal_forwarding(child_pid: libc::pid_t) {

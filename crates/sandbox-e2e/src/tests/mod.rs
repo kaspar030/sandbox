@@ -1,5 +1,6 @@
 pub mod env;
 pub mod exec;
+pub mod idle;
 pub mod images;
 pub mod lifecycle;
 pub mod mounts;

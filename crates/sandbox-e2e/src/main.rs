@@ -258,6 +258,32 @@ fn all_tests() -> Vec<Test> {
             "stack_check_quiet",
             tests::stacks::test_stack_check_quiet,
         ),
+        // Idle init
+        Test::Immutable(
+            "Idle",
+            "create_idle_default",
+            tests::idle::test_create_idle_default,
+        ),
+        Test::Immutable(
+            "Idle",
+            "create_idle_explicit_init",
+            tests::idle::test_create_idle_explicit_init,
+        ),
+        Test::Immutable(
+            "Idle",
+            "create_with_command",
+            tests::idle::test_create_with_command,
+        ),
+        Test::Immutable(
+            "Idle",
+            "run_default_shell",
+            tests::idle::test_run_default_shell,
+        ),
+        Test::Immutable(
+            "Idle",
+            "idle_reaps_zombies",
+            tests::idle::test_idle_reaps_zombies,
+        ),
         // Restart policies
         Test::Immutable(
             "Restart",

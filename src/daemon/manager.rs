@@ -1077,8 +1077,7 @@ impl ContainerManager {
                 spec.entrypoint = meta.config.entrypoint;
             }
             // Command: use image default only if user didn't provide any command
-            // (default is ["/bin/sh"] from ContainerSpec::default — check if unchanged)
-            if spec.command == vec!["/bin/sh".to_string()] && !meta.config.cmd.is_empty() {
+            if spec.command.is_empty() && !meta.config.cmd.is_empty() {
                 spec.command = meta.config.cmd;
             }
             // Env: merge image env with user env (user overrides image)
@@ -1096,6 +1095,15 @@ impl ContainerManager {
         }
     }
 
+    /// If no command or entrypoint is set and init is not explicitly enabled,
+    /// enable init implicitly so the container runs in idle mode (PID 1 waits
+    /// for `exec` sessions). This is the default for `create` without a command.
+    fn apply_implicit_init(spec: &mut ContainerSpec) {
+        if spec.command.is_empty() && spec.entrypoint.is_empty() && !spec.use_init {
+            spec.use_init = true;
+        }
+    }
+
     fn handle_create(&mut self, mut spec: ContainerSpec) -> HandleResult {
         let name = spec.name.clone();
 
@@ -1106,6 +1114,7 @@ impl ContainerManager {
         }
 
         self.apply_image_config(&mut spec);
+        Self::apply_implicit_init(&mut spec);
 
         // Validate and set up bridged networking
         if let Err(e) = Self::validate_publish(&spec) {
@@ -1212,6 +1221,7 @@ impl ContainerManager {
         }
 
         self.apply_image_config(&mut spec);
+        Self::apply_implicit_init(&mut spec);
 
         // Validate and set up bridged networking (IPAM, NAT, port forwarding)
         if let Err(e) = Self::validate_publish(&spec) {
