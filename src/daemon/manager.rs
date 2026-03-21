@@ -25,7 +25,7 @@ pub struct ExitResult {
     /// If true, the container should be restarted by the async layer.
     pub should_restart: bool,
 }
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Parse a subnet string like "10.1.0.0/24" into (addr, prefix_len).
 fn parse_subnet(s: &str) -> std::result::Result<(Ipv4Addr, u8), String> {
@@ -98,7 +98,7 @@ pub struct ContainerManager {
     /// Number of background rootfs deletions currently in flight.
     pending_cleanups: Arc<AtomicUsize>,
     /// Set to true when a shutdown request has been received.
-    pub shutdown_requested: bool,
+    pub shutting_down: Arc<AtomicBool>,
     /// IP allocators per bridge name.
     ipam: HashMap<String, sandbox::net::ipam::IpAllocator>,
     /// Whether nftables (nft) is available on this system.
@@ -139,7 +139,7 @@ impl ContainerManager {
             containers: HashMap::new(),
             storage,
             pending_cleanups: Arc::new(AtomicUsize::new(0)),
-            shutdown_requested: false,
+            shutting_down: Arc::new(AtomicBool::new(false)),
             ipam: HashMap::new(),
             nft_available,
             published_ports: HashMap::new(),
@@ -854,9 +854,15 @@ impl ContainerManager {
             None => return Err(format!("container {name} not found")),
         };
 
-        // Reset state: Stopped → Created
-        if let Err(e) = container.state.reset() {
-            return Err(format!("cannot restart {name}: {e}"));
+        // Reset state: Stopped → Created (skip if already Created, e.g., after recovery)
+        if container.state.is_stopped() {
+            if let Err(e) = container.state.reset() {
+                return Err(format!("cannot restart {name}: {e}"));
+            }
+        } else if !container.state.is_created() {
+            return Err(format!(
+                "cannot restart {name}: not in Stopped or Created state"
+            ));
         }
 
         // Clear the manually_stopped flag for the new lifecycle
@@ -988,7 +994,7 @@ impl ContainerManager {
                 // Don't destroy containers — graceful_shutdown() will handle
                 // running containers, and non-running containers should survive
                 // for recovery on next daemon start.
-                self.shutdown_requested = true;
+                self.shutting_down.store(true, Ordering::Relaxed);
                 HandleResult::response_only(Response::Ok)
             }
         }

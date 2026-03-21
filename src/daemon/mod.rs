@@ -22,6 +22,7 @@ use smol::stream::StreamExt;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const DEFAULT_SOCKET_PATH: &str = "/run/sandbox/sandbox.sock";
@@ -87,6 +88,7 @@ pub fn run_daemon(
     mgr.recover_from_crash();
     let containers_to_restart = mgr.containers_to_restart();
 
+    let shutting_down = Arc::clone(&mgr.shutting_down);
     let mgr = Arc::new(smol::lock::Mutex::new(mgr));
 
     smol::block_on(async {
@@ -107,13 +109,13 @@ pub fn run_daemon(
         })
         .detach();
 
-        // Spawn a task that watches shutdown_requested (set by Request::Shutdown)
+        // Spawn a task that watches shutting_down (set by Request::Shutdown)
         let shutdown_tx_req = shutdown_tx.clone();
-        let mgr_watch = Arc::clone(&mgr);
+        let shutting_down_watch = Arc::clone(&shutting_down);
         smol::spawn(async move {
             loop {
                 smol::Timer::after(Duration::from_millis(100)).await;
-                if mgr_watch.lock().await.shutdown_requested {
+                if shutting_down_watch.load(Ordering::Relaxed) {
                     let _ = shutdown_tx_req.send(()).await;
                     break;
                 }
@@ -124,6 +126,7 @@ pub fn run_daemon(
         // Auto-restart recovered containers that have a restart policy
         for name in containers_to_restart {
             let mgr_restart = Arc::clone(&mgr);
+            let shutting_down_restart = Arc::clone(&shutting_down);
             let name_clone = name.clone();
             smol::spawn(async move {
                 // Brief delay to let the daemon fully initialize
@@ -137,7 +140,13 @@ pub fn run_daemon(
                 match restart_result {
                     Ok(pidfd) => {
                         tracing::info!("auto-restarted recovered container {name_clone}");
-                        await_pidfd_and_reap(pidfd, &name_clone, Arc::clone(&mgr_restart)).await;
+                        await_pidfd_and_reap(
+                            pidfd,
+                            &name_clone,
+                            Arc::clone(&mgr_restart),
+                            shutting_down_restart,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -161,8 +170,9 @@ pub fn run_daemon(
             match accept_result {
                 Some(Ok((stream, _addr))) => {
                     let mgr = Arc::clone(&mgr);
+                    let shutting_down = Arc::clone(&shutting_down);
                     smol::spawn(async move {
-                        if let Err(e) = handle_client(stream, mgr).await {
+                        if let Err(e) = handle_client(stream, mgr, shutting_down).await {
                             tracing::error!("client error: {e}");
                         }
                     })
@@ -191,9 +201,11 @@ pub fn run_daemon(
 
 /// Graceful shutdown: SIGTERM all containers → wait → SIGKILL survivors → cleanup.
 async fn graceful_shutdown(mgr: &Arc<smol::lock::Mutex<manager::ContainerManager>>) {
-    // Collect running containers and their PIDs
+    // Collect running containers and their PIDs, and set the shutting_down flag
+    // so that await_pidfd_and_reap tasks don't attempt to restart containers.
     let running: Vec<(String, i32)> = {
         let m = mgr.lock().await;
+        m.shutting_down.store(true, Ordering::Relaxed);
         m.running_containers()
     };
 
@@ -292,6 +304,7 @@ async fn graceful_shutdown(mgr: &Arc<smol::lock::Mutex<manager::ContainerManager
 async fn handle_client(
     mut stream: Async<std::os::unix::net::UnixStream>,
     mgr: Arc<smol::lock::Mutex<manager::ContainerManager>>,
+    shutting_down: Arc<AtomicBool>,
 ) -> Result<()> {
     // Read the request
     let request: Request = read_async_message(&mut stream).await?;
@@ -344,13 +357,15 @@ async fn handle_client(
         if let Some(pidfd) = pidfd {
             if has_pty {
                 // Interactive mode: keep connection alive, send exit code after container exits
-                let exit_code = await_pidfd_and_reap(pidfd, &name, mgr_clone).await;
+                let exit_code =
+                    await_pidfd_and_reap(pidfd, &name, mgr_clone, Arc::clone(&shutting_down)).await;
                 let _ = write_async_message(&mut stream, &Response::ContainerExited { exit_code })
                     .await;
             } else {
                 // Detached mode: monitor in background
+                let shutting_down = Arc::clone(&shutting_down);
                 smol::spawn(async move {
-                    let _ = await_pidfd_and_reap(pidfd, &name, mgr_clone).await;
+                    let _ = await_pidfd_and_reap(pidfd, &name, mgr_clone, shutting_down).await;
                 })
                 .detach();
             }
@@ -456,6 +471,7 @@ async fn await_pidfd_and_reap(
     pidfd: std::os::fd::OwnedFd,
     name: &str,
     mgr: Arc<smol::lock::Mutex<manager::ContainerManager>>,
+    shutting_down: Arc<AtomicBool>,
 ) -> i32 {
     let mut current_pidfd = pidfd;
     let mut backoff = Duration::from_secs(1);
@@ -476,7 +492,8 @@ async fn await_pidfd_and_reap(
             m.handle_container_exit(name)
         };
 
-        if !result.should_restart {
+        // Don't restart if the daemon is shutting down
+        if !result.should_restart || shutting_down.load(Ordering::Relaxed) {
             return result.exit_code;
         }
 
