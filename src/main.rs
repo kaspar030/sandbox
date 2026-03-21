@@ -416,6 +416,21 @@ enum MountAction {
         /// Container name
         name: String,
     },
+    /// Mount a block device inside a container (daemon-assisted)
+    Block {
+        /// Container name
+        name: String,
+        /// Device path inside the container (e.g., /dev/myblk)
+        device: String,
+        /// Mount target inside the container (e.g., /data)
+        target: String,
+        /// Filesystem type (e.g., ext4)
+        #[arg(long = "type", short = 't')]
+        fs_type: String,
+        /// Mount options (e.g., "noatime,rw")
+        #[arg(short = 'o', long = "options")]
+        options: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -484,6 +499,15 @@ enum VolumeAction {
         /// Storage pool (default: main)
         #[arg(long)]
         pool: Option<String>,
+        /// Create a block device volume
+        #[arg(long)]
+        block: bool,
+        /// Size of the block volume (e.g., "1G", "500M"). Default: 1G.
+        #[arg(long)]
+        size: Option<String>,
+        /// Format the block volume with a filesystem (e.g., "ext4")
+        #[arg(long)]
+        format: Option<String>,
     },
     /// List volumes
     #[command(alias = "ls")]
@@ -955,6 +979,22 @@ fn main() -> anyhow::Result<()> {
                         _ => print_response(&resp),
                     }
                 }
+                MountAction::Block {
+                    name,
+                    device,
+                    target,
+                    fs_type,
+                    options,
+                } => {
+                    let resp = client.request(&Request::MountBlock {
+                        container: name,
+                        device,
+                        target,
+                        fs_type,
+                        options,
+                    })?;
+                    print_response(&resp);
+                }
             }
         }
 
@@ -1128,8 +1168,33 @@ fn main() -> anyhow::Result<()> {
         Commands::Volume { action } => {
             let mut client = Client::connect(cli.socket.as_deref())?;
             match action {
-                VolumeAction::Create { name, pool } => {
-                    let resp = client.request(&Request::VolumeCreate { name, pool })?;
+                VolumeAction::Create {
+                    name,
+                    pool,
+                    block,
+                    size,
+                    format,
+                } => {
+                    let volume_type = if block {
+                        sandbox_proto::VolumeType::Block
+                    } else {
+                        sandbox_proto::VolumeType::Filesystem
+                    };
+                    let size_bytes = if block {
+                        Some(parse_size(size.as_deref().unwrap_or("1G").to_string())?)
+                    } else {
+                        None
+                    };
+                    if format.is_some() && !block {
+                        anyhow::bail!("--format requires --block");
+                    }
+                    let resp = client.request(&Request::VolumeCreate {
+                        name,
+                        pool,
+                        volume_type,
+                        size: size_bytes,
+                        format,
+                    })?;
                     print_response(&resp);
                 }
                 VolumeAction::List { pool } => {
@@ -1139,9 +1204,21 @@ fn main() -> anyhow::Result<()> {
                             if volumes.is_empty() {
                                 println!("No volumes");
                             } else {
-                                println!("{:<25} {:<10}", "NAME", "POOL");
+                                println!(
+                                    "{:<25} {:<10} {:<12} {:<10}",
+                                    "NAME", "POOL", "TYPE", "SIZE"
+                                );
                                 for v in volumes {
-                                    println!("{:<25} {:<10}", v.name, v.pool);
+                                    let type_str = match v.volume_type {
+                                        sandbox_proto::VolumeType::Filesystem => "filesystem",
+                                        sandbox_proto::VolumeType::Block => "block",
+                                    };
+                                    let size_str =
+                                        v.size.map(format_size).unwrap_or_else(|| "-".to_string());
+                                    println!(
+                                        "{:<25} {:<10} {:<12} {:<10}",
+                                        v.name, v.pool, type_str, size_str
+                                    );
                                 }
                             }
                         }
@@ -1233,6 +1310,7 @@ fn print_response(resp: &Response) {
         }
         Response::VolumeAttached { target } => println!("Volume attached at: {target}"),
         Response::VolumeDetached { target } => println!("Volume detached from: {target}"),
+        Response::BlockMounted { target } => println!("Block device mounted at: {target}"),
         Response::ImageInspect(detail) => print_image_inspect(detail),
         Response::MountAdded { target } => println!("Mount added: {target}"),
         Response::MountRemoved { target } => println!("Mount removed: {target}"),
@@ -1538,11 +1616,13 @@ fn parse_volume_spec(spec: &str) -> anyhow::Result<sandbox_proto::VolumeMount> {
             name: parts[0].to_string(),
             target: parts[1].to_string(),
             readonly: false,
+            volume_type: sandbox_proto::VolumeType::default(),
         }),
         3 => Ok(sandbox_proto::VolumeMount {
             name: parts[0].to_string(),
             target: parts[1].to_string(),
             readonly: parts[2] == "ro",
+            volume_type: sandbox_proto::VolumeType::default(),
         }),
         _ => anyhow::bail!("invalid volume spec: {spec} (expected name:/path or name:/path:ro)"),
     }

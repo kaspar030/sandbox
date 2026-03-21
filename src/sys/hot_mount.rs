@@ -210,3 +210,102 @@ fn child_do_unmount(container_pid: i32, target: &str) -> ! {
 }
 
 use std::os::fd::FromRawFd;
+
+/// Bind-mount a host block device node into a container.
+/// Uses open_tree + move_mount WITHOUT idmap (device nodes don't support MOUNT_ATTR_IDMAP).
+pub fn hot_block_bind(
+    container_pid: i32,
+    host_device: &Path,
+    container_target: &str,
+) -> Result<()> {
+    let tree_fd = mount_api::open_tree(host_device, false)?;
+    // Skip set_idmap — device nodes don't support it
+    let tree_raw = tree_fd.as_raw_fd();
+    let target = container_target.to_string();
+    match unsafe { nix::unistd::fork() } {
+        Err(e) => Err(Error::Other(format!("fork failed: {e}"))),
+        Ok(nix::unistd::ForkResult::Parent { child }) => {
+            drop(tree_fd);
+            match nix::sys::wait::waitpid(child, None) {
+                Ok(nix::sys::wait::WaitStatus::Exited(_, 0)) => Ok(()),
+                Ok(nix::sys::wait::WaitStatus::Exited(_, code)) => Err(Error::Other(format!(
+                    "block bind helper exited with code {code}"
+                ))),
+                Ok(status) => Err(Error::Other(format!("block bind helper: {status:?}"))),
+                Err(e) => Err(Error::Other(format!("waitpid failed: {e}"))),
+            }
+        }
+        Ok(nix::unistd::ForkResult::Child) => {
+            let _ = nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL);
+            child_do_mount(container_pid, tree_raw, &target, true);
+        }
+    }
+}
+
+/// Mount a block device's filesystem into a container via a host-side temp mount.
+pub fn hot_block_mount(
+    container_pid: i32,
+    host_device: &str,
+    container_target: &str,
+    fs_type: &str,
+    options: Option<&str>,
+    host_mount_dir: &Path,
+) -> Result<()> {
+    std::fs::create_dir_all(host_mount_dir)
+        .map_err(|e| Error::Other(format!("mkdir {}: {e}", host_mount_dir.display())))?;
+    let (flags, data) = parse_mount_options(options);
+    nix::mount::mount(
+        Some(host_device),
+        host_mount_dir,
+        Some(fs_type),
+        flags,
+        data.as_deref(),
+    )
+    .map_err(|e| {
+        Error::Other(format!(
+            "mount {host_device} on {}: {e}",
+            host_mount_dir.display()
+        ))
+    })?;
+    match hot_bind_mount(container_pid, host_mount_dir, container_target, false) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = nix::mount::umount2(host_mount_dir, nix::mount::MntFlags::MNT_DETACH);
+            Err(e)
+        }
+    }
+}
+
+/// Unmount a host-side temp mount used for block volume.
+pub fn host_unmount(host_mount_dir: &Path) -> Result<()> {
+    nix::mount::umount2(host_mount_dir, nix::mount::MntFlags::MNT_DETACH)
+        .map_err(|e| Error::Other(format!("umount {}: {e}", host_mount_dir.display())))?;
+    let _ = std::fs::remove_dir(host_mount_dir);
+    Ok(())
+}
+
+fn parse_mount_options(options: Option<&str>) -> (nix::mount::MsFlags, Option<String>) {
+    let mut flags = nix::mount::MsFlags::empty();
+    let mut data_parts: Vec<String> = Vec::new();
+    if let Some(opts) = options {
+        for opt in opts.split(',') {
+            match opt.trim() {
+                "ro" => flags |= nix::mount::MsFlags::MS_RDONLY,
+                "rw" => {}
+                "noatime" => flags |= nix::mount::MsFlags::MS_NOATIME,
+                "nosuid" => flags |= nix::mount::MsFlags::MS_NOSUID,
+                "nodev" => flags |= nix::mount::MsFlags::MS_NODEV,
+                "noexec" => flags |= nix::mount::MsFlags::MS_NOEXEC,
+                "sync" => flags |= nix::mount::MsFlags::MS_SYNCHRONOUS,
+                "relatime" => flags |= nix::mount::MsFlags::MS_RELATIME,
+                other => data_parts.push(other.to_string()),
+            }
+        }
+    }
+    let data = if data_parts.is_empty() {
+        None
+    } else {
+        Some(data_parts.join(","))
+    };
+    (flags, data)
+}

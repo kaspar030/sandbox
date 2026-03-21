@@ -307,12 +307,22 @@ pub struct BindMount {
     pub readonly: bool,
 }
 
+/// Volume type: filesystem (directory) or block device.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VolumeType {
+    #[default]
+    Filesystem,
+    Block,
+}
+
 /// Named volume mount specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeMount {
     pub name: String,
     pub target: String,
     pub readonly: bool,
+    #[serde(default)]
+    pub volume_type: VolumeType,
 }
 
 /// Information about a named volume.
@@ -320,6 +330,31 @@ pub struct VolumeMount {
 pub struct VolumeInfo {
     pub name: String,
     pub pool: String,
+    #[serde(default)]
+    pub volume_type: VolumeType,
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
+/// Metadata for a block volume (stored as sidecar JSON).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockVolumeMeta {
+    pub size: u64,
+    pub format: Option<String>,
+    pub backing: String,
+    pub loop_file: Option<String>,
+    pub zvol_dataset: Option<String>,
+}
+
+/// Runtime state of a block volume attached to a container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockVolumeState {
+    pub volume_name: String,
+    pub host_device: String,
+    pub container_device: Option<String>,
+    pub container_mount: Option<String>,
+    pub host_mount: Option<String>,
+    pub loop_file: Option<String>,
 }
 
 /// User identity for exec commands.
@@ -502,7 +537,16 @@ pub enum Request {
         update: bool,
     },
     /// Create a named volume.
-    VolumeCreate { name: String, pool: Option<String> },
+    VolumeCreate {
+        name: String,
+        pool: Option<String>,
+        #[serde(default)]
+        volume_type: VolumeType,
+        #[serde(default)]
+        size: Option<u64>,
+        #[serde(default)]
+        format: Option<String>,
+    },
     /// Remove a named volume.
     VolumeRemove { name: String, pool: Option<String> },
     /// List named volumes.
@@ -516,6 +560,15 @@ pub enum Request {
     },
     /// Detach a volume from a running container.
     VolumeDetach { container: String, target: String },
+    /// Mount a block device inside a container (daemon-assisted).
+    MountBlock {
+        container: String,
+        device: String,
+        target: String,
+        fs_type: String,
+        #[serde(default)]
+        options: Option<String>,
+    },
     /// Create a named network.
     NetworkCreate {
         name: String,
@@ -662,6 +715,8 @@ pub enum Response {
     VolumeAttached { target: String },
     /// Volume detached from container.
     VolumeDetached { target: String },
+    /// Block device mounted inside container.
+    BlockMounted { target: String },
     /// Network created.
     NetworkCreated { name: String },
     /// Network removed.

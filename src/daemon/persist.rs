@@ -9,7 +9,7 @@
 //! 2. On container exit (state -> Stopped)
 //! 3. On container destroy (delete file)
 
-use sandbox::protocol::{ContainerSpec, ContainerState};
+use sandbox::protocol::{BlockVolumeState, ContainerSpec, ContainerState};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -28,10 +28,11 @@ pub struct ContainerRecord {
     pub rootfs_path: Option<PathBuf>,
     pub pool_name: Option<String>,
     pub ephemeral: bool,
-    /// True if the user explicitly stopped this container.
-    /// Used by `UnlessStopped` restart policy to inhibit restart.
     #[serde(default)]
     pub manually_stopped: bool,
+    /// Active block volume mounts (for cleanup on stop/crash).
+    #[serde(default)]
+    pub block_volumes: Vec<BlockVolumeState>,
 }
 
 /// Ensure the state directory exists.

@@ -191,6 +191,26 @@ fn all_tests() -> Vec<Test> {
             "volume_remove_in_use",
             tests::volumes::test_volume_remove_in_use,
         ),
+        Test::Immutable(
+            "Block Volumes",
+            "block_volume_create_remove",
+            tests::volumes::test_block_volume_create_remove,
+        ),
+        Test::Immutable(
+            "Block Volumes",
+            "block_volume_raw_device",
+            tests::volumes::test_block_volume_raw_device,
+        ),
+        Test::Immutable(
+            "Block Volumes",
+            "block_volume_format_mount",
+            tests::volumes::test_block_volume_format_mount,
+        ),
+        Test::Immutable(
+            "Block Volumes",
+            "block_volume_formatted_auto",
+            tests::volumes::test_block_volume_formatted_auto,
+        ),
         // Stacks
         Test::Immutable("Stacks", "stack_up_down", tests::stacks::test_stack_up_down),
         Test::Immutable(

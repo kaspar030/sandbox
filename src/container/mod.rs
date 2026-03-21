@@ -49,6 +49,8 @@ pub struct Container {
     pub rootfs_path: Option<std::path::PathBuf>,
     /// Storage pool name this container uses.
     pub pool_name: Option<String>,
+    /// Active block volume mounts (for cleanup on stop/crash).
+    pub block_volumes: Vec<sandbox_proto::BlockVolumeState>,
 }
 
 impl Container {
@@ -66,6 +68,7 @@ impl Container {
             idmap_mount: None,
             rootfs_path: None,
             pool_name: None,
+            block_volumes: Vec::new(),
         }
     }
 
@@ -91,6 +94,7 @@ impl Container {
             idmap_mount: None,
             rootfs_path,
             pool_name,
+            block_volumes: Vec::new(),
         }
     }
 
@@ -135,7 +139,8 @@ impl Container {
         // Two separate eventfds because a single eventfd can't do bidirectional
         // signaling (writer reads back its own signal).
         // Only created when there are bind mounts to apply.
-        let (mount_ready, mount_done) = if !self.spec.bind_mounts.is_empty() {
+        let has_mounts = !self.spec.bind_mounts.is_empty() || !self.block_volumes.is_empty();
+        let (mount_ready, mount_done) = if has_mounts {
             (Some(EventFd::new()?), Some(EventFd::new()?))
         } else {
             (None, None)
@@ -220,13 +225,53 @@ impl Container {
                             &bm.target,
                             bm.readonly,
                         ) {
-                            // Signal child before returning error so it doesn't hang
                             let _ = done_fd.signal();
                             cgroup.destroy().ok();
                             return Err(Error::Other(format!(
                                 "bind mount {} → {} failed: {e}",
                                 bm.source, bm.target
                             )));
+                        }
+                    }
+
+                    // Apply block volume mounts
+                    for bv in &mut self.block_volumes {
+                        let dev_path = std::path::Path::new(&bv.host_device);
+                        if let Some(ref mount_target) = bv.container_mount {
+                            // Formatted: mount filesystem via host tempdir
+                            let host_mount_dir =
+                                std::path::PathBuf::from("/run/sandbox/block-mounts")
+                                    .join(&self.spec.name)
+                                    .join(mount_target.trim_start_matches('/'));
+                            let fs_type = bv.container_device.as_deref().unwrap_or("ext4");
+                            if let Err(e) = crate::sys::hot_mount::hot_block_mount(
+                                child_pid,
+                                &bv.host_device,
+                                mount_target,
+                                fs_type,
+                                None,
+                                &host_mount_dir,
+                            ) {
+                                let _ = done_fd.signal();
+                                cgroup.destroy().ok();
+                                return Err(Error::Other(format!(
+                                    "block mount {} → {mount_target} failed: {e}",
+                                    bv.host_device
+                                )));
+                            }
+                            bv.host_mount = Some(host_mount_dir.to_string_lossy().to_string());
+                        } else if let Some(ref target) = bv.container_device {
+                            // Raw: bind-mount device node
+                            if let Err(e) =
+                                crate::sys::hot_mount::hot_block_bind(child_pid, dev_path, target)
+                            {
+                                let _ = done_fd.signal();
+                                cgroup.destroy().ok();
+                                return Err(Error::Other(format!(
+                                    "block device bind {} → {target} failed: {e}",
+                                    bv.host_device
+                                )));
+                            }
                         }
                     }
 

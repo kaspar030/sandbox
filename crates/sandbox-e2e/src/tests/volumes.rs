@@ -138,3 +138,142 @@ pub fn test_volume_remove_in_use(ctx: &TestContext) -> Result<(), String> {
 
     Ok(())
 }
+
+/// Test block volume create, list, and remove.
+pub fn test_block_volume_create_remove(ctx: &TestContext) -> Result<(), String> {
+    let name = "e2e-blkvol-test";
+    ctx.cli_ok(&["volume", "create", "--block", name]);
+
+    let output = ctx.cli_ok(&["volume", "ls"]);
+    if !output.contains(name) || !output.contains("block") {
+        let _ = ctx.cli(&["volume", "rm", name]);
+        return Err(format!(
+            "block volume not in list or missing type: {output}"
+        ));
+    }
+
+    ctx.cli_ok(&["volume", "rm", name]);
+
+    let output = ctx.cli_ok(&["volume", "ls"]);
+    if output.contains(name) {
+        return Err("block volume still in list after rm".into());
+    }
+    Ok(())
+}
+
+/// Test raw block device exposed to container.
+pub fn test_block_volume_raw_device(ctx: &TestContext) -> Result<(), String> {
+    let vol = "e2e-blk-raw";
+    let container = "e2e-blk-raw-ctr";
+
+    ctx.cli_ok(&["volume", "create", "--block", "--size", "64M", vol]);
+
+    let vol_spec = format!("{vol}:/dev/myblk");
+    ctx.cli_ok(&[
+        "create", "--name", container, "--image", "ubuntu", "--volume", &vol_spec, "--", "sleep",
+        "30",
+    ]);
+    ctx.cli_ok(&["start", container]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let output = ctx.cli(&["exec", container, "--", "stat", "-c", "%F", "/dev/myblk"]);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let _ = ctx.cli(&["stop", container]);
+    let _ = ctx.cli(&["destroy", container]);
+    ctx.cli_ok(&["volume", "rm", vol]);
+
+    if !stdout.contains("block") {
+        return Err(format!(
+            "expected block device, got: stdout='{}' stderr='{}'",
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// Test daemon-assisted block mount: create pre-formatted volume,
+/// expose as raw device, then daemon mounts it inside the container.
+pub fn test_block_volume_format_mount(ctx: &TestContext) -> Result<(), String> {
+    let vol = "e2e-blk-fmtmnt";
+    let container = "e2e-blk-fmtmnt-ctr";
+
+    ctx.cli_ok(&[
+        "volume", "create", "--block", "--size", "64M", "--format", "ext4", vol,
+    ]);
+
+    let vol_spec = format!("{vol}:/dev/myblk");
+    ctx.cli_ok(&[
+        "create", "--name", container, "--image", "ubuntu", "--volume", &vol_spec, "--", "sleep",
+        "60",
+    ]);
+    ctx.cli_ok(&["start", container]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let mount_output = ctx.cli(&[
+        "mount",
+        "block",
+        container,
+        "/dev/myblk",
+        "/data",
+        "--type",
+        "ext4",
+    ]);
+    if !mount_output.status.success() {
+        let _ = ctx.cli(&["stop", container]);
+        let _ = ctx.cli(&["destroy", container]);
+        let _ = ctx.cli(&["volume", "rm", vol]);
+        return Err(format!(
+            "mount block failed: {}",
+            String::from_utf8_lossy(&mount_output.stderr)
+        ));
+    }
+
+    let output = ctx.cli(&[
+        "exec",
+        container,
+        "--",
+        "sh",
+        "-c",
+        "echo block-works > /data/test.txt && cat /data/test.txt",
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    let _ = ctx.cli(&["stop", container]);
+    let _ = ctx.cli(&["destroy", container]);
+    ctx.cli_ok(&["volume", "rm", vol]);
+
+    if !stdout.contains("block-works") {
+        return Err(format!("expected block-works, got: {stdout}"));
+    }
+    Ok(())
+}
+
+/// Test pre-formatted block volume auto-mounted at container start.
+pub fn test_block_volume_formatted_auto(ctx: &TestContext) -> Result<(), String> {
+    let vol = "e2e-blk-auto";
+
+    ctx.cli_ok(&[
+        "volume", "create", "--block", "--size", "64M", "--format", "ext4", vol,
+    ]);
+
+    let vol_spec = format!("{vol}:/data");
+    let output = ctx.cli_ok(&[
+        "run",
+        "--image",
+        "ubuntu",
+        "--volume",
+        &vol_spec,
+        "--",
+        "sh",
+        "-c",
+        "echo auto-mount-ok > /data/test.txt && cat /data/test.txt",
+    ]);
+
+    ctx.cli_ok(&["volume", "rm", vol]);
+
+    if !output.contains("auto-mount-ok") {
+        return Err(format!("expected auto-mount-ok, got: {output}"));
+    }
+    Ok(())
+}

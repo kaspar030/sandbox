@@ -207,6 +207,9 @@ impl Client {
         self.request(&Request::VolumeCreate {
             name: name.to_string(),
             pool: pool.map(|s| s.to_string()),
+            volume_type: sandbox_proto::VolumeType::Filesystem,
+            size: None,
+            format: None,
         })
     }
 
@@ -251,6 +254,24 @@ impl Client {
         self.request(&Request::VolumeDetach {
             container: container.to_string(),
             target: target.to_string(),
+        })
+    }
+
+    /// Mount a block device inside a container (daemon-assisted).
+    pub fn mount_block(
+        &mut self,
+        container: &str,
+        device: &str,
+        target: &str,
+        fs_type: &str,
+        options: Option<&str>,
+    ) -> Result<Response> {
+        self.request(&Request::MountBlock {
+            container: container.to_string(),
+            device: device.to_string(),
+            target: target.to_string(),
+            fs_type: fs_type.to_string(),
+            options: options.map(|s| s.to_string()),
         })
     }
 }

@@ -468,6 +468,68 @@ impl ContainerManager {
     }
 
     /// Persist a non-ephemeral container's state to disk.
+    /// Populate block volume state from resolved block volumes.
+    ///
+    /// Heuristic: if the target path starts with "/dev/", expose as raw device.
+    /// Otherwise, if the volume is formatted, auto-mount the filesystem.
+    fn populate_block_volumes(
+        &self,
+        container: &mut Container,
+        block_vols: &[(String, String, sandbox::protocol::VolumeMount)],
+    ) {
+        for (vol_name, host_device, vol_mount) in block_vols {
+            let meta = {
+                let pool = match self.storage.resolve_pool(container.spec.pool.as_deref()) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                storage::volume::load_block_meta(pool, vol_name).ok()
+            };
+            let is_dev_target = vol_mount.target.starts_with("/dev/");
+            let (container_device, container_mount) = if is_dev_target {
+                // Explicitly a device path — always expose as raw device node
+                (Some(vol_mount.target.clone()), None)
+            } else if let Some(ref m) = meta {
+                if m.format.is_some() {
+                    // Formatted + non-/dev/ target: auto-mount filesystem
+                    (m.format.clone(), Some(vol_mount.target.clone()))
+                } else {
+                    // Raw + non-/dev/ target: expose as device (user probably meant /dev/)
+                    (Some(vol_mount.target.clone()), None)
+                }
+            } else {
+                (Some(vol_mount.target.clone()), None)
+            };
+            container
+                .block_volumes
+                .push(sandbox::protocol::BlockVolumeState {
+                    volume_name: vol_name.clone(),
+                    host_device: host_device.clone(),
+                    container_device,
+                    container_mount,
+                    host_mount: None,
+                    loop_file: meta.and_then(|m| m.loop_file),
+                });
+        }
+    }
+
+    /// Clean up block volume resources: unmount host-side mounts, detach loop devices.
+    fn cleanup_block_volumes(block_volumes: &mut Vec<sandbox::protocol::BlockVolumeState>) {
+        for bv in block_volumes.iter() {
+            if let Some(ref host_mount) = bv.host_mount {
+                let _ = sandbox::sys::hot_mount::host_unmount(std::path::Path::new(host_mount));
+            }
+            if let Some(ref loop_file) = bv.loop_file {
+                if let Ok(Some(dev)) = storage::volume::find_loop_for_file(loop_file) {
+                    let _ = std::process::Command::new("losetup")
+                        .args(["-d", &dev])
+                        .output();
+                }
+            }
+        }
+        block_volumes.clear();
+    }
+
     fn persist_container(state_dir: &std::path::Path, name: &str, container: &Container) {
         if container.ephemeral {
             return;
@@ -482,6 +544,7 @@ impl ContainerManager {
             pool_name: container.pool_name.clone(),
             ephemeral: container.ephemeral,
             manually_stopped: container.manually_stopped,
+            block_volumes: container.block_volumes.clone(),
         };
         if let Err(e) = persist::save_state(state_dir, name, &record) {
             tracing::warn!("failed to persist state for {name}: {e}");
@@ -492,32 +555,39 @@ impl ContainerManager {
     ///
     /// Allocates an IP from IPAM if not specified, validates port mappings,
     /// sets up NAT masquerade + port forwarding, and adds resolv.conf bind mount.
-    /// Resolve volume mounts to bind mounts by looking up volume paths.
-    fn resolve_volumes(&self, spec: &mut ContainerSpec) -> Result<()> {
+    /// Resolve volume mounts. Filesystem volumes → bind mounts.
+    /// Block volumes → returned for device setup during container start.
+    fn resolve_volumes(
+        &self,
+        spec: &mut ContainerSpec,
+    ) -> Result<Vec<(String, String, sandbox::protocol::VolumeMount)>> {
         if spec.volumes.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
-
         let pool = self.storage.resolve_pool(spec.pool.as_deref())?;
-
+        let mut block_vols = Vec::new();
         for vol in &spec.volumes {
-            let vol_path = storage::volume::volume_path(pool, &vol.name);
-            if !vol_path.is_dir() {
-                return Err(Error::Other(format!(
-                    "volume '{}' not found (create it with: sandbox volume create {})",
-                    vol.name, vol.name
-                )));
+            if vol.volume_type == sandbox::protocol::VolumeType::Block
+                || storage::volume::is_block_volume(pool, &vol.name)
+            {
+                let device = storage::volume::get_block_device_path(pool, &vol.name)?;
+                block_vols.push((vol.name.clone(), device, vol.clone()));
+            } else {
+                let vol_path = storage::volume::volume_path(pool, &vol.name);
+                if !vol_path.is_dir() {
+                    return Err(Error::Other(format!(
+                        "volume '{}' not found (create it with: sandbox volume create {})",
+                        vol.name, vol.name
+                    )));
+                }
+                spec.bind_mounts.push(sandbox::protocol::BindMount {
+                    source: vol_path.to_string_lossy().to_string(),
+                    target: vol.target.clone(),
+                    readonly: vol.readonly,
+                });
             }
-
-            // Add as a bind mount — the existing bind mount mechanism handles the rest
-            spec.bind_mounts.push(sandbox::protocol::BindMount {
-                source: vol_path.to_string_lossy().to_string(),
-                target: vol.target.clone(),
-                readonly: vol.readonly,
-            });
         }
-
-        Ok(())
+        Ok(block_vols)
     }
 
     fn setup_bridged_networking(&mut self, spec: &mut ContainerSpec) -> Result<()> {
@@ -730,6 +800,9 @@ impl ContainerManager {
             Self::persist_container(&self.state_dir, name, container);
         }
 
+        // Clean up block volume mounts and loop devices
+        Self::cleanup_block_volumes(&mut container.block_volumes);
+
         // Clean up cgroup
         if let Some(ref cgroup) = container.cgroup {
             let _ = cgroup.destroy();
@@ -863,9 +936,13 @@ impl ContainerManager {
             } => self.handle_mount_add(&name, &source, &target, readonly),
             Request::MountRemove { name, target } => self.handle_mount_remove(&name, &target),
             Request::MountList { name } => self.handle_mount_list(&name),
-            Request::VolumeCreate { name, pool } => {
-                self.handle_volume_create(&name, pool.as_deref())
-            }
+            Request::VolumeCreate {
+                name,
+                pool,
+                volume_type,
+                size,
+                format,
+            } => self.handle_volume_create(&name, pool.as_deref(), volume_type, size, format),
             Request::VolumeRemove { name, pool } => {
                 self.handle_volume_remove(&name, pool.as_deref())
             }
@@ -878,6 +955,15 @@ impl ContainerManager {
             } => self.handle_volume_attach(&container, &volume_name, &target, readonly),
             Request::VolumeDetach { container, target } => {
                 self.handle_volume_detach(&container, &target)
+            }
+            Request::MountBlock {
+                container,
+                device,
+                target,
+                fs_type,
+                options,
+            } => {
+                self.handle_mount_block(&container, &device, &target, &fs_type, options.as_deref())
             }
             Request::StackUp(def) => self.handle_stack_up(def),
             Request::StackDown { name } => self.handle_stack_down(&name),
@@ -1026,14 +1112,18 @@ impl ContainerManager {
             });
         }
 
-        // Resolve volumes to bind mounts
-        if let Err(e) = self.resolve_volumes(&mut spec) {
-            return HandleResult::response_only(Response::Error {
-                message: format!("{e}"),
-            });
-        }
+        // Resolve volumes (block volumes returned for device setup during start)
+        let block_vols = match self.resolve_volumes(&mut spec) {
+            Ok(bv) => bv,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
 
         let mut container = Container::new(spec);
+        self.populate_block_volumes(&mut container, &block_vols);
 
         // Prepare rootfs (copy image + idmap mount)
         if let Err(e) = self.prepare_container_rootfs(&mut container) {
@@ -1070,15 +1160,19 @@ impl ContainerManager {
             });
         }
 
-        // Resolve volumes to bind mounts
-        if let Err(e) = self.resolve_volumes(&mut spec) {
-            return HandleResult::response_only(Response::Error {
-                message: format!("{e}"),
-            });
-        }
+        // Resolve volumes (block volumes returned for device setup during start)
+        let block_vols = match self.resolve_volumes(&mut spec) {
+            Ok(bv) => bv,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
 
         let mut container = Container::new(spec);
         container.ephemeral = true;
+        self.populate_block_volumes(&mut container, &block_vols);
 
         // Prepare rootfs (copy image + idmap mount)
         if let Err(e) = self.prepare_container_rootfs(&mut container) {
@@ -1296,6 +1390,88 @@ impl ContainerManager {
             .collect();
 
         HandleResult::response_only(Response::MountList(mounts))
+    }
+
+    fn handle_mount_block(
+        &mut self,
+        container_name: &str,
+        device: &str,
+        target: &str,
+        fs_type: &str,
+        options: Option<&str>,
+    ) -> HandleResult {
+        let container = match self.containers.get(container_name) {
+            Some(c) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {container_name} not found"),
+                });
+            }
+        };
+        if !container.state.is_running() {
+            return HandleResult::response_only(Response::Error {
+                message: format!("container {container_name} is not running"),
+            });
+        }
+        let pid = match container.pid {
+            Some(p) => p,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: "container has no PID".to_string(),
+                });
+            }
+        };
+
+        // Find host device path from tracked block volumes
+        let host_device = container
+            .block_volumes
+            .iter()
+            .find(|bv| bv.container_device.as_deref() == Some(device))
+            .map(|bv| bv.host_device.clone());
+        let host_device = match host_device {
+            Some(d) => d,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!(
+                        "block device '{device}' not found in container \
+                         (attach it with --volume name:{device})"
+                    ),
+                });
+            }
+        };
+
+        let mount_dir = PathBuf::from("/run/sandbox/block-mounts")
+            .join(container_name)
+            .join(target.trim_start_matches('/'));
+
+        if let Err(e) = sandbox::sys::hot_mount::hot_block_mount(
+            pid,
+            &host_device,
+            target,
+            fs_type,
+            options,
+            &mount_dir,
+        ) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("block mount failed: {e}"),
+            });
+        }
+
+        // Update tracked state
+        let container = self.containers.get_mut(container_name).unwrap();
+        if let Some(bv) = container
+            .block_volumes
+            .iter_mut()
+            .find(|bv| bv.container_device.as_deref() == Some(device))
+        {
+            bv.container_mount = Some(target.to_string());
+            bv.host_mount = Some(mount_dir.to_string_lossy().to_string());
+        }
+        Self::persist_container(&self.state_dir, container_name, container);
+
+        HandleResult::response_only(Response::BlockMounted {
+            target: target.to_string(),
+        })
     }
 
     fn handle_snapshot(
@@ -1537,6 +1713,7 @@ impl ContainerManager {
                         name: vol_name,
                         target,
                         readonly,
+                        volume_type: sandbox::protocol::VolumeType::default(),
                     });
                 }
             }
@@ -1576,13 +1753,16 @@ impl ContainerManager {
                 });
             }
 
-            // Resolve volumes to bind mounts
-            if let Err(e) = self.resolve_volumes(&mut spec) {
-                self.cleanup_stack_partial(&container_names, &volume_names, &bridge_name);
-                return HandleResult::response_only(Response::Error {
-                    message: format!("volume setup for {}: {e}", svc.name),
-                });
-            }
+            // Resolve volumes (block volumes not supported in stacks yet)
+            let _block_vols = match self.resolve_volumes(&mut spec) {
+                Ok(bv) => bv,
+                Err(e) => {
+                    self.cleanup_stack_partial(&container_names, &volume_names, &bridge_name);
+                    return HandleResult::response_only(Response::Error {
+                        message: format!("volume setup for {}: {e}", svc.name),
+                    });
+                }
+            };
 
             // Create + start the container
             let mut container = Container::new(spec);
@@ -2015,7 +2195,14 @@ impl ContainerManager {
         Ok(())
     }
 
-    fn handle_volume_create(&self, name: &str, pool: Option<&str>) -> HandleResult {
+    fn handle_volume_create(
+        &self,
+        name: &str,
+        pool: Option<&str>,
+        volume_type: sandbox::protocol::VolumeType,
+        size: Option<u64>,
+        format: Option<String>,
+    ) -> HandleResult {
         let pool = match self.storage.resolve_pool(pool) {
             Ok(p) => p,
             Err(e) => {
@@ -2024,14 +2211,19 @@ impl ContainerManager {
                 });
             }
         };
-
         if let Err(e) = storage::volume::ensure_volumes_dir(pool) {
             return HandleResult::response_only(Response::Error {
                 message: format!("{e}"),
             });
         }
-
-        match storage::volume::create_volume(pool, name) {
+        let result = match volume_type {
+            sandbox::protocol::VolumeType::Filesystem => storage::volume::create_volume(pool, name),
+            sandbox::protocol::VolumeType::Block => {
+                let sz = size.unwrap_or(1024 * 1024 * 1024);
+                storage::volume::create_block_volume(pool, name, sz, format.as_deref())
+            }
+        };
+        match result {
             Ok(()) => HandleResult::response_only(Response::VolumeCreated {
                 name: name.to_string(),
             }),
@@ -2060,7 +2252,12 @@ impl ContainerManager {
             }
         }
 
-        match storage::volume::remove_volume(pool, name) {
+        let result = if storage::volume::is_block_volume(pool, name) {
+            storage::volume::remove_block_volume(pool, name)
+        } else {
+            storage::volume::remove_volume(pool, name)
+        };
+        match result {
             Ok(()) => HandleResult::response_only(Response::VolumeRemoved {
                 name: name.to_string(),
             }),
@@ -2149,6 +2346,7 @@ impl ContainerManager {
             name: volume_name.to_string(),
             target: target.to_string(),
             readonly,
+            volume_type: sandbox::protocol::VolumeType::default(),
         });
         Self::persist_container(&self.state_dir, container_name, container);
 
@@ -2218,6 +2416,9 @@ impl ContainerManager {
 
         // Clean up networking
         self.cleanup_bridged_networking(&container.spec.clone());
+
+        // Clean up block volume mounts and loop devices
+        Self::cleanup_block_volumes(&mut container.block_volumes);
 
         // Defer rootfs deletion to a background task.
         if let Some(ref pool_name) = container.pool_name {
