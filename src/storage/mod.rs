@@ -7,7 +7,7 @@
 //!   /var/lib/sandbox/storage/<pool>/image_meta/<name>.json — image metadata (config, chain IDs)
 //!
 //! The default pool is "main". Additional pools can be created by mounting
-//! a filesystem (btrfs, bcachefs, etc.) at storage/<name>/.
+//! a filesystem (btrfs, bcachefs, zfs, etc.) at storage/<name>/.
 
 pub mod container_fs;
 pub mod fs_detect;
@@ -16,12 +16,44 @@ pub mod layers;
 pub mod oci;
 pub mod unpack;
 pub mod volume;
+pub mod zfs;
 
 use crate::error::{Error, Result};
 use fs_detect::FsType;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Ensure a subdirectory exists, creating it as a ZFS dataset on ZFS
+/// or as a plain directory on other filesystems.
+///
+/// On ZFS, the parent must already be a ZFS dataset. This uses leaf-only
+/// dataset creation to avoid creating intermediate datasets that could
+/// shadow sibling directories (e.g., `state/` next to `storage/`).
+fn ensure_subdir(path: &Path, fs_type: &FsType) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    match fs_type {
+        FsType::Zfs => zfs::zfs_dataset_create_leaf(path),
+        _ => fs::create_dir_all(path)
+            .map_err(|e| Error::Other(format!("failed to create {}: {e}", path.display()))),
+    }
+}
+
+/// Ensure a storage pool directory is set up as a ZFS dataset.
+///
+/// Uses `-p` to create any missing intermediate datasets. Note that this
+/// may cause intermediate ZFS datasets to be mounted (e.g., for `data/`,
+/// `storage/`), which will shadow any directories previously created at
+/// those paths. The daemon must re-create such directories (like `state/`)
+/// after StorageManager initialization.
+fn ensure_pool_zfs_dataset(pool_dir: &Path) -> Result<()> {
+    if pool_dir.exists() {
+        return Ok(());
+    }
+    zfs::zfs_dataset_create(pool_dir)
+}
 
 /// A storage pool — a named directory under /var/lib/sandbox/storage/.
 #[derive(Debug)]
@@ -75,19 +107,31 @@ impl StorageManager {
         let storage_dir = base_dir.join("storage");
         let main_dir = storage_dir.join("main");
 
-        // Create the default pool directory structure
-        fs::create_dir_all(main_dir.join("images")).map_err(|e| {
-            Error::Other(format!(
-                "failed to create {}: {e}",
-                main_dir.join("images").display()
-            ))
-        })?;
-        fs::create_dir_all(main_dir.join("fs")).map_err(|e| {
-            Error::Other(format!(
-                "failed to create {}: {e}",
-                main_dir.join("fs").display()
-            ))
-        })?;
+        // Create the default pool directory structure.
+        // On ZFS, the pool directory itself becomes a ZFS dataset, and
+        // subdirectories (images/, fs/) become child datasets.
+        // We detect the fs type of the parent to decide how to create the pool dir.
+        let parent_fs = if storage_dir.exists() {
+            fs_detect::detect_filesystem(&storage_dir).unwrap_or(FsType::Other(0))
+        } else {
+            fs::create_dir_all(&storage_dir).map_err(|e| {
+                Error::Other(format!("failed to create {}: {e}", storage_dir.display()))
+            })?;
+            fs_detect::detect_filesystem(&storage_dir).unwrap_or(FsType::Other(0))
+        };
+
+        if parent_fs == FsType::Zfs {
+            // On ZFS: create pool dir as a ZFS dataset, then children as leaf datasets
+            ensure_pool_zfs_dataset(&main_dir)?;
+        } else if !main_dir.exists() {
+            fs::create_dir_all(&main_dir).map_err(|e| {
+                Error::Other(format!("failed to create {}: {e}", main_dir.display()))
+            })?;
+        }
+
+        let main_fs_type = fs_detect::detect_filesystem(&main_dir).unwrap_or(FsType::Other(0));
+        ensure_subdir(&main_dir.join("images"), &main_fs_type)?;
+        ensure_subdir(&main_dir.join("fs"), &main_fs_type)?;
 
         let mut pools = HashMap::new();
 
@@ -107,11 +151,12 @@ impl StorageManager {
                     continue;
                 }
 
-                // Ensure images/ and fs/ subdirs exist
-                let _ = fs::create_dir_all(path.join("images"));
-                let _ = fs::create_dir_all(path.join("fs"));
-
                 let fs_type = fs_detect::detect_filesystem(&path)?;
+
+                // Ensure images/ and fs/ subdirs exist
+                // On ZFS, these must be datasets for child datasets to work.
+                let _ = ensure_subdir(&path.join("images"), &fs_type);
+                let _ = ensure_subdir(&path.join("fs"), &fs_type);
 
                 if !fs_type.supports_idmap() {
                     tracing::warn!(

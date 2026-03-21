@@ -252,7 +252,13 @@ impl Drop for TestContext {
 
         // Clean up workdir
         if self.workdir.exists() {
-            // Use btrfs subvolume delete for any subvolumes, then rm -rf
+            // Try ZFS destroy first (recursively destroys child datasets)
+            if let Some(dataset) = zfs_dataset_for_path(&self.workdir) {
+                let _ = Command::new("zfs")
+                    .args(["destroy", "-r", &dataset])
+                    .output();
+            }
+            // Also try btrfs subvolume delete for btrfs pools
             let _ = Command::new("btrfs")
                 .args(["subvolume", "delete", "--"])
                 .arg(self.workdir.join("data"))
@@ -260,4 +266,49 @@ impl Drop for TestContext {
             let _ = std::fs::remove_dir_all(&self.workdir);
         }
     }
+}
+
+/// Resolve a filesystem path to its ZFS dataset name (best-effort).
+///
+/// Returns None if `zfs list` fails (not a ZFS system).
+fn zfs_dataset_for_path(path: &Path) -> Option<String> {
+    let output = Command::new("zfs")
+        .args(["list", "-H", "-o", "name,mountpoint"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let path_str = path.to_string_lossy();
+    let mut best_dataset = None;
+    let mut best_len = 0;
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 2 {
+            let dataset = parts[0];
+            let mountpoint = parts[1];
+            if (path_str.as_ref() == mountpoint || path_str.starts_with(&format!("{mountpoint}/")))
+                && mountpoint.len() > best_len
+            {
+                best_dataset = Some((dataset.to_string(), mountpoint.to_string()));
+                best_len = mountpoint.len();
+            }
+        }
+    }
+
+    best_dataset.map(|(dataset, mountpoint)| {
+        let remainder = path_str
+            .strip_prefix(&mountpoint)
+            .unwrap_or("")
+            .trim_start_matches('/');
+        if remainder.is_empty() {
+            dataset
+        } else {
+            format!("{dataset}/{remainder}")
+        }
+    })
 }

@@ -1,16 +1,18 @@
 //! Container rootfs management — create from image, destroy.
 //!
 //! Containers never mount the image directory directly. Instead, a copy
-//! (or CoW snapshot on btrfs/bcachefs) is created under the pool's fs/ directory.
+//! (or CoW snapshot on btrfs/bcachefs/zfs) is created under the pool's fs/ directory.
 //!
 //! On btrfs/bcachefs, images are stored as subvolumes and container rootfs
-//! creation uses instant O(1) CoW snapshots. On other filesystems, cp -a
-//! with --reflink=auto is used (O(n) in file count but CoW at file level
-//! when the filesystem supports reflinks).
+//! creation uses instant O(1) CoW snapshots. On ZFS, images are stored as
+//! datasets and container rootfs creation uses instant CoW clones.
+//! On other filesystems, cp -a with --reflink=auto is used (O(n) in file
+//! count but CoW at file level when the filesystem supports reflinks).
 
 use crate::error::{Error, Result};
 use crate::storage::StoragePool;
 use crate::storage::fs_detect::FsType;
+use crate::storage::zfs;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,6 +56,12 @@ pub fn create_container_rootfs(
                 "created bcachefs snapshot for container '{container_name}' from image '{image_name}'"
             );
         }
+        FsType::Zfs => {
+            zfs::zfs_clone(&image_path, &container_path)?;
+            tracing::info!(
+                "created zfs clone for container '{container_name}' from image '{image_name}'"
+            );
+        }
         _ => {
             cp_reflink(&image_path, &container_path)?;
         }
@@ -83,6 +91,7 @@ pub fn destroy_container_rootfs_by_path(container_path: PathBuf, fs_type: FsType
     match fs_type {
         FsType::Btrfs => btrfs_subvolume_delete(&container_path)?,
         FsType::Bcachefs => bcachefs_subvolume_delete(&container_path)?,
+        FsType::Zfs => zfs::zfs_dataset_destroy(&container_path)?,
         _ => {
             fs::remove_dir_all(&container_path).map_err(|e| {
                 Error::Other(format!(
@@ -202,6 +211,7 @@ pub fn check_snapshot_tool(fs_type: &FsType) -> bool {
     match fs_type {
         FsType::Btrfs => which("btrfs"),
         FsType::Bcachefs => which("bcachefs"),
+        FsType::Zfs => which("zfs"),
         _ => true, // no tool needed for cp -a
     }
 }
@@ -245,6 +255,7 @@ pub fn snapshot_container_to_image(
         match pool.fs_type {
             FsType::Btrfs => btrfs_subvolume_delete(&image_path)?,
             FsType::Bcachefs => bcachefs_subvolume_delete(&image_path)?,
+            FsType::Zfs => zfs::zfs_dataset_destroy(&image_path)?,
             _ => {
                 fs::remove_dir_all(&image_path).map_err(|e| {
                     Error::Other(format!(
@@ -259,6 +270,7 @@ pub fn snapshot_container_to_image(
     match pool.fs_type {
         FsType::Btrfs => btrfs_snapshot(&container_path, &image_path)?,
         FsType::Bcachefs => bcachefs_snapshot(&container_path, &image_path)?,
+        FsType::Zfs => zfs::zfs_clone(&container_path, &image_path)?,
         _ => {
             cp_reflink(&container_path, &image_path)?;
         }

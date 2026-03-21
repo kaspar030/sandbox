@@ -9,12 +9,14 @@ const BCACHEFS_SUPER_MAGIC: i64 = 0xCA451A4E_u32 as i64;
 const EXT4_SUPER_MAGIC: i64 = 0xEF53;
 const XFS_SUPER_MAGIC: i64 = 0x58465342;
 const TMPFS_MAGIC: i64 = 0x01021994;
+const ZFS_SUPER_MAGIC: i64 = 0x2FC12FC1;
 
 /// Known filesystem types relevant to container operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsType {
     Btrfs,
     Bcachefs,
+    Zfs,
     Ext4,
     Xfs,
     Tmpfs,
@@ -24,15 +26,21 @@ pub enum FsType {
 impl FsType {
     /// Can this filesystem create CoW snapshots?
     pub fn supports_snapshots(&self) -> bool {
-        matches!(self, FsType::Btrfs | FsType::Bcachefs)
+        matches!(self, FsType::Btrfs | FsType::Bcachefs | FsType::Zfs)
     }
 
     /// Does this filesystem support idmapped mounts (FS_ALLOW_IDMAP)?
     /// Verified from kernel source for each filesystem.
+    /// ZFS supports idmapped mounts since OpenZFS 2.2.
     pub fn supports_idmap(&self) -> bool {
         matches!(
             self,
-            FsType::Btrfs | FsType::Bcachefs | FsType::Ext4 | FsType::Xfs | FsType::Tmpfs
+            FsType::Btrfs
+                | FsType::Bcachefs
+                | FsType::Zfs
+                | FsType::Ext4
+                | FsType::Xfs
+                | FsType::Tmpfs
         )
     }
 
@@ -41,6 +49,7 @@ impl FsType {
         match self {
             FsType::Btrfs => "btrfs",
             FsType::Bcachefs => "bcachefs",
+            FsType::Zfs => "zfs",
             FsType::Ext4 => "ext4",
             FsType::Xfs => "xfs",
             FsType::Tmpfs => "tmpfs",
@@ -68,6 +77,7 @@ pub fn detect_filesystem(path: &Path) -> Result<FsType> {
     Ok(match magic {
         BTRFS_SUPER_MAGIC => FsType::Btrfs,
         BCACHEFS_SUPER_MAGIC => FsType::Bcachefs,
+        ZFS_SUPER_MAGIC => FsType::Zfs,
         EXT4_SUPER_MAGIC => FsType::Ext4,
         XFS_SUPER_MAGIC => FsType::Xfs,
         TMPFS_MAGIC => FsType::Tmpfs,
@@ -83,11 +93,13 @@ mod tests {
     fn test_fs_type_properties() {
         assert!(FsType::Btrfs.supports_snapshots());
         assert!(FsType::Bcachefs.supports_snapshots());
+        assert!(FsType::Zfs.supports_snapshots());
         assert!(!FsType::Ext4.supports_snapshots());
         assert!(!FsType::Xfs.supports_snapshots());
 
         assert!(FsType::Btrfs.supports_idmap());
         assert!(FsType::Bcachefs.supports_idmap());
+        assert!(FsType::Zfs.supports_idmap());
         assert!(FsType::Ext4.supports_idmap());
         assert!(FsType::Xfs.supports_idmap());
         assert!(FsType::Tmpfs.supports_idmap());
@@ -104,6 +116,7 @@ mod tests {
     #[test]
     fn test_display() {
         assert_eq!(format!("{}", FsType::Btrfs), "btrfs");
+        assert_eq!(format!("{}", FsType::Zfs), "zfs");
         assert_eq!(format!("{}", FsType::Other(0xABCD)), "unknown(0xABCD)");
     }
 }

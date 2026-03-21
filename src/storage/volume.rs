@@ -1,12 +1,14 @@
 //! Named volume management.
 //!
 //! Volumes are persistent filesystems stored in `<pool>/volumes/<name>/`.
-//! On btrfs/bcachefs, they are subvolumes. On ext4/xfs, plain directories.
+//! On btrfs/bcachefs, they are subvolumes. On ZFS, they are datasets.
+//! On ext4/xfs, plain directories.
 
 use crate::error::{Error, Result};
 use crate::storage::StoragePool;
 use crate::storage::container_fs;
 use crate::storage::fs_detect::FsType;
+use crate::storage::zfs;
 use sandbox_proto::VolumeInfo;
 use std::fs;
 
@@ -22,6 +24,7 @@ pub fn create_volume(pool: &StoragePool, name: &str) -> Result<()> {
     match pool.fs_type {
         FsType::Btrfs => container_fs::btrfs_subvolume_create(&path)?,
         FsType::Bcachefs => container_fs::bcachefs_subvolume_create(&path)?,
+        FsType::Zfs => zfs::zfs_dataset_create_leaf(&path)?,
         _ => {
             fs::create_dir_all(&path)
                 .map_err(|e| Error::Other(format!("mkdir {}: {e}", path.display())))?;
@@ -43,6 +46,7 @@ pub fn remove_volume(pool: &StoragePool, name: &str) -> Result<()> {
     match pool.fs_type {
         FsType::Btrfs => container_fs::btrfs_subvolume_delete(&path)?,
         FsType::Bcachefs => container_fs::bcachefs_subvolume_delete(&path)?,
+        FsType::Zfs => zfs::zfs_dataset_destroy(&path)?,
         _ => {
             fs::remove_dir_all(&path)
                 .map_err(|e| Error::Other(format!("rm {}: {e}", path.display())))?;
@@ -89,9 +93,19 @@ fn volumes_dir(pool: &StoragePool) -> std::path::PathBuf {
 }
 
 /// Ensure the volumes directory exists.
+///
+/// On ZFS, creates a dataset so that child datasets (one per volume)
+/// can be created under it.
 pub fn ensure_volumes_dir(pool: &StoragePool) -> Result<()> {
     let dir = volumes_dir(pool);
-    fs::create_dir_all(&dir).map_err(|e| Error::Other(format!("mkdir {}: {e}", dir.display())))
+    if dir.exists() {
+        return Ok(());
+    }
+    match pool.fs_type {
+        FsType::Zfs => zfs::zfs_dataset_create_leaf(&dir),
+        _ => fs::create_dir_all(&dir)
+            .map_err(|e| Error::Other(format!("mkdir {}: {e}", dir.display()))),
+    }
 }
 
 /// Validate a volume name.

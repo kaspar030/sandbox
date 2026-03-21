@@ -51,11 +51,15 @@ pub fn run_daemon(
         std::fs::create_dir_all(parent)?;
     }
     std::fs::create_dir_all(&mounts_dir)?;
-    persist::ensure_state_dir(&state_dir).map_err(Error::Io)?;
 
-    // Initialize storage manager
+    // Initialize storage manager BEFORE creating the state dir.
+    // On ZFS, StorageManager::init may create ZFS datasets that mount
+    // over the data_dir, so any directories created beforehand would be
+    // hidden. The state dir must be created after storage init.
     let storage = StorageManager::init(Path::new(data_dir))?;
     let storage = Arc::new(storage);
+
+    persist::ensure_state_dir(&state_dir).map_err(Error::Io)?;
 
     // Remove stale socket
     let _ = std::fs::remove_file(socket_path);

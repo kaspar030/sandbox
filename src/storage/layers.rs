@@ -15,6 +15,7 @@ use crate::storage::container_fs;
 use crate::storage::fs_detect::FsType;
 use crate::storage::oci::{ImageConfig, PullResult};
 use crate::storage::unpack;
+use crate::storage::zfs;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -176,9 +177,20 @@ pub fn find_cached_layers(pool: &StoragePool, chain_ids: &[String]) -> HashSet<u
 // --- Layer extraction ---
 
 /// Ensure pool directories exist.
+///
+/// On ZFS, creates datasets for the layers directory so that child
+/// datasets (one per layer) can be created under it.
+/// The image_meta directory is always a plain directory (it only
+/// holds JSON files, not datasets).
 pub fn ensure_dirs(pool: &StoragePool) -> Result<()> {
-    fs::create_dir_all(layers_dir(pool))
-        .map_err(|e| Error::Other(format!("create layers dir: {e}")))?;
+    let layers = layers_dir(pool);
+    if !layers.exists() {
+        match pool.fs_type {
+            FsType::Zfs => zfs::zfs_dataset_create_leaf(&layers)?,
+            _ => fs::create_dir_all(&layers)
+                .map_err(|e| Error::Other(format!("create layers dir: {e}")))?,
+        }
+    }
     fs::create_dir_all(image_meta_dir(pool))
         .map_err(|e| Error::Other(format!("create image_meta dir: {e}")))?;
     Ok(())
@@ -313,6 +325,9 @@ pub fn create_image_from_pull(
             FsType::Bcachefs => {
                 let _ = container_fs::bcachefs_subvolume_delete(&image_path);
             }
+            FsType::Zfs => {
+                let _ = zfs::zfs_dataset_destroy(&image_path);
+            }
             _ => {
                 let _ = fs::remove_dir_all(&image_path);
             }
@@ -378,6 +393,7 @@ fn create_layer_subvolume(pool: &StoragePool, path: &Path) -> Result<()> {
     match pool.fs_type {
         FsType::Btrfs => container_fs::btrfs_subvolume_create(path),
         FsType::Bcachefs => container_fs::bcachefs_subvolume_create(path),
+        FsType::Zfs => zfs::zfs_dataset_create_leaf(path),
         _ => fs::create_dir_all(path)
             .map_err(|e| Error::Other(format!("mkdir {}: {e}", path.display()))),
     }
@@ -415,6 +431,7 @@ fn snapshot_layer(pool: &StoragePool, source: &Path, dest: &Path) -> Result<()> 
             }
             Ok(())
         }
+        FsType::Zfs => zfs::zfs_clone(source, dest),
         _ => {
             // cp -a --reflink=auto
             let output = std::process::Command::new("cp")
@@ -441,6 +458,9 @@ fn delete_layer_subvolume(pool: &StoragePool, path: &Path) {
         }
         FsType::Bcachefs => {
             let _ = container_fs::bcachefs_subvolume_delete(path);
+        }
+        FsType::Zfs => {
+            let _ = zfs::zfs_dataset_destroy(path);
         }
         _ => {
             let _ = fs::remove_dir_all(path);

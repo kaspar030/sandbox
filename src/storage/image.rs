@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::storage::StoragePool;
 use crate::storage::container_fs;
 use crate::storage::fs_detect::FsType;
+use crate::storage::zfs;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -72,6 +73,23 @@ fn import_from_dir(pool: &StoragePool, name: &str, source: &Path) -> Result<()> 
                 )));
             }
         }
+        FsType::Zfs => {
+            // Create ZFS dataset, then copy contents into it
+            zfs::zfs_dataset_create_leaf(&target)?;
+            let status = Command::new("cp")
+                .args(["-a", "-T", "--"])
+                .arg(source)
+                .arg(&target)
+                .status()
+                .map_err(|e| Error::Other(format!("failed to run cp: {e}")))?;
+            if !status.success() {
+                let _ = zfs::zfs_dataset_destroy(&target);
+                return Err(Error::Other(format!(
+                    "cp into zfs dataset failed with exit code {:?}",
+                    status.code()
+                )));
+            }
+        }
         _ => {
             // Regular cp -a
             let status = Command::new("cp")
@@ -113,10 +131,11 @@ fn import_from_tar(pool: &StoragePool, name: &str, source: &Path) -> Result<()> 
         )));
     }
 
-    // Create the target as a subvolume (btrfs/bcachefs) or directory (other)
+    // Create the target as a subvolume/dataset (btrfs/bcachefs/zfs) or directory (other)
     match pool.fs_type {
         FsType::Btrfs => container_fs::btrfs_subvolume_create(&target)?,
         FsType::Bcachefs => container_fs::bcachefs_subvolume_create(&target)?,
+        FsType::Zfs => zfs::zfs_dataset_create_leaf(&target)?,
         _ => {
             fs::create_dir_all(&target)
                 .map_err(|e| Error::Other(format!("failed to create {}: {e}", target.display())))?;
@@ -155,6 +174,9 @@ fn import_from_tar(pool: &StoragePool, name: &str, source: &Path) -> Result<()> 
             }
             FsType::Bcachefs => {
                 let _ = container_fs::bcachefs_subvolume_delete(&target);
+            }
+            FsType::Zfs => {
+                let _ = zfs::zfs_dataset_destroy(&target);
             }
             _ => {
                 let _ = fs::remove_dir_all(&target);
@@ -233,7 +255,7 @@ pub fn list_images(
         };
 
         let exclusive_bytes = if show_exclusive {
-            btrfs_exclusive_size(&path)
+            exclusive_size(&pool.fs_type, &path)
         } else {
             None
         };
@@ -397,32 +419,40 @@ fn build_layer_details(
         .collect()
 }
 
-/// Get exclusive size of a btrfs subvolume using qgroup.
-/// Returns None if not btrfs or quotas not enabled.
-fn btrfs_exclusive_size(path: &Path) -> Option<u64> {
-    let output = Command::new("btrfs")
-        .args(["qgroup", "show", "--raw", "-f", "--"])
-        .arg(path)
-        .output()
-        .ok()?;
+/// Get exclusive size of a subvolume/dataset.
+///
+/// On btrfs: uses qgroup exclusive size.
+/// On ZFS: uses the `used` property.
+/// Returns None if not supported or quotas not enabled.
+fn exclusive_size(fs_type: &FsType, path: &Path) -> Option<u64> {
+    match fs_type {
+        FsType::Btrfs => {
+            let output = Command::new("btrfs")
+                .args(["qgroup", "show", "--raw", "-f", "--"])
+                .arg(path)
+                .output()
+                .ok()?;
 
-    if !output.status.success() {
-        return None; // quotas not enabled or not btrfs
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Parse the last data line: "0/NNN    <rfer>    <excl>"
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.starts_with("0/") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 {
-                return parts[2].parse().ok();
+            if !output.status.success() {
+                return None; // quotas not enabled or not btrfs
             }
-        }
-    }
 
-    None
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Parse the last data line: "0/NNN    <rfer>    <excl>"
+            for line in stdout.lines() {
+                let line = line.trim();
+                if line.starts_with("0/") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 {
+                        return parts[2].parse().ok();
+                    }
+                }
+            }
+            None
+        }
+        FsType::Zfs => zfs::zfs_exclusive_size(path),
+        _ => None,
+    }
 }
 
 /// Remove an image.
@@ -441,6 +471,7 @@ pub fn remove_image(pool: &StoragePool, name: &str) -> Result<()> {
     match pool.fs_type {
         FsType::Btrfs => container_fs::btrfs_subvolume_delete(&path)?,
         FsType::Bcachefs => container_fs::bcachefs_subvolume_delete(&path)?,
+        FsType::Zfs => zfs::zfs_dataset_destroy(&path)?,
         _ => {
             fs::remove_dir_all(&path)
                 .map_err(|e| Error::Other(format!("failed to remove image '{name}': {e}")))?;
