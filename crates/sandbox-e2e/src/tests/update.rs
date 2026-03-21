@@ -131,7 +131,7 @@ pub fn test_update_running(ctx: &TestContext) -> Result<(), String> {
         return Err("create failed".into());
     }
 
-    if ctx.cli_fails(&["start", "-d", name, "--", "sleep", "60"]) {
+    if ctx.cli_fails(&["start", name, "--", "sleep", "60"]) {
         let _ = ctx.cli(&["destroy", name]);
         return Err("start failed".into());
     }

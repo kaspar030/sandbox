@@ -143,15 +143,19 @@ containers:
         ));
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // Verify the container has a bridged IP
-    let output = ctx.cli(&["exec", "e2e-stack-net-nettest", "--", "ifconfig"]);
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    // Poll for the container to get a bridged IP (may take a moment after stack up)
+    let mut stdout = String::new();
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let output = ctx.cli(&["exec", "e2e-stack-net-nettest", "--", "ifconfig"]);
+        stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        if stdout.contains("inet addr:10.") {
+            break;
+        }
+    }
 
     let _ = ctx.cli(&["stack", "down", "e2e-stack-net"]);
 
-    // Stack auto-creates a network with an auto-allocated subnet (10.0.N.0/24)
     if !stdout.contains("inet addr:10.") {
         return Err(format!("expected bridged IP (10.x.x.x), got: {stdout}"));
     }

@@ -985,16 +985,9 @@ impl ContainerManager {
             Request::PoolList => self.handle_pool_list(),
             Request::Shutdown => {
                 tracing::info!("shutdown requested");
-                let names: Vec<String> = self.containers.keys().cloned().collect();
-                for name in names {
-                    let _ = self.handle_destroy(&name);
-                }
-                let pending = self.pending_cleanup_count();
-                if pending > 0 {
-                    tracing::info!(
-                        "shutdown: {pending} background rootfs cleanup(s) still in progress"
-                    );
-                }
+                // Don't destroy containers — graceful_shutdown() will handle
+                // running containers, and non-running containers should survive
+                // for recovery on next daemon start.
                 self.shutdown_requested = true;
                 HandleResult::response_only(Response::Ok)
             }
