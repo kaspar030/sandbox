@@ -63,7 +63,8 @@ serde_json = "1"
 postcard = { version = "1", features = ["alloc"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "unstable-ext"] }
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
 
 # Logging
 tracing = "0.1"

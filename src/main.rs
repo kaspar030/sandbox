@@ -1,6 +1,8 @@
+mod completer;
 mod daemon;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::ArgValueCandidates;
 use sandbox_client::Client;
 use sandbox_proto::{
     BindMount, CapabilitySpec, CgroupSpec, ContainerSpec, IdMapping, NetworkMode, Request,
@@ -33,11 +35,11 @@ enum Commands {
         name: Option<String>,
 
         /// Image to use as the root filesystem
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completer::image_completer))]
         image: String,
 
         /// Storage pool (default: main)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completer::pool_completer))]
         pool: Option<String>,
 
         /// Set container hostname
@@ -126,9 +128,9 @@ enum Commands {
         /// Container name (auto-generated if omitted)
         #[arg(long)]
         name: Option<String>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completer::image_completer))]
         image: String,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completer::pool_completer))]
         pool: Option<String>,
         #[arg(long)]
         hostname: Option<String>,
@@ -188,6 +190,7 @@ enum Commands {
     /// Start a previously created container
     Start {
         /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
 
         /// Override the command
@@ -198,6 +201,7 @@ enum Commands {
     /// Stop a running container
     Stop {
         /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
 
         /// Timeout in seconds before SIGKILL
@@ -208,12 +212,14 @@ enum Commands {
     /// Destroy a container
     Destroy {
         /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
     },
 
     /// Snapshot a container's rootfs into a reusable image
     Snapshot {
         /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
 
         /// Image name to create
@@ -235,6 +241,7 @@ enum Commands {
     /// Show detailed information about a container
     Inspect {
         /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
 
         /// Output as JSON
@@ -245,6 +252,7 @@ enum Commands {
     /// Execute a command in a running container
     Exec {
         /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
 
         /// Run as user UID or UID:GID (default: 0, container root)
@@ -328,14 +336,14 @@ enum ImageAction {
         source: String,
 
         /// Storage pool (default: main)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completer::pool_completer))]
         pool: Option<String>,
     },
     /// List images
     #[command(alias = "ls")]
     List {
         /// Storage pool (default: main)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completer::pool_completer))]
         pool: Option<String>,
 
         /// Show image sizes (slower — walks directory tree)
@@ -353,19 +361,21 @@ enum ImageAction {
     /// Show detailed image information
     Inspect {
         /// Image name
+        #[arg(add = ArgValueCandidates::new(completer::image_completer))]
         name: String,
 
         /// Storage pool (default: main)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completer::pool_completer))]
         pool: Option<String>,
     },
     /// Remove an image
     Rm {
         /// Image name
+        #[arg(add = ArgValueCandidates::new(completer::image_completer))]
         name: String,
 
         /// Storage pool (default: main)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completer::pool_completer))]
         pool: Option<String>,
     },
     /// Pull an image from an OCI registry (e.g., Docker Hub)
@@ -378,7 +388,7 @@ enum ImageAction {
         name: Option<String>,
 
         /// Storage pool (default: main)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completer::pool_completer))]
         pool: Option<String>,
     },
 }
@@ -388,6 +398,7 @@ enum MountAction {
     /// Add a bind mount to a running container
     Add {
         /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
 
         /// Mount spec: SOURCE[:TARGET][:ro|:rw] or SOURCE::ro
@@ -405,6 +416,7 @@ enum MountAction {
     #[command(alias = "rm")]
     Remove {
         /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
 
         /// Target path inside the container
@@ -414,11 +426,13 @@ enum MountAction {
     #[command(alias = "ls")]
     List {
         /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
     },
     /// Mount a block device inside a container (daemon-assisted)
     Block {
         /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
         /// Device path inside the container (e.g., /dev/myblk)
         device: String,
@@ -450,6 +464,7 @@ enum NetworkAction {
     #[command(alias = "rm")]
     Remove {
         /// Network name
+        #[arg(add = ArgValueCandidates::new(completer::network_completer))]
         name: String,
     },
 }
@@ -465,11 +480,13 @@ enum StackAction {
     /// Tear down a stack
     Down {
         /// Stack name
+        #[arg(add = ArgValueCandidates::new(completer::stack_completer))]
         name: String,
     },
     /// List containers in a stack
     Ps {
         /// Stack name
+        #[arg(add = ArgValueCandidates::new(completer::stack_completer))]
         name: String,
     },
     /// List all stacks
@@ -497,7 +514,7 @@ enum VolumeAction {
         /// Volume name
         name: String,
         /// Storage pool (default: main)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completer::pool_completer))]
         pool: Option<String>,
         /// Create a block device volume
         #[arg(long)]
@@ -513,21 +530,23 @@ enum VolumeAction {
     #[command(alias = "ls")]
     List {
         /// Storage pool (default: main)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completer::pool_completer))]
         pool: Option<String>,
     },
     /// Remove a volume
     #[command(alias = "rm")]
     Remove {
         /// Volume name
+        #[arg(add = ArgValueCandidates::new(completer::volume_completer))]
         name: String,
         /// Storage pool (default: main)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completer::pool_completer))]
         pool: Option<String>,
     },
     /// Attach a volume to a running container
     Attach {
         /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         container: String,
         /// Volume spec: name:/path or name:/path:ro
         spec: String,
@@ -535,6 +554,7 @@ enum VolumeAction {
     /// Detach a volume from a running container
     Detach {
         /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         container: String,
         /// Target path inside the container
         target: String,
@@ -549,6 +569,8 @@ enum PoolAction {
 }
 
 fn main() -> anyhow::Result<()> {
+    clap_complete::env::CompleteEnv::with_factory(Cli::command).complete();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
