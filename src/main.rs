@@ -305,7 +305,8 @@ enum Commands {
         name: String,
     },
 
-    /// Snapshot a container's rootfs into a reusable image
+    /// Snapshot a container's rootfs into a reusable image (deprecated: use `image create --from`)
+    #[command(hide = true)]
     Snapshot {
         /// Container name
         #[arg(add = ArgValueCandidates::new(completer::container_completer))]
@@ -425,6 +426,27 @@ enum DaemonAction {
 
 #[derive(Subcommand)]
 enum ImageAction {
+    /// Create an image from a container's rootfs
+    Create {
+        /// Image name to create
+        name: String,
+
+        /// Source container name
+        #[arg(long, add = ArgValueCandidates::new(completer::container_completer))]
+        from: String,
+
+        /// Force even if container is running on non-CoW filesystem
+        #[arg(long)]
+        force: bool,
+
+        /// Overwrite existing image, adding a new layer on CoW filesystems
+        #[arg(long)]
+        update: bool,
+
+        /// Storage pool (default: main)
+        #[arg(long, add = ArgValueCandidates::new(completer::pool_completer))]
+        pool: Option<String>,
+    },
     /// Import an image from a directory or tar.gz
     Import {
         /// Image name
@@ -1152,6 +1174,21 @@ fn main() -> anyhow::Result<()> {
         Commands::Image { action } => {
             let mut client = Client::connect(cli.socket.as_deref())?;
             match action {
+                ImageAction::Create {
+                    name,
+                    from,
+                    force,
+                    update,
+                    pool: _,
+                } => {
+                    let resp = client.request(&Request::Snapshot {
+                        name: from,
+                        image_name: name,
+                        force,
+                        update,
+                    })?;
+                    print_response(&resp);
+                }
                 ImageAction::Import { name, source, pool } => {
                     let resp = client.request(&Request::ImageImport { name, source, pool })?;
                     print_response(&resp);
