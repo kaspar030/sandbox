@@ -18,10 +18,13 @@ pub fn test_create_idle_default(ctx: &TestContext) -> Result<(), String> {
         return Err("create failed".into());
     }
 
-    // Start (no command override)
-    if ctx.cli_fails(&["start", "-d", name]) {
+    // Start
+    let start_output = ctx.cli(&["start", name]);
+    if !start_output.status.success() {
+        let stderr = String::from_utf8_lossy(&start_output.stderr);
+        let stdout = String::from_utf8_lossy(&start_output.stdout);
         let _ = ctx.cli(&["destroy", name]);
-        return Err("start failed".into());
+        return Err(format!("start failed: stdout={stdout} stderr={stderr}"));
     }
 
     // Should be running
@@ -76,7 +79,7 @@ pub fn test_create_idle_explicit_init(ctx: &TestContext) -> Result<(), String> {
         return Err("create failed".into());
     }
 
-    if ctx.cli_fails(&["start", "-d", name]) {
+    if ctx.cli_fails(&["start", name]) {
         let _ = ctx.cli(&["destroy", name]);
         return Err("start failed".into());
     }
@@ -114,7 +117,7 @@ pub fn test_create_with_command(ctx: &TestContext) -> Result<(), String> {
     }
 
     // Start with a command — init should fork+exec it
-    if ctx.cli_fails(&["start", "-d", name, "--", "sleep", "60"]) {
+    if ctx.cli_fails(&["start", name, "--", "sleep", "60"]) {
         let _ = ctx.cli(&["destroy", name]);
         return Err("start failed".into());
     }
@@ -170,7 +173,7 @@ pub fn test_idle_reaps_zombies(ctx: &TestContext) -> Result<(), String> {
         return Err("create failed".into());
     }
 
-    if ctx.cli_fails(&["start", "-d", name]) {
+    if ctx.cli_fails(&["start", name]) {
         let _ = ctx.cli(&["destroy", name]);
         return Err("start failed".into());
     }

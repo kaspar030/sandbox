@@ -224,16 +224,16 @@ enum Commands {
         clear_env: bool,
 
         // -- Command / Entrypoint --
-        /// Set default command
-        #[arg(long)]
+        /// Set default command (e.g., --command /bin/sh -c "echo hi")
+        #[arg(long, num_args = 1.., allow_hyphen_values = true)]
         command: Vec<String>,
 
         /// Clear the command (revert to idle init if no entrypoint)
         #[arg(long, conflicts_with = "command")]
         no_command: bool,
 
-        /// Set entrypoint
-        #[arg(long)]
+        /// Set entrypoint (e.g., --entrypoint /bin/sh -c)
+        #[arg(long, num_args = 1.., allow_hyphen_values = true)]
         entrypoint: Vec<String>,
 
         /// Clear the entrypoint

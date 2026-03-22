@@ -1114,8 +1114,11 @@ impl ContainerManager {
             });
         }
 
-        self.apply_image_config(&mut spec);
+        // Apply implicit init BEFORE image config — if the user didn't provide
+        // a command or entrypoint, enable init (idle mode). apply_image_config
+        // may later fill in the image's CMD, but init is already set.
         Self::apply_implicit_init(&mut spec);
+        self.apply_image_config(&mut spec);
 
         // Validate and set up bridged networking
         if let Err(e) = Self::validate_publish(&spec) {
@@ -1283,8 +1286,8 @@ impl ContainerManager {
             });
         }
 
-        self.apply_image_config(&mut spec);
         Self::apply_implicit_init(&mut spec);
+        self.apply_image_config(&mut spec);
 
         // Validate and set up bridged networking (IPAM, NAT, port forwarding)
         if let Err(e) = Self::validate_publish(&spec) {
