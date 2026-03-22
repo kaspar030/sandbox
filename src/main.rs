@@ -356,6 +356,11 @@ enum Commands {
         #[arg(short, long)]
         detach: bool,
 
+        /// Disable PTY allocation (pipe stdout/stderr separately).
+        /// Auto-enabled when stdin is not a terminal.
+        #[arg(short = 'T', long = "no-pty")]
+        no_pty: bool,
+
         /// Command to execute
         #[arg(last = true)]
         command: Vec<String>,
@@ -1075,10 +1080,19 @@ fn main() -> anyhow::Result<()> {
             env,
             command,
             detach,
+            no_pty,
         } => {
             let exec_user = user.map(|u| parse_exec_user(&u)).transpose()?;
             let resolved_env = resolve_env(&env);
             let mut client = Client::connect(cli.socket.as_deref())?;
+
+            // Auto-detect: use piped mode when stdin is not a TTY (unless -d)
+            let use_piped = no_pty
+                || (!detach && {
+                    use std::os::fd::AsFd;
+                    !nix::unistd::isatty(std::io::stdin().as_fd()).unwrap_or(false)
+                });
+
             if detach {
                 let resp = client.request(&Request::Exec {
                     name,
@@ -1086,15 +1100,39 @@ fn main() -> anyhow::Result<()> {
                     detach: true,
                     user: exec_user,
                     env: resolved_env,
+                    piped: false,
                 })?;
                 print_response(&resp);
+            } else if use_piped {
+                // Piped mode: separate stdout/stderr
+                let (resp, pipe_fds) = client.request_with_pipe_fds(&Request::Exec {
+                    name,
+                    command,
+                    detach: false,
+                    user: exec_user,
+                    env: resolved_env,
+                    piped: true,
+                })?;
+                if let Response::Error { .. } = &resp {
+                    print_response(&resp);
+                } else if let Some((stdout_fd, stderr_fd)) = pipe_fds {
+                    piped_session(stdout_fd, stderr_fd)?;
+                    let exit_resp = client.read_exit_code()?;
+                    let code = match exit_resp {
+                        Response::ExecExited { exit_code } => exit_code,
+                        _ => 0,
+                    };
+                    std::process::exit(code);
+                }
             } else {
+                // Interactive PTY mode
                 let (resp, pty_fd) = client.request_with_fd(&Request::Exec {
                     name,
                     command,
                     detach: false,
                     user: exec_user,
                     env: resolved_env,
+                    piped: false,
                 })?;
                 if let Response::Error { .. } = &resp {
                     print_response(&resp);
@@ -1520,6 +1558,7 @@ fn print_response(resp: &Response) {
         }
         Response::Destroyed { name } => println!("Destroyed container: {name}"),
         Response::ExecStarted { pid } => println!("Exec started (PID {pid})"),
+        Response::ExecStartedPiped { pid } => println!("Exec started piped (PID {pid})"),
         Response::ImageImported { name } => println!("Imported image: {name}"),
         Response::ImageRemoved { name } => println!("Removed image: {name}"),
         Response::ContainerList(_) => {}
@@ -2071,6 +2110,54 @@ fn interactive_session(pty_master: std::os::fd::OwnedFd) -> anyhow::Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+/// Run a piped exec session: read from stdout and stderr pipe fds,
+/// write to local stdout and stderr respectively.
+fn piped_session(
+    stdout_fd: std::os::fd::OwnedFd,
+    stderr_fd: std::os::fd::OwnedFd,
+) -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+
+    // Thread: stderr pipe → local stderr
+    let stderr_handle = std::thread::spawn(move || {
+        let mut stderr_file = std::fs::File::from(stderr_fd);
+        let mut local_stderr = std::io::stderr().lock();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stderr_file.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if local_stderr.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                    let _ = local_stderr.flush();
+                }
+            }
+        }
+    });
+
+    // Main thread: stdout pipe → local stdout
+    let mut stdout_file = std::fs::File::from(stdout_fd);
+    let mut local_stdout = std::io::stdout().lock();
+    let mut buf = [0u8; 4096];
+    loop {
+        match stdout_file.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if local_stdout.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+                let _ = local_stdout.flush();
+            }
+        }
+    }
+
+    // Wait for stderr thread to finish
+    let _ = stderr_handle.join();
 
     Ok(())
 }

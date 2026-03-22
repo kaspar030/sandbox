@@ -98,6 +98,21 @@ fn all_tests() -> Vec<Test> {
             "exec_killed_on_stop",
             tests::exec::test_exec_killed_on_stop,
         ),
+        Test::Immutable(
+            "Exec",
+            "exec_piped_stdout_stderr",
+            tests::exec::test_exec_piped_stdout_stderr,
+        ),
+        Test::Immutable(
+            "Exec",
+            "exec_piped_exit_code",
+            tests::exec::test_exec_piped_exit_code,
+        ),
+        Test::Immutable(
+            "Exec",
+            "exec_piped_explicit",
+            tests::exec::test_exec_piped_explicit,
+        ),
         // Mounts
         Test::Immutable(
             "Mounts",

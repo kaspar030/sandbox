@@ -56,3 +56,50 @@ pub fn recv_fd(socket: &impl AsRawFd) -> Result<OwnedFd> {
         "no file descriptor received via SCM_RIGHTS".to_string(),
     ))
 }
+
+/// Send two file descriptors over a Unix domain socket using SCM_RIGHTS.
+///
+/// Used for piped exec mode (stdout + stderr fds).
+pub fn send_fds(socket: &impl AsRawFd, fd1: &impl AsRawFd, fd2: &impl AsRawFd) -> Result<()> {
+    let fds = [fd1.as_raw_fd(), fd2.as_raw_fd()];
+    let cmsg = ControlMessage::ScmRights(&fds);
+    let iov = [IoSlice::new(&[0u8])];
+
+    sendmsg::<()>(socket.as_raw_fd(), &iov, &[cmsg], MsgFlags::empty(), None)
+        .map_err(|e| Error::Other(format!("sendmsg SCM_RIGHTS (2 fds) failed: {e}")))?;
+
+    Ok(())
+}
+
+/// Receive two file descriptors from a Unix domain socket via SCM_RIGHTS.
+///
+/// Returns (fd1, fd2) as OwnedFds. Used for piped exec mode (stdout, stderr).
+pub fn recv_fds(socket: &impl AsRawFd) -> Result<(OwnedFd, OwnedFd)> {
+    let mut buf = [0u8; 1];
+    let mut iov = [IoSliceMut::new(&mut buf)];
+    let mut cmsg_buf = nix::cmsg_space!([RawFd; 2]);
+
+    let msg = recvmsg::<()>(
+        socket.as_raw_fd(),
+        &mut iov,
+        Some(&mut cmsg_buf),
+        MsgFlags::empty(),
+    )
+    .map_err(|e| Error::Other(format!("recvmsg SCM_RIGHTS (2 fds) failed: {e}")))?;
+
+    let cmsgs = msg
+        .cmsgs()
+        .map_err(|e| Error::Other(format!("cmsgs truncated: {e}")))?;
+
+    for cmsg in cmsgs {
+        if let ControlMessageOwned::ScmRights(fds) = cmsg {
+            if fds.len() >= 2 {
+                return Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) });
+            }
+        }
+    }
+
+    Err(Error::Other(
+        "expected 2 file descriptors via SCM_RIGHTS".to_string(),
+    ))
+}

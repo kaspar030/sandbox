@@ -121,6 +121,34 @@ impl Client {
         }
     }
 
+    /// Send a request and receive a response, expecting two pipe fds for piped exec.
+    ///
+    /// Returns (response, Option<(stdout_fd, stderr_fd)>).
+    pub fn request_with_pipe_fds(
+        &mut self,
+        req: &Request,
+    ) -> Result<(Response, Option<(OwnedFd, OwnedFd)>)> {
+        sandbox_proto::write_message(&mut self.stream, req)?;
+        let response: Response = sandbox_proto::read_message(&mut self.stream)?;
+
+        if matches!(response, Response::ExecStartedPiped { .. }) {
+            // Remove read timeout for the piped session
+            self.stream
+                .set_read_timeout(None)
+                .map_err(Error::Connection)?;
+
+            match scm_rights::recv_fds(&self.stream) {
+                Ok(fds) => Ok((response, Some(fds))),
+                Err(e) => {
+                    tracing::warn!("no pipe fds received: {e}");
+                    Ok((response, None))
+                }
+            }
+        } else {
+            Ok((response, None))
+        }
+    }
+
     /// Read the trailing exit code message after an interactive session ends.
     ///
     /// Call this after the PTY fd from [`request_with_fd`] reaches EOF.

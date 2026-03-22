@@ -222,3 +222,88 @@ pub fn test_exec_killed_on_stop(ctx: &TestContext) -> Result<(), String> {
     let _ = ctx.cli(&["destroy", name]);
     Ok(())
 }
+
+/// Test piped exec: stdout and stderr are separate.
+pub fn test_exec_piped_stdout_stderr(ctx: &TestContext) -> Result<(), String> {
+    let name = "exec-piped";
+    ctx.cli_ok(&[
+        "run", "--name", name, "--image", "alpine", "--init", "-d", "--", "sleep", "300",
+    ]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Run a command that writes to both stdout and stderr
+    let output = ctx.cli(&[
+        "exec",
+        "-T",
+        name,
+        "--",
+        "sh",
+        "-c",
+        "echo OUT; echo ERR >&2",
+    ]);
+    let _ = ctx.cli(&["stop", "--timeout", "2", name]);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !stdout.contains("OUT") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("expected 'OUT' on stdout, got: {stdout}"));
+    }
+    if !stderr.contains("ERR") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("expected 'ERR' on stderr, got: {stderr}"));
+    }
+    // Verify stdout does NOT contain ERR (they should be separate)
+    if stdout.contains("ERR") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("stderr leaked into stdout: {stdout}"));
+    }
+
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
+
+/// Test piped exec exit code propagation.
+pub fn test_exec_piped_exit_code(ctx: &TestContext) -> Result<(), String> {
+    let name = "exec-piped-exit";
+    ctx.cli_ok(&[
+        "run", "--name", name, "--image", "alpine", "--init", "-d", "--", "sleep", "300",
+    ]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Run a command that exits with code 42
+    let output = ctx.cli(&["exec", "-T", name, "--", "sh", "-c", "exit 42"]);
+    let _ = ctx.cli(&["stop", "--timeout", "2", name]);
+
+    let code = output.status.code().unwrap_or(-1);
+    if code != 42 {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("expected exit code 42, got: {code}"));
+    }
+
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
+
+/// Test that -T flag works explicitly (even when stdin is a tty).
+pub fn test_exec_piped_explicit(ctx: &TestContext) -> Result<(), String> {
+    let name = "exec-piped-explicit";
+    ctx.cli_ok(&[
+        "run", "--name", name, "--image", "alpine", "--init", "-d", "--", "sleep", "300",
+    ]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // -T forces piped mode; just verify it works
+    let output = ctx.cli(&["exec", "-T", name, "--", "echo", "piped-ok"]);
+    let _ = ctx.cli(&["stop", "--timeout", "2", name]);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !stdout.contains("piped-ok") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("expected 'piped-ok', got: {stdout}"));
+    }
+
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}

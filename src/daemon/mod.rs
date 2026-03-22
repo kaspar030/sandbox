@@ -347,6 +347,16 @@ async fn handle_client(
         }
     }
 
+    // If we have pipe fds (piped exec mode), send them via SCM_RIGHTS.
+    if let Some((ref stdout_fd, ref stderr_fd)) = result.pipe_fds {
+        let socket_ref = stream.get_ref();
+        if let Err(e) = scm_rights::send_fds(socket_ref, stdout_fd, stderr_fd) {
+            tracing::debug!("pipe fd send failed (client may have disconnected): {e}");
+        } else {
+            tracing::debug!("sent stdout+stderr pipe fds to client");
+        }
+    }
+
     // Interactive container start: monitor pidfd and send exit code to client
     if let Response::Started { ref name, .. } = result.response {
         let name = name.clone();
@@ -377,22 +387,34 @@ async fn handle_client(
         }
     }
 
-    // Interactive exec: monitor exec pidfd and send exit code to client
-    if let Response::ExecStarted { pid } = result.response {
-        if let Some(exec_pidfd) = result.exec_pidfd {
-            let has_pty = result.pty_master.is_some();
-            if has_pty {
-                // Interactive exec: keep connection alive, send exit code
-                let exit_code = await_exec_pidfd(exec_pidfd, pid as i32).await;
-                let _ = write_async_message(&mut stream, &Response::ExecExited { exit_code }).await;
-            } else {
-                // Detached exec: just reap in background
-                smol::spawn(async move {
-                    let _ = await_exec_pidfd(exec_pidfd, pid as i32).await;
-                })
-                .detach();
+    // Exec monitoring: PTY mode, piped mode, or detached
+    match result.response {
+        Response::ExecStarted { pid } => {
+            if let Some(exec_pidfd) = result.exec_pidfd {
+                let has_pty = result.pty_master.is_some();
+                if has_pty {
+                    // Interactive exec: keep connection alive, send exit code
+                    let exit_code = await_exec_pidfd(exec_pidfd, pid as i32).await;
+                    let _ =
+                        write_async_message(&mut stream, &Response::ExecExited { exit_code }).await;
+                } else {
+                    // Detached exec: just reap in background
+                    smol::spawn(async move {
+                        let _ = await_exec_pidfd(exec_pidfd, pid as i32).await;
+                    })
+                    .detach();
+                }
             }
         }
+        Response::ExecStartedPiped { pid } => {
+            // Piped exec: keep connection alive until process exits, send exit code.
+            // The pipe fds were already sent via SCM_RIGHTS — the client reads from them.
+            if let Some(exec_pidfd) = result.exec_pidfd {
+                let exit_code = await_exec_pidfd(exec_pidfd, pid as i32).await;
+                let _ = write_async_message(&mut stream, &Response::ExecExited { exit_code }).await;
+            }
+        }
+        _ => {}
     }
 
     Ok(())

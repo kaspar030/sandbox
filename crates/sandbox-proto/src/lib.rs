@@ -569,6 +569,10 @@ pub enum Request {
         /// Per-exec environment variables (merged on top of container env).
         #[serde(default)]
         env: Vec<String>,
+        /// If true, use pipes for stdout/stderr instead of a PTY.
+        /// Client receives two fds (stdout, stderr) via SCM_RIGHTS.
+        #[serde(default)]
+        piped: bool,
     },
     /// Import an image from a path (directory or tar.gz).
     ImageImport {
@@ -777,8 +781,10 @@ pub enum Response {
     ContainerInspect(Box<ContainerDetail>),
     /// Container was destroyed.
     Destroyed { name: String },
-    /// Exec started. PTY fd follows via SCM_RIGHTS.
+    /// Exec started (PTY mode). PTY fd follows via SCM_RIGHTS.
     ExecStarted { pid: u32 },
+    /// Exec started (piped mode). Two fds (stdout, stderr) follow via SCM_RIGHTS.
+    ExecStartedPiped { pid: u32 },
     /// Image imported successfully.
     ImageImported { name: String },
     /// Image pulled from registry.

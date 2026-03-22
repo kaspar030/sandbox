@@ -49,6 +49,8 @@ pub struct HandleResult {
     pub pty_master: Option<OwnedFd>,
     /// Pidfd for an exec child (for monitoring + exit code delivery).
     pub exec_pidfd: Option<OwnedFd>,
+    /// Pipe fds for piped exec mode: (stdout_read, stderr_read).
+    pub pipe_fds: Option<(OwnedFd, OwnedFd)>,
 }
 
 impl HandleResult {
@@ -57,6 +59,7 @@ impl HandleResult {
             response,
             pty_master: None,
             exec_pidfd: None,
+            pipe_fds: None,
         }
     }
 
@@ -65,6 +68,7 @@ impl HandleResult {
             response,
             pty_master,
             exec_pidfd: None,
+            pipe_fds: None,
         }
     }
 }
@@ -916,7 +920,8 @@ impl ContainerManager {
                 detach,
                 user,
                 env,
-            } => self.handle_exec(&name, command, detach, user, env),
+                piped,
+            } => self.handle_exec(&name, command, detach, piped, user, env),
             Request::ImageImport { name, source, pool } => {
                 self.handle_image_import(&name, &source, pool.as_deref())
             }
@@ -2642,6 +2647,7 @@ impl ContainerManager {
         name: &str,
         command: Vec<String>,
         detach: bool,
+        piped: bool,
         user: Option<sandbox::protocol::ExecUser>,
         exec_env: Vec<String>,
     ) -> HandleResult {
@@ -2671,15 +2677,26 @@ impl ContainerManager {
 
         // Merge: container env is the base, per-exec env overrides per-key
         let env = merge_env(&container.spec.env, &exec_env);
-        match exec_in_container(pid, name, &command, detach, user, &env) {
+        match exec_in_container(pid, name, &command, detach, piped, user, &env) {
             Ok(result) => {
-                let response = Response::ExecStarted {
-                    pid: result.pid as u32,
-                };
-                HandleResult {
-                    response,
-                    pty_master: result.pty_master,
-                    exec_pidfd: Some(result.pidfd),
+                if result.pipe_fds.is_some() {
+                    HandleResult {
+                        response: Response::ExecStartedPiped {
+                            pid: result.pid as u32,
+                        },
+                        pty_master: None,
+                        exec_pidfd: Some(result.pidfd),
+                        pipe_fds: result.pipe_fds,
+                    }
+                } else {
+                    HandleResult {
+                        response: Response::ExecStarted {
+                            pid: result.pid as u32,
+                        },
+                        pty_master: result.pty_master,
+                        exec_pidfd: Some(result.pidfd),
+                        pipe_fds: None,
+                    }
                 }
             }
             Err(e) => HandleResult::response_only(Response::Error {
@@ -2865,6 +2882,8 @@ struct ExecResult {
     pid: libc::pid_t,
     pidfd: OwnedFd,
     pty_master: Option<OwnedFd>,
+    /// Pipe fds for piped mode: (stdout_read, stderr_read).
+    pipe_fds: Option<(OwnedFd, OwnedFd)>,
 }
 
 /// Merge container env (base) with per-exec env (overrides).
@@ -2917,6 +2936,7 @@ fn exec_in_container(
     container_name: &str,
     command: &[String],
     detach: bool,
+    piped: bool,
     user: Option<sandbox::protocol::ExecUser>,
     env: &[String],
 ) -> Result<ExecResult> {
@@ -2935,9 +2955,20 @@ fn exec_in_container(
         }
     }
 
-    // Allocate PTY for interactive mode
-    let pty = if !detach {
+    // Allocate PTY for interactive mode, or pipes for piped mode
+    let pty = if !detach && !piped {
         Some(sandbox::sys::pty::allocate_pty()?)
+    } else {
+        None
+    };
+
+    // Create pipes for piped mode (stdout + stderr)
+    let pipes = if piped && !detach {
+        let stdout_pipe =
+            nix::unistd::pipe().map_err(|e| Error::Other(format!("stdout pipe failed: {e}")))?;
+        let stderr_pipe =
+            nix::unistd::pipe().map_err(|e| Error::Other(format!("stderr pipe failed: {e}")))?;
+        Some((stdout_pipe, stderr_pipe))
     } else {
         None
     };
@@ -2952,38 +2983,41 @@ fn exec_in_container(
         Ok(nix::unistd::ForkResult::Parent { child }) => {
             let child_pid = child.as_raw();
 
-            // Close slave end in parent
-            if let Some((master, _slave)) = pty {
-                // Open pidfd for the child
-                let pidfd_raw = unsafe { libc::syscall(libc::SYS_pidfd_open, child_pid, 0) };
-                if pidfd_raw < 0 {
-                    return Err(Error::Other(format!(
-                        "pidfd_open failed: {}",
-                        std::io::Error::last_os_error()
-                    )));
-                }
-                let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd_raw as i32) };
+            // Open pidfd for the child
+            let pidfd_raw = unsafe { libc::syscall(libc::SYS_pidfd_open, child_pid, 0) };
+            if pidfd_raw < 0 {
+                return Err(Error::Other(format!(
+                    "pidfd_open failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd_raw as i32) };
 
+            if let Some((master, _slave)) = pty {
+                // PTY mode: return master fd
                 return Ok(ExecResult {
                     pid: child_pid,
                     pidfd,
                     pty_master: Some(master),
+                    pipe_fds: None,
                 });
-            } else {
-                // Detached mode — no PTY
-                let pidfd_raw = unsafe { libc::syscall(libc::SYS_pidfd_open, child_pid, 0) };
-                if pidfd_raw < 0 {
-                    return Err(Error::Other(format!(
-                        "pidfd_open failed: {}",
-                        std::io::Error::last_os_error()
-                    )));
-                }
-                let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd_raw as i32) };
-
+            } else if let Some(((stdout_r, stdout_w), (stderr_r, stderr_w))) = pipes {
+                // Piped mode: close write ends in parent, return read ends
+                drop(stdout_w);
+                drop(stderr_w);
                 return Ok(ExecResult {
                     pid: child_pid,
                     pidfd,
                     pty_master: None,
+                    pipe_fds: Some((stdout_r, stderr_r)),
+                });
+            } else {
+                // Detached mode
+                return Ok(ExecResult {
+                    pid: child_pid,
+                    pidfd,
+                    pty_master: None,
+                    pipe_fds: None,
                 });
             }
         }
@@ -3158,6 +3192,22 @@ fn exec_in_container(
                 eprintln!("pty setup failed: {e}");
                 std::process::exit(1);
             }
+        } else if let Some(((_stdout_r, stdout_w), (_stderr_r, stderr_w))) = pipes {
+            // Piped mode: close read ends, dup write ends to stdout/stderr
+            // stdin from /dev/null
+            use std::os::fd::AsRawFd;
+            drop(_stdout_r);
+            drop(_stderr_r);
+            if let Ok(devnull) = std::fs::File::open("/dev/null") {
+                unsafe { libc::dup2(devnull.as_raw_fd(), libc::STDIN_FILENO) };
+            }
+            unsafe {
+                libc::dup2(stdout_w.as_raw_fd(), libc::STDOUT_FILENO);
+                libc::dup2(stderr_w.as_raw_fd(), libc::STDERR_FILENO);
+            }
+            // Close original fds (now duped)
+            drop(stdout_w);
+            drop(stderr_w);
         }
 
         if command.is_empty() {

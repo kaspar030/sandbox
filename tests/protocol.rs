@@ -136,6 +136,7 @@ fn test_roundtrip_all_request_variants() {
                 gid: 1000,
             }),
             env: vec!["FOO=bar".to_string()],
+            piped: false,
         },
         Request::UpdateContainer {
             name: "foo".to_string(),
@@ -174,6 +175,7 @@ fn test_roundtrip_all_response_variants() {
             name: "test".to_string(),
         },
         Response::ExecStarted { pid: 123 },
+        Response::ExecStartedPiped { pid: 456 },
         Response::Error {
             message: "something went wrong".to_string(),
         },
@@ -543,6 +545,7 @@ fn test_exec_with_env_roundtrip() {
         detach: false,
         user: None,
         env: vec!["FOO=bar".to_string(), "BAZ=qux".to_string()],
+        piped: false,
     };
 
     let encoded = encode_message(&req).unwrap();
@@ -558,5 +561,51 @@ fn test_exec_with_env_roundtrip() {
             assert_eq!(env, vec!["FOO=bar", "BAZ=qux"]);
         }
         _ => panic!("expected Exec request"),
+    }
+}
+
+/// Verify that a piped Exec request roundtrips correctly.
+#[test]
+fn test_exec_piped_roundtrip() {
+    let req = Request::Exec {
+        name: "piped-test".to_string(),
+        command: vec!["make".to_string(), "build".to_string()],
+        detach: false,
+        user: None,
+        env: Vec::new(),
+        piped: true,
+    };
+
+    let encoded = encode_message(&req).unwrap();
+    let (decoded, rest): (Request, &[u8]) = decode_message(&encoded).unwrap();
+    assert!(rest.is_empty());
+
+    match decoded {
+        Request::Exec {
+            name,
+            piped,
+            detach,
+            ..
+        } => {
+            assert_eq!(name, "piped-test");
+            assert!(piped);
+            assert!(!detach);
+        }
+        _ => panic!("expected Exec request"),
+    }
+}
+
+/// Verify that ExecStartedPiped response roundtrips correctly.
+#[test]
+fn test_exec_started_piped_roundtrip() {
+    let resp = Response::ExecStartedPiped { pid: 42 };
+
+    let encoded = encode_message(&resp).unwrap();
+    let (decoded, rest): (Response, &[u8]) = decode_message(&encoded).unwrap();
+    assert!(rest.is_empty());
+
+    match decoded {
+        Response::ExecStartedPiped { pid } => assert_eq!(pid, 42),
+        _ => panic!("expected ExecStartedPiped response"),
     }
 }
