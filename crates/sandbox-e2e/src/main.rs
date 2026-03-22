@@ -361,6 +361,22 @@ fn all_tests() -> Vec<Test> {
             "update_persists",
             tests::update::test_update_persists,
         ),
+        // Session mode
+        Test::Immutable(
+            "Session",
+            "session_multi_request",
+            tests::session::test_session_multi_request,
+        ),
+        Test::Immutable(
+            "Session",
+            "session_single_shot_compat",
+            tests::session::test_session_single_shot_compat,
+        ),
+        Test::Immutable(
+            "Session",
+            "session_piped_exec",
+            tests::session::test_session_piped_exec,
+        ),
         // Persistence (needs mutable context for restart)
         Test::Mutable(
             "Persistence",

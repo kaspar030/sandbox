@@ -1600,6 +1600,7 @@ fn print_response(resp: &Response) {
         Response::NetworkCreated { name } => println!("Created network: {name}"),
         Response::NetworkRemoved { name } => println!("Removed network: {name}"),
         Response::NetworkList(_) => {}
+        Response::SessionEnabled => println!("Session enabled"),
         Response::Error { message } => {
             eprintln!("Error: {message}");
             std::process::exit(1);

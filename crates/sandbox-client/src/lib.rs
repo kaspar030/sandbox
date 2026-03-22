@@ -77,6 +77,22 @@ impl Client {
         Ok(Self { stream })
     }
 
+    /// Enable session mode on this connection.
+    ///
+    /// After calling this, the connection stays alive for multiple requests.
+    /// Without this, the daemon closes the connection after one request-response
+    /// cycle (backward-compatible single-shot mode).
+    pub fn enable_session(&mut self) -> Result<()> {
+        let resp = self.request(&Request::EnableSession)?;
+        match resp {
+            Response::SessionEnabled => Ok(()),
+            Response::Error { message } => Err(Error::Other(message)),
+            _ => Err(Error::Other(
+                "unexpected response to EnableSession".to_string(),
+            )),
+        }
+    }
+
     /// Send a request and receive a response.
     ///
     /// Use this for non-interactive operations (list, stop, destroy, image ops).

@@ -147,6 +147,7 @@ fn test_roundtrip_all_request_variants() {
             },
         },
         Request::Shutdown,
+        Request::EnableSession,
     ];
 
     for req in &requests {
@@ -183,6 +184,7 @@ fn test_roundtrip_all_response_variants() {
         Response::ContainerUpdated {
             name: "test".to_string(),
         },
+        Response::SessionEnabled,
         Response::ContainerInspect(Box::new(ContainerDetail {
             name: "test".to_string(),
             image: "alpine".to_string(),
@@ -608,4 +610,24 @@ fn test_exec_started_piped_roundtrip() {
         Response::ExecStartedPiped { pid } => assert_eq!(pid, 42),
         _ => panic!("expected ExecStartedPiped response"),
     }
+}
+
+/// Verify that EnableSession request roundtrips correctly.
+#[test]
+fn test_roundtrip_enable_session() {
+    let req = Request::EnableSession;
+    let encoded = encode_message(&req).unwrap();
+    let (decoded, rest): (Request, &[u8]) = decode_message(&encoded).unwrap();
+    assert!(rest.is_empty());
+    assert!(matches!(decoded, Request::EnableSession));
+}
+
+/// Verify that SessionEnabled response roundtrips correctly.
+#[test]
+fn test_roundtrip_session_enabled() {
+    let resp = Response::SessionEnabled;
+    let encoded = encode_message(&resp).unwrap();
+    let (decoded, rest): (Response, &[u8]) = decode_message(&encoded).unwrap();
+    assert!(rest.is_empty());
+    assert!(matches!(decoded, Response::SessionEnabled));
 }

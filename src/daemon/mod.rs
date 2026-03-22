@@ -306,23 +306,67 @@ async fn graceful_shutdown(mgr: &Arc<smol::lock::Mutex<manager::ContainerManager
 }
 
 /// Handle a single client connection.
+///
+/// By default, handles exactly one request (backward-compatible single-shot mode).
+/// If the first request is `EnableSession`, switches to session mode: a loop that
+/// handles multiple requests until the connection is closed.
 async fn handle_client(
     mut stream: Async<std::os::unix::net::UnixStream>,
     mgr: Arc<smol::lock::Mutex<manager::ContainerManager>>,
     shutting_down: Arc<AtomicBool>,
 ) -> Result<()> {
-    // Read the request
+    // Read the first request
     let request: Request = read_async_message(&mut stream).await?;
 
-    tracing::debug!("received request: {request:?}");
+    // Check for session mode
+    if matches!(request, Request::EnableSession) {
+        tracing::debug!("session mode enabled");
+        write_async_message(&mut stream, &Response::SessionEnabled).await?;
 
+        // Session loop: handle requests until connection closes
+        loop {
+            let request: Request = match read_async_message(&mut stream).await {
+                Ok(req) => req,
+                Err(_) => break, // Connection closed or read error
+            };
+            tracing::debug!("session request: {request:?}");
+            handle_single_request(&mut stream, request, &mgr, &shutting_down, true).await?;
+        }
+        return Ok(());
+    }
+
+    // Single-shot mode (default): handle one request and return
+    tracing::debug!("received request: {request:?}");
+    handle_single_request(&mut stream, request, &mgr, &shutting_down, false).await
+}
+
+/// Handle a single request on a client connection.
+///
+/// Dispatches the request to the manager, sends the response (including any
+/// SCM_RIGHTS fds), and waits for interactive sessions to complete.
+///
+/// In session mode, container starts always use detached monitoring (background)
+/// since the connection will be reused for further requests.
+async fn handle_single_request(
+    stream: &mut Async<std::os::unix::net::UnixStream>,
+    request: Request,
+    mgr: &Arc<smol::lock::Mutex<manager::ContainerManager>>,
+    shutting_down: &Arc<AtomicBool>,
+    session_mode: bool,
+) -> Result<()> {
     // Handle Stop specially: send SIGTERM under mutex, wait async, then reap
     if let Request::Stop {
         ref name,
         timeout_secs,
     } = request
     {
-        return handle_stop_async(&mut stream, &mgr, name, timeout_secs).await;
+        return handle_stop_async(stream, mgr, name, timeout_secs).await;
+    }
+
+    // EnableSession inside an existing session is a no-op
+    if matches!(request, Request::EnableSession) {
+        write_async_message(stream, &Response::SessionEnabled).await?;
+        return Ok(());
     }
 
     // Process request (holds mutex briefly for non-blocking operations)
@@ -332,22 +376,26 @@ async fn handle_client(
     };
 
     // Send response
-    write_async_message(&mut stream, &result.response).await?;
+    write_async_message(stream, &result.response).await?;
 
     // If we have a PTY master fd, send it via SCM_RIGHTS.
-    // Don't fail the connection if the client disconnected (e.g., non-interactive
-    // `start` command that just prints "Started" and exits). The pidfd monitoring
-    // must still be set up even if the PTY send fails.
-    if let Some(ref pty_master) = result.pty_master {
-        let socket_ref = stream.get_ref();
-        if let Err(e) = scm_rights::send_fd(socket_ref, pty_master) {
-            tracing::debug!("PTY fd send failed (client may have disconnected): {e}");
-        } else {
-            tracing::debug!("sent PTY master fd to client");
+    // In session mode, don't send PTY fds — the session client uses request()
+    // (not request_with_fd()), so the SCM_RIGHTS data would corrupt the
+    // framed message stream. The fd is simply dropped.
+    if !session_mode {
+        if let Some(ref pty_master) = result.pty_master {
+            let socket_ref = stream.get_ref();
+            if let Err(e) = scm_rights::send_fd(socket_ref, pty_master) {
+                tracing::debug!("PTY fd send failed (client may have disconnected): {e}");
+            } else {
+                tracing::debug!("sent PTY master fd to client");
+            }
         }
     }
 
     // If we have pipe fds (piped exec mode), send them via SCM_RIGHTS.
+    // In session mode, this is still sent — piped exec explicitly uses
+    // request_with_pipe_fds() which expects the fds.
     if let Some((ref stdout_fd, ref stderr_fd)) = result.pipe_fds {
         let socket_ref = stream.get_ref();
         if let Err(e) = scm_rights::send_fds(socket_ref, stdout_fd, stderr_fd) {
@@ -361,7 +409,7 @@ async fn handle_client(
     if let Response::Started { ref name, .. } = result.response {
         let name = name.clone();
         let has_pty = result.pty_master.is_some();
-        let mgr_clone = Arc::clone(&mgr);
+        let mgr_clone = Arc::clone(mgr);
 
         // Take the pidfd out of the container
         let pidfd = {
@@ -370,15 +418,15 @@ async fn handle_client(
         };
 
         if let Some(pidfd) = pidfd {
-            if has_pty {
-                // Interactive mode: keep connection alive, send exit code after container exits
+            if has_pty && !session_mode {
+                // Interactive mode: keep connection alive, send exit code after container exits.
+                // Not used in session mode — the connection is reused for further requests.
                 let exit_code =
-                    await_pidfd_and_reap(pidfd, &name, mgr_clone, Arc::clone(&shutting_down)).await;
-                let _ = write_async_message(&mut stream, &Response::ContainerExited { exit_code })
-                    .await;
+                    await_pidfd_and_reap(pidfd, &name, mgr_clone, Arc::clone(shutting_down)).await;
+                let _ = write_async_message(stream, &Response::ContainerExited { exit_code }).await;
             } else {
-                // Detached mode: monitor in background
-                let shutting_down = Arc::clone(&shutting_down);
+                // Detached / session mode: monitor in background
+                let shutting_down = Arc::clone(shutting_down);
                 smol::spawn(async move {
                     let _ = await_pidfd_and_reap(pidfd, &name, mgr_clone, shutting_down).await;
                 })
@@ -395,8 +443,7 @@ async fn handle_client(
                 if has_pty {
                     // Interactive exec: keep connection alive, send exit code
                     let exit_code = await_exec_pidfd(exec_pidfd, pid as i32).await;
-                    let _ =
-                        write_async_message(&mut stream, &Response::ExecExited { exit_code }).await;
+                    let _ = write_async_message(stream, &Response::ExecExited { exit_code }).await;
                 } else {
                     // Detached exec: just reap in background
                     smol::spawn(async move {
@@ -411,7 +458,7 @@ async fn handle_client(
             // The pipe fds were already sent via SCM_RIGHTS — the client reads from them.
             if let Some(exec_pidfd) = result.exec_pidfd {
                 let exit_code = await_exec_pidfd(exec_pidfd, pid as i32).await;
-                let _ = write_async_message(&mut stream, &Response::ExecExited { exit_code }).await;
+                let _ = write_async_message(stream, &Response::ExecExited { exit_code }).await;
             }
         }
         _ => {}

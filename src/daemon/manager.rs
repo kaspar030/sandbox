@@ -998,6 +998,10 @@ impl ContainerManager {
                 self.shutting_down.store(true, Ordering::Relaxed);
                 HandleResult::response_only(Response::Ok)
             }
+            Request::EnableSession => {
+                // Handled at the connection level in handle_client, not here.
+                HandleResult::response_only(Response::SessionEnabled)
+            }
         }
     }
 
