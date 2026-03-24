@@ -83,30 +83,5 @@ pub fn test_image_create_update(ctx: &TestContext) -> Result<(), String> {
     Ok(())
 }
 
-/// Test that the deprecated `snapshot` alias still works.
-pub fn test_snapshot_alias(ctx: &TestContext) -> Result<(), String> {
-    let container = "snap-alias";
-    let image = "snap-alias-img";
-
-    ctx.cli_ok(&[
-        "create",
-        "--name",
-        container,
-        "--image",
-        "alpine",
-        "--restart",
-        "no",
-    ]);
-    ctx.cli_ok(&["snapshot", container, image]);
-
-    let list = ctx.cli_ok(&["image", "list"]);
-    if !list.contains(image) {
-        let _ = ctx.cli(&["destroy", container]);
-        let _ = ctx.cli(&["image", "rm", image]);
-        return Err(format!("{image} not in image list: {list}"));
-    }
-
-    ctx.cli_ok(&["destroy", container]);
-    ctx.cli_ok(&["image", "rm", image]);
-    Ok(())
-}
+// Note: the old `sandbox snapshot <container> <image>` alias was removed.
+// The `snapshot` verb now means container checkpoints (rootfs + config + volumes).

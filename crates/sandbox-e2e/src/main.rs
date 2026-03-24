@@ -85,11 +85,6 @@ fn all_tests() -> Vec<Test> {
             "image_create_update",
             tests::images::test_image_create_update,
         ),
-        Test::Immutable(
-            "Images",
-            "snapshot_alias",
-            tests::images::test_snapshot_alias,
-        ),
         // Exec
         Test::Immutable("Exec", "exec_basic", tests::exec::test_exec_basic),
         Test::Immutable("Exec", "exec_user", tests::exec::test_exec_user),

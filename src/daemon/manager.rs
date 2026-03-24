@@ -1431,8 +1431,16 @@ impl ContainerManager {
             }
         }
 
-        // Restore container spec from manifest
+        // Clean up old idmap mount and restore spec from manifest
         let container = self.containers.get_mut(name).unwrap();
+
+        // Unmount and remove old idmap mount point
+        if let Some(ref mount_path) = container.idmap_mount {
+            let _ = nix::mount::umount2(mount_path, nix::mount::MntFlags::MNT_DETACH);
+            let _ = std::fs::remove_dir(mount_path);
+        }
+        container.idmap_mount = None;
+
         container.spec = manifest.spec;
         Self::persist_container(&self.state_dir, name, container);
 
