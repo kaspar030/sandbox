@@ -8,6 +8,6 @@ rust-version = "1.85"
 
 [dependencies]
 sandbox-proto = { path = "../sandbox-proto" }
-nix = { version = "0.31", features = ["net", "fs", "socket"] }
+nix = { version = "0.31", features = ["net", "fs", "socket", "uio"] }
 thiserror = "2"
 tracing = "0.1"
