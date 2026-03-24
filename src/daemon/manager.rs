@@ -998,6 +998,30 @@ impl ContainerManager {
                 self.shutting_down.store(true, Ordering::Relaxed);
                 HandleResult::response_only(Response::Ok)
             }
+            Request::SnapshotContainer {
+                name,
+                snapshot_name,
+                exclude_volumes,
+            } => self.handle_snapshot_container(&name, snapshot_name, exclude_volumes),
+            Request::RestoreContainer {
+                name,
+                snapshot_name,
+            } => self.handle_restore_container(&name, &snapshot_name),
+            Request::ListContainerSnapshots { name } => self.handle_list_container_snapshots(&name),
+            Request::DeleteContainerSnapshot {
+                name,
+                snapshot_name,
+            } => self.handle_delete_container_snapshot(&name, &snapshot_name),
+            Request::StackSnapshot {
+                stack_name,
+                snapshot_name,
+                exclude_volumes,
+            } => self.handle_stack_snapshot(&stack_name, snapshot_name, exclude_volumes),
+            Request::StackRestore {
+                stack_name,
+                snapshot_name,
+            } => self.handle_stack_restore(&stack_name, &snapshot_name),
+            Request::StackSnapshots { stack_name } => self.handle_stack_snapshots(&stack_name),
             Request::EnableSession => {
                 // Handled at the connection level in handle_client, not here.
                 HandleResult::response_only(Response::SessionEnabled)
@@ -1278,6 +1302,420 @@ impl ContainerManager {
         HandleResult::response_only(Response::ContainerUpdated {
             name: name.to_string(),
         })
+    }
+
+    // -- Snapshot / Restore --
+
+    fn handle_snapshot_container(
+        &self,
+        name: &str,
+        snapshot_name: Option<String>,
+        exclude_volumes: bool,
+    ) -> HandleResult {
+        let container = match self.containers.get(name) {
+            Some(c) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {name} not found"),
+                });
+            }
+        };
+
+        let pool = match self.storage.resolve_pool(container.spec.pool.as_deref()) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
+
+        let snap_name = snapshot_name.unwrap_or_else(storage::snapshot::generate_snapshot_name);
+
+        // Snapshot rootfs
+        if let Err(e) = storage::snapshot::snapshot_rootfs(pool, name, &snap_name) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("rootfs snapshot failed: {e}"),
+            });
+        }
+
+        // Snapshot volumes (filesystem type only)
+        let mut snapped_volumes = Vec::new();
+        if !exclude_volumes {
+            for vol_mount in &container.spec.volumes {
+                if vol_mount.volume_type == sandbox::protocol::VolumeType::Filesystem {
+                    if let Err(e) =
+                        storage::snapshot::snapshot_volume(pool, &vol_mount.name, name, &snap_name)
+                    {
+                        tracing::warn!("failed to snapshot volume '{}': {e}", vol_mount.name);
+                    } else {
+                        snapped_volumes.push(vol_mount.name.clone());
+                    }
+                }
+            }
+        }
+
+        // Write manifest
+        let manifest = storage::snapshot::SnapshotManifest {
+            name: snap_name.clone(),
+            timestamp: format!(
+                "{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            ),
+            container: name.to_string(),
+            spec: container.spec.clone(),
+            volumes: snapped_volumes,
+            pool: pool.name.clone(),
+        };
+
+        if let Err(e) = storage::snapshot::write_manifest(pool, name, &snap_name, &manifest) {
+            tracing::warn!("failed to write snapshot manifest: {e}");
+        }
+
+        HandleResult::response_only(Response::ContainerSnapshotted {
+            name: name.to_string(),
+            snapshot_name: snap_name,
+        })
+    }
+
+    fn handle_restore_container(&mut self, name: &str, snapshot_name: &str) -> HandleResult {
+        let container = match self.containers.get(name) {
+            Some(c) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {name} not found"),
+                });
+            }
+        };
+
+        // Must be stopped
+        if container.state.is_running() {
+            return HandleResult::response_only(Response::Error {
+                message: format!("container {name} is running — stop it before restoring"),
+            });
+        }
+
+        let pool = match self.storage.resolve_pool(container.spec.pool.as_deref()) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
+
+        // Read manifest
+        let manifest = match storage::snapshot::read_manifest(pool, name, snapshot_name) {
+            Ok(m) => m,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("failed to read snapshot manifest: {e}"),
+                });
+            }
+        };
+
+        // Restore rootfs
+        if let Err(e) = storage::snapshot::restore_rootfs(pool, name, snapshot_name) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("rootfs restore failed: {e}"),
+            });
+        }
+
+        // Restore volumes
+        for vol_name in &manifest.volumes {
+            if let Err(e) = storage::snapshot::restore_volume(pool, vol_name, name, snapshot_name) {
+                tracing::warn!("failed to restore volume '{vol_name}': {e}");
+            }
+        }
+
+        // Restore container spec from manifest
+        let container = self.containers.get_mut(name).unwrap();
+        container.spec = manifest.spec;
+        Self::persist_container(&self.state_dir, name, container);
+
+        HandleResult::response_only(Response::ContainerRestored {
+            name: name.to_string(),
+            snapshot_name: snapshot_name.to_string(),
+        })
+    }
+
+    fn handle_list_container_snapshots(&self, name: &str) -> HandleResult {
+        let container = match self.containers.get(name) {
+            Some(c) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {name} not found"),
+                });
+            }
+        };
+
+        let pool = match self.storage.resolve_pool(container.spec.pool.as_deref()) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
+
+        let snap_names = match storage::snapshot::list_snapshots(pool, name) {
+            Ok(names) => names,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("failed to list snapshots: {e}"),
+                });
+            }
+        };
+
+        let mut snapshots = Vec::new();
+        for sn in snap_names {
+            let manifest = storage::snapshot::read_manifest(pool, name, &sn);
+            snapshots.push(sandbox::protocol::SnapshotInfo {
+                name: sn.clone(),
+                timestamp: manifest
+                    .as_ref()
+                    .map(|m| m.timestamp.clone())
+                    .unwrap_or_default(),
+                container: name.to_string(),
+                includes_volumes: manifest.as_ref().is_ok_and(|m| !m.volumes.is_empty()),
+            });
+        }
+
+        HandleResult::response_only(Response::ContainerSnapshotList { snapshots })
+    }
+
+    fn handle_delete_container_snapshot(&self, name: &str, snapshot_name: &str) -> HandleResult {
+        let container = match self.containers.get(name) {
+            Some(c) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("container {name} not found"),
+                });
+            }
+        };
+
+        let pool = match self.storage.resolve_pool(container.spec.pool.as_deref()) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
+
+        if let Err(e) = storage::snapshot::delete_snapshot(pool, name, snapshot_name) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("{e}"),
+            });
+        }
+
+        HandleResult::response_only(Response::ContainerSnapshotDeleted {
+            name: name.to_string(),
+            snapshot_name: snapshot_name.to_string(),
+        })
+    }
+
+    fn handle_stack_snapshot(
+        &self,
+        stack_name: &str,
+        snapshot_name: Option<String>,
+        exclude_volumes: bool,
+    ) -> HandleResult {
+        // Find all containers belonging to this stack
+        let stack_containers: Vec<String> = self
+            .containers
+            .iter()
+            .filter(|(_, c)| c.spec.name.starts_with(&format!("{stack_name}-")))
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        if stack_containers.is_empty() {
+            return HandleResult::response_only(Response::Error {
+                message: format!("no containers found for stack '{stack_name}'"),
+            });
+        }
+
+        let snap_name = snapshot_name.unwrap_or_else(storage::snapshot::generate_snapshot_name);
+
+        // Snapshot each container
+        for container_name in &stack_containers {
+            let container = self.containers.get(container_name).unwrap();
+            let pool = match self.storage.resolve_pool(container.spec.pool.as_deref()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return HandleResult::response_only(Response::Error {
+                        message: format!("pool error for {container_name}: {e}"),
+                    });
+                }
+            };
+
+            // Snapshot rootfs
+            if let Err(e) = storage::snapshot::snapshot_rootfs(pool, container_name, &snap_name) {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("rootfs snapshot failed for {container_name}: {e}"),
+                });
+            }
+
+            // Snapshot volumes
+            if !exclude_volumes {
+                for vol_mount in &container.spec.volumes {
+                    if vol_mount.volume_type == sandbox::protocol::VolumeType::Filesystem {
+                        if let Err(e) = storage::snapshot::snapshot_volume(
+                            pool,
+                            &vol_mount.name,
+                            container_name,
+                            &snap_name,
+                        ) {
+                            tracing::warn!(
+                                "failed to snapshot volume '{}' for {container_name}: {e}",
+                                vol_mount.name
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Write per-container manifest
+            let snapped_vols: Vec<String> = if exclude_volumes {
+                Vec::new()
+            } else {
+                container
+                    .spec
+                    .volumes
+                    .iter()
+                    .filter(|v| v.volume_type == sandbox::protocol::VolumeType::Filesystem)
+                    .map(|v| v.name.clone())
+                    .collect()
+            };
+
+            let manifest = storage::snapshot::SnapshotManifest {
+                name: snap_name.clone(),
+                timestamp: format!(
+                    "{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                ),
+                container: container_name.clone(),
+                spec: container.spec.clone(),
+                volumes: snapped_vols,
+                pool: pool.name.clone(),
+            };
+
+            if let Err(e) =
+                storage::snapshot::write_manifest(pool, container_name, &snap_name, &manifest)
+            {
+                tracing::warn!("failed to write manifest for {container_name}: {e}");
+            }
+        }
+
+        HandleResult::response_only(Response::StackSnapshotted {
+            stack_name: stack_name.to_string(),
+            snapshot_name: snap_name,
+        })
+    }
+
+    fn handle_stack_restore(&mut self, stack_name: &str, snapshot_name: &str) -> HandleResult {
+        // Find all stack containers
+        let stack_containers: Vec<String> = self
+            .containers
+            .iter()
+            .filter(|(_, c)| c.spec.name.starts_with(&format!("{stack_name}-")))
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        if stack_containers.is_empty() {
+            return HandleResult::response_only(Response::Error {
+                message: format!("no containers found for stack '{stack_name}'"),
+            });
+        }
+
+        // All must be stopped
+        for container_name in &stack_containers {
+            let container = self.containers.get(container_name).unwrap();
+            if container.state.is_running() {
+                return HandleResult::response_only(Response::Error {
+                    message: format!(
+                        "container {container_name} is running — stop the stack before restoring"
+                    ),
+                });
+            }
+        }
+
+        // Restore each container
+        for container_name in &stack_containers {
+            let result = self.handle_restore_container(container_name, snapshot_name);
+            if let Response::Error { message } = &result.response {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("failed to restore {container_name}: {message}"),
+                });
+            }
+        }
+
+        HandleResult::response_only(Response::StackRestored {
+            stack_name: stack_name.to_string(),
+            snapshot_name: snapshot_name.to_string(),
+        })
+    }
+
+    fn handle_stack_snapshots(&self, stack_name: &str) -> HandleResult {
+        // Find one container from the stack to determine the pool
+        let container = match self
+            .containers
+            .iter()
+            .find(|(_, c)| c.spec.name.starts_with(&format!("{stack_name}-")))
+        {
+            Some((_, c)) => c,
+            None => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("no containers found for stack '{stack_name}'"),
+                });
+            }
+        };
+
+        let pool = match self.storage.resolve_pool(container.spec.pool.as_deref()) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
+
+        // Collect unique snapshot names across all stack containers
+        let mut all_snaps = std::collections::BTreeSet::new();
+        for (cname, c) in &self.containers {
+            if c.spec.name.starts_with(&format!("{stack_name}-")) {
+                if let Ok(names) = storage::snapshot::list_snapshots(pool, cname) {
+                    for n in names {
+                        all_snaps.insert(n);
+                    }
+                }
+            }
+        }
+
+        let stack_containers: Vec<String> = self
+            .containers
+            .iter()
+            .filter(|(_, c)| c.spec.name.starts_with(&format!("{stack_name}-")))
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        let snapshots = all_snaps
+            .into_iter()
+            .map(|sn| sandbox::protocol::StackSnapshotInfo {
+                name: sn,
+                timestamp: String::new(),
+                containers: stack_containers.clone(),
+                includes_volumes: true,
+            })
+            .collect();
+
+        HandleResult::response_only(Response::StackSnapshotList { snapshots })
     }
 
     #[tracing::instrument(skip_all, level = "debug", fields(name = %spec.name))]

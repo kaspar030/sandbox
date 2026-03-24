@@ -146,6 +146,34 @@ fn test_roundtrip_all_request_variants() {
                 ..Default::default()
             },
         },
+        Request::SnapshotContainer {
+            name: "foo".to_string(),
+            snapshot_name: Some("v1".to_string()),
+            exclude_volumes: false,
+        },
+        Request::RestoreContainer {
+            name: "foo".to_string(),
+            snapshot_name: "v1".to_string(),
+        },
+        Request::ListContainerSnapshots {
+            name: "foo".to_string(),
+        },
+        Request::DeleteContainerSnapshot {
+            name: "foo".to_string(),
+            snapshot_name: "v1".to_string(),
+        },
+        Request::StackSnapshot {
+            stack_name: "mystack".to_string(),
+            snapshot_name: None,
+            exclude_volumes: true,
+        },
+        Request::StackRestore {
+            stack_name: "mystack".to_string(),
+            snapshot_name: "v1".to_string(),
+        },
+        Request::StackSnapshots {
+            stack_name: "mystack".to_string(),
+        },
         Request::Shutdown,
         Request::EnableSession,
     ];
@@ -185,6 +213,42 @@ fn test_roundtrip_all_response_variants() {
             name: "test".to_string(),
         },
         Response::SessionEnabled,
+        Response::ContainerSnapshotted {
+            name: "foo".to_string(),
+            snapshot_name: "v1".to_string(),
+        },
+        Response::ContainerRestored {
+            name: "foo".to_string(),
+            snapshot_name: "v1".to_string(),
+        },
+        Response::ContainerSnapshotList {
+            snapshots: vec![SnapshotInfo {
+                name: "v1".to_string(),
+                timestamp: "123".to_string(),
+                container: "foo".to_string(),
+                includes_volumes: true,
+            }],
+        },
+        Response::ContainerSnapshotDeleted {
+            name: "foo".to_string(),
+            snapshot_name: "v1".to_string(),
+        },
+        Response::StackSnapshotted {
+            stack_name: "mystack".to_string(),
+            snapshot_name: "v1".to_string(),
+        },
+        Response::StackRestored {
+            stack_name: "mystack".to_string(),
+            snapshot_name: "v1".to_string(),
+        },
+        Response::StackSnapshotList {
+            snapshots: vec![StackSnapshotInfo {
+                name: "v1".to_string(),
+                timestamp: "123".to_string(),
+                containers: vec!["a".to_string()],
+                includes_volumes: true,
+            }],
+        },
         Response::ContainerInspect(Box::new(ContainerDetail {
             name: "test".to_string(),
             image: "alpine".to_string(),

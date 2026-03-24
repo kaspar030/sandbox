@@ -370,6 +370,42 @@ fn all_tests() -> Vec<Test> {
             "update_persists",
             tests::update::test_update_persists,
         ),
+        // Snapshot / Restore
+        Test::Immutable(
+            "Snapshot",
+            "snapshot_and_restore",
+            tests::snapshot_restore::test_snapshot_and_restore,
+        ),
+        Test::Immutable(
+            "Snapshot",
+            "snapshot_with_volumes",
+            tests::snapshot_restore::test_snapshot_with_volumes,
+        ),
+        Test::Immutable(
+            "Snapshot",
+            "snapshot_exclude_volumes",
+            tests::snapshot_restore::test_snapshot_exclude_volumes,
+        ),
+        Test::Immutable(
+            "Snapshot",
+            "snapshot_running_container",
+            tests::snapshot_restore::test_snapshot_running_container,
+        ),
+        Test::Immutable(
+            "Snapshot",
+            "restore_requires_stopped",
+            tests::snapshot_restore::test_restore_requires_stopped,
+        ),
+        Test::Immutable(
+            "Snapshot",
+            "snapshot_list_and_delete",
+            tests::snapshot_restore::test_snapshot_list_and_delete,
+        ),
+        Test::Immutable(
+            "Snapshot",
+            "snapshot_auto_name",
+            tests::snapshot_restore::test_snapshot_auto_name,
+        ),
         // Session mode
         Test::Immutable(
             "Session",

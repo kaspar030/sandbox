@@ -372,6 +372,24 @@ pub enum ContainerState {
     Stopped { exit_code: i32 },
 }
 
+/// Info about a container snapshot (for listing).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotInfo {
+    pub name: String,
+    pub timestamp: String,
+    pub container: String,
+    pub includes_volumes: bool,
+}
+
+/// Info about a stack snapshot (for listing).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackSnapshotInfo {
+    pub name: String,
+    pub timestamp: String,
+    pub containers: Vec<String>,
+    pub includes_volumes: bool,
+}
+
 /// Partial update for a container's configuration.
 ///
 /// All fields are optional — only specified (Some) fields are applied.
@@ -676,6 +694,33 @@ pub enum Request {
         name: String,
         update: ContainerUpdate,
     },
+    /// Snapshot a container (rootfs + config + optionally volumes).
+    SnapshotContainer {
+        name: String,
+        snapshot_name: Option<String>,
+        #[serde(default)]
+        exclude_volumes: bool,
+    },
+    /// Restore a container from a snapshot.
+    RestoreContainer { name: String, snapshot_name: String },
+    /// List snapshots for a container.
+    ListContainerSnapshots { name: String },
+    /// Delete a container snapshot.
+    DeleteContainerSnapshot { name: String, snapshot_name: String },
+    /// Snapshot all containers in a stack.
+    StackSnapshot {
+        stack_name: String,
+        snapshot_name: Option<String>,
+        #[serde(default)]
+        exclude_volumes: bool,
+    },
+    /// Restore a stack from a snapshot.
+    StackRestore {
+        stack_name: String,
+        snapshot_name: String,
+    },
+    /// List snapshots for a stack.
+    StackSnapshots { stack_name: String },
     /// Shut down the daemon.
     Shutdown,
     /// Enable session mode: keep the connection alive for multiple requests.
@@ -774,81 +819,47 @@ pub enum Response {
     /// Operation succeeded.
     Ok,
     /// Container created successfully.
-    Created {
-        name: String,
-    },
+    Created { name: String },
     /// Container started. For interactive sessions, a PTY fd follows via SCM_RIGHTS.
-    Started {
-        name: String,
-        pid: u32,
-    },
+    Started { name: String, pid: u32 },
     /// Container stopped.
-    Stopped {
-        name: String,
-        exit_code: i32,
-    },
+    Stopped { name: String, exit_code: i32 },
     /// Container list.
     ContainerList(Vec<ContainerInfo>),
     /// Container detail (inspect).
     ContainerInspect(Box<ContainerDetail>),
     /// Container was destroyed.
-    Destroyed {
-        name: String,
-    },
+    Destroyed { name: String },
     /// Exec started (PTY mode). PTY fd follows via SCM_RIGHTS.
-    ExecStarted {
-        pid: u32,
-    },
+    ExecStarted { pid: u32 },
     /// Exec started (piped mode). Two fds (stdout, stderr) follow via SCM_RIGHTS.
-    ExecStartedPiped {
-        pid: u32,
-    },
+    ExecStartedPiped { pid: u32 },
     /// Image imported successfully.
-    ImageImported {
-        name: String,
-    },
+    ImageImported { name: String },
     /// Image pulled from registry.
-    ImagePulled {
-        name: String,
-    },
+    ImagePulled { name: String },
     /// Image list.
     ImageList(Vec<ImageInfo>),
     /// Image detail (inspect).
     ImageInspect(ImageDetail),
     /// Image removed.
-    ImageRemoved {
-        name: String,
-    },
+    ImageRemoved { name: String },
     /// Volume created.
-    VolumeCreated {
-        name: String,
-    },
+    VolumeCreated { name: String },
     /// Volume removed.
-    VolumeRemoved {
-        name: String,
-    },
+    VolumeRemoved { name: String },
     /// Volume list.
     VolumeList(Vec<VolumeInfo>),
     /// Volume attached to container.
-    VolumeAttached {
-        target: String,
-    },
+    VolumeAttached { target: String },
     /// Volume detached from container.
-    VolumeDetached {
-        target: String,
-    },
+    VolumeDetached { target: String },
     /// Block device mounted inside container.
-    BlockMounted {
-        target: String,
-    },
+    BlockMounted { target: String },
     /// Network created.
-    NetworkCreated {
-        name: String,
-    },
+    NetworkCreated { name: String },
     /// Network removed.
-    NetworkRemoved {
-        name: String,
-    },
+    NetworkRemoved { name: String },
     /// Network list.
     NetworkList(Vec<NetworkInfo>),
     /// Stack brought up.
@@ -857,9 +868,7 @@ pub enum Response {
         containers: Vec<String>,
     },
     /// Stack torn down.
-    StackDown {
-        name: String,
-    },
+    StackDown { name: String },
     /// Containers in a stack.
     StackPs(Vec<ContainerInfo>),
     /// List of all stacks.
@@ -867,37 +876,43 @@ pub enum Response {
     /// Pool list.
     PoolList(Vec<PoolInfo>),
     /// Container exited (sent after PTY EOF on interactive run).
-    ContainerExited {
-        exit_code: i32,
-    },
+    ContainerExited { exit_code: i32 },
     /// Exec child exited (sent after PTY EOF on interactive exec).
-    ExecExited {
-        exit_code: i32,
-    },
+    ExecExited { exit_code: i32 },
     /// Mount added to container.
-    MountAdded {
-        target: String,
-    },
+    MountAdded { target: String },
     /// Mount removed from container.
-    MountRemoved {
-        target: String,
-    },
+    MountRemoved { target: String },
     /// Mount list for a container.
     MountList(Vec<MountInfo>),
     /// Container rootfs snapshotted as image.
-    Snapshotted {
-        image_name: String,
-    },
+    Snapshotted { image_name: String },
     /// Container configuration updated.
-    ContainerUpdated {
-        name: String,
-    },
-    /// Error response.
+    ContainerUpdated { name: String },
     /// Session mode enabled — connection will accept multiple requests.
     SessionEnabled,
-    Error {
-        message: String,
+    /// Container snapshotted (rootfs + config + volumes).
+    ContainerSnapshotted { name: String, snapshot_name: String },
+    /// Container restored from snapshot.
+    ContainerRestored { name: String, snapshot_name: String },
+    /// List of container snapshots.
+    ContainerSnapshotList { snapshots: Vec<SnapshotInfo> },
+    /// Container snapshot deleted.
+    ContainerSnapshotDeleted { name: String, snapshot_name: String },
+    /// Stack snapshotted.
+    StackSnapshotted {
+        stack_name: String,
+        snapshot_name: String,
     },
+    /// Stack restored from snapshot.
+    StackRestored {
+        stack_name: String,
+        snapshot_name: String,
+    },
+    /// List of stack snapshots.
+    StackSnapshotList { snapshots: Vec<StackSnapshotInfo> },
+    /// Error response.
+    Error { message: String },
 }
 
 // -- Encoding / decoding --

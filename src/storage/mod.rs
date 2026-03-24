@@ -14,6 +14,7 @@ pub mod fs_detect;
 pub mod image;
 pub mod layers;
 pub mod oci;
+pub mod snapshot;
 pub mod unpack;
 pub mod volume;
 pub mod zfs;

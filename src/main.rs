@@ -305,23 +305,47 @@ enum Commands {
         name: String,
     },
 
-    /// Snapshot a container's rootfs into a reusable image (deprecated: use `image create --from`)
-    #[command(hide = true)]
+    /// Snapshot a container (rootfs + config + volumes, restorable)
+    #[command(alias = "snap")]
     Snapshot {
         /// Container name
         #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
 
-        /// Image name to create
-        image_name: String,
+        /// Snapshot name (auto-generated if omitted)
+        snapshot_name: Option<String>,
 
-        /// Force snapshot even if container is running on non-CoW filesystem
+        /// Exclude volumes from the snapshot
         #[arg(long)]
-        force: bool,
+        exclude_volumes: bool,
+    },
 
-        /// Overwrite existing image, adding a new layer on CoW filesystems
-        #[arg(long)]
-        update: bool,
+    /// Restore a container from a snapshot
+    Restore {
+        /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
+        name: String,
+
+        /// Snapshot name to restore
+        snapshot_name: String,
+    },
+
+    /// List snapshots for a container
+    Snapshots {
+        /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
+        name: String,
+    },
+
+    /// Delete a container snapshot
+    #[command(name = "snapshot-rm")]
+    SnapshotRm {
+        /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
+        name: String,
+
+        /// Snapshot name to delete
+        snapshot_name: String,
     },
 
     /// List all containers
@@ -624,6 +648,32 @@ enum StackAction {
         /// No output, only exit code
         #[arg(long, short)]
         quiet: bool,
+    },
+    /// Snapshot all containers in a stack
+    #[command(alias = "snap")]
+    Snapshot {
+        /// Stack name
+        #[arg(add = ArgValueCandidates::new(completer::stack_completer))]
+        name: String,
+        /// Snapshot name (auto-generated if omitted)
+        snapshot_name: Option<String>,
+        /// Exclude volumes from the snapshot
+        #[arg(long)]
+        exclude_volumes: bool,
+    },
+    /// Restore a stack from a snapshot
+    Restore {
+        /// Stack name
+        #[arg(add = ArgValueCandidates::new(completer::stack_completer))]
+        name: String,
+        /// Snapshot name to restore
+        snapshot_name: String,
+    },
+    /// List snapshots for a stack
+    Snapshots {
+        /// Stack name
+        #[arg(add = ArgValueCandidates::new(completer::stack_completer))]
+        name: String,
     },
 }
 
@@ -1034,16 +1084,44 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Snapshot {
             name,
-            image_name,
-            force,
-            update,
+            snapshot_name,
+            exclude_volumes,
         } => {
             let mut client = Client::connect(cli.socket.as_deref())?;
-            let resp = client.request(&Request::Snapshot {
+            let resp = client.request(&Request::SnapshotContainer {
                 name,
-                image_name,
-                force,
-                update,
+                snapshot_name,
+                exclude_volumes,
+            })?;
+            print_response(&resp);
+        }
+
+        Commands::Restore {
+            name,
+            snapshot_name,
+        } => {
+            let mut client = Client::connect(cli.socket.as_deref())?;
+            let resp = client.request(&Request::RestoreContainer {
+                name,
+                snapshot_name,
+            })?;
+            print_response(&resp);
+        }
+
+        Commands::Snapshots { name } => {
+            let mut client = Client::connect(cli.socket.as_deref())?;
+            let resp = client.request(&Request::ListContainerSnapshots { name })?;
+            print_response(&resp);
+        }
+
+        Commands::SnapshotRm {
+            name,
+            snapshot_name,
+        } => {
+            let mut client = Client::connect(cli.socket.as_deref())?;
+            let resp = client.request(&Request::DeleteContainerSnapshot {
+                name,
+                snapshot_name,
             })?;
             print_response(&resp);
         }
@@ -1475,6 +1553,35 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             }
+            StackAction::Snapshot {
+                name,
+                snapshot_name,
+                exclude_volumes,
+            } => {
+                let mut client = Client::connect(cli.socket.as_deref())?;
+                let resp = client.request(&Request::StackSnapshot {
+                    stack_name: name,
+                    snapshot_name,
+                    exclude_volumes,
+                })?;
+                print_response(&resp);
+            }
+            StackAction::Restore {
+                name,
+                snapshot_name,
+            } => {
+                let mut client = Client::connect(cli.socket.as_deref())?;
+                let resp = client.request(&Request::StackRestore {
+                    stack_name: name,
+                    snapshot_name,
+                })?;
+                print_response(&resp);
+            }
+            StackAction::Snapshots { name } => {
+                let mut client = Client::connect(cli.socket.as_deref())?;
+                let resp = client.request(&Request::StackSnapshots { stack_name: name })?;
+                print_response(&resp);
+            }
         },
 
         Commands::Volume { action } => {
@@ -1638,6 +1745,49 @@ fn print_response(resp: &Response) {
         Response::NetworkRemoved { name } => println!("Removed network: {name}"),
         Response::NetworkList(_) => {}
         Response::SessionEnabled => println!("Session enabled"),
+        Response::ContainerSnapshotted {
+            name,
+            snapshot_name,
+        } => println!("Snapshotted container {name}: {snapshot_name}"),
+        Response::ContainerRestored {
+            name,
+            snapshot_name,
+        } => println!("Restored container {name} from snapshot {snapshot_name}"),
+        Response::ContainerSnapshotList { snapshots } => {
+            if snapshots.is_empty() {
+                println!("No snapshots");
+            } else {
+                for s in snapshots {
+                    let vols = if s.includes_volumes {
+                        " (with volumes)"
+                    } else {
+                        ""
+                    };
+                    println!("  {}{vols}", s.name);
+                }
+            }
+        }
+        Response::ContainerSnapshotDeleted {
+            name,
+            snapshot_name,
+        } => println!("Deleted snapshot {snapshot_name} for container {name}"),
+        Response::StackSnapshotted {
+            stack_name,
+            snapshot_name,
+        } => println!("Snapshotted stack {stack_name}: {snapshot_name}"),
+        Response::StackRestored {
+            stack_name,
+            snapshot_name,
+        } => println!("Restored stack {stack_name} from snapshot {snapshot_name}"),
+        Response::StackSnapshotList { snapshots } => {
+            if snapshots.is_empty() {
+                println!("No snapshots");
+            } else {
+                for s in snapshots {
+                    println!("  {} ({} containers)", s.name, s.containers.len());
+                }
+            }
+        }
         Response::Error { message } => {
             eprintln!("Error: {message}");
             std::process::exit(1);
