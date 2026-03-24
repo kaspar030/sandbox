@@ -117,6 +117,17 @@ fn all_tests() -> Vec<Test> {
             "exec_piped_explicit",
             tests::exec::test_exec_piped_explicit,
         ),
+        Test::Immutable("Exec", "allow_new_privs", tests::exec::test_allow_new_privs),
+        Test::Immutable(
+            "Exec",
+            "no_new_privs_default",
+            tests::exec::test_no_new_privs_default,
+        ),
+        Test::Immutable(
+            "Exec",
+            "update_allow_new_privs",
+            tests::exec::test_update_allow_new_privs,
+        ),
         // Mounts
         Test::Immutable(
             "Mounts",

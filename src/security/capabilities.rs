@@ -72,7 +72,7 @@ pub fn resolve_capability(name: &str) -> Option<u32> {
 /// 1. Set PR_SET_NO_NEW_PRIVS (prevent regaining caps via exec)
 /// 2. Drop capabilities from the bounding set
 /// 3. Clear inheritable, permitted, and effective sets (keeping only what's needed)
-pub fn drop_capabilities(spec: &CapabilitySpec) -> Result<()> {
+pub fn drop_capabilities(spec: &CapabilitySpec, no_new_privs: bool) -> Result<()> {
     // Resolve capability names to numbers
     let keep_set: Vec<u32> = spec
         .keep
@@ -86,8 +86,11 @@ pub fn drop_capabilities(spec: &CapabilitySpec) -> Result<()> {
         })
         .collect();
 
-    // Set no_new_privs first — this prevents gaining capabilities through exec
-    nix::sys::prctl::set_no_new_privs().map_err(Error::Prctl)?;
+    // Set no_new_privs — prevents gaining capabilities through exec (e.g., sudo/su).
+    // Can be disabled with --allow-new-privs to support sudo inside containers.
+    if no_new_privs {
+        nix::sys::prctl::set_no_new_privs().map_err(Error::Prctl)?;
+    }
 
     // Drop capabilities from the bounding set
     for &(cap_num, _) in ALL_CAPS {

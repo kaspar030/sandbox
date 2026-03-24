@@ -307,3 +307,101 @@ pub fn test_exec_piped_explicit(ctx: &TestContext) -> Result<(), String> {
     let _ = ctx.cli(&["destroy", name]);
     Ok(())
 }
+
+/// Test that --allow-new-privs is reflected in inspect.
+pub fn test_allow_new_privs(ctx: &TestContext) -> Result<(), String> {
+    let name = "privs-test";
+
+    if ctx.cli_fails(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "alpine",
+        "--restart",
+        "no",
+        "--allow-new-privs",
+    ]) {
+        return Err("create failed".into());
+    }
+
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("NewPrivs:   allowed") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("expected NewPrivs allowed in inspect: {inspect}"));
+    }
+
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
+
+/// Test that no_new_privs is enabled by default (not shown in inspect).
+pub fn test_no_new_privs_default(ctx: &TestContext) -> Result<(), String> {
+    let name = "privs-default";
+
+    if ctx.cli_fails(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "alpine",
+        "--restart",
+        "no",
+    ]) {
+        return Err("create failed".into());
+    }
+
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if inspect.contains("NewPrivs") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!(
+            "default container should not show NewPrivs line: {inspect}"
+        ));
+    }
+
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
+
+/// Test updating no_new_privs via sandbox update.
+pub fn test_update_allow_new_privs(ctx: &TestContext) -> Result<(), String> {
+    let name = "privs-update";
+
+    if ctx.cli_fails(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "alpine",
+        "--restart",
+        "no",
+    ]) {
+        return Err("create failed".into());
+    }
+
+    // Default: no NewPrivs shown
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if inspect.contains("NewPrivs") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err("should not show NewPrivs by default".into());
+    }
+
+    // Update to allow
+    ctx.cli_ok(&["update", name, "--allow-new-privs"]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if !inspect.contains("NewPrivs:   allowed") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("expected NewPrivs allowed after update: {inspect}"));
+    }
+
+    // Update back to default
+    ctx.cli_ok(&["update", name, "--no-new-privs"]);
+    let inspect = ctx.cli_ok(&["inspect", name]);
+    if inspect.contains("NewPrivs") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err("should not show NewPrivs after --no-new-privs".into());
+    }
+
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}

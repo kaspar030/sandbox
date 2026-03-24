@@ -541,7 +541,7 @@ impl Container {
         seccomp::apply_seccomp(&self.spec.seccomp)?;
 
         // Drop capabilities (must be after seccomp to avoid blocking prctl)
-        capabilities::drop_capabilities(&self.spec.capabilities)?;
+        capabilities::drop_capabilities(&self.spec.capabilities, self.spec.no_new_privs)?;
 
         // Switch to target user (if not root). Must be AFTER seccomp/capabilities
         // because setresuid from uid 0 to non-0 clears the capability sets.

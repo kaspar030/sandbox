@@ -82,6 +82,10 @@ enum Commands {
         #[arg(long = "cap-add")]
         cap_add: Vec<String>,
 
+        /// Allow privilege escalation via exec (sudo, su). Disables no_new_privs.
+        #[arg(long)]
+        allow_new_privs: bool,
+
         /// Bind mount (SRC:DST or SRC:DST:ro)
         #[arg(long = "bind")]
         bind: Vec<String>,
@@ -152,6 +156,9 @@ enum Commands {
         seccomp: String,
         #[arg(long = "cap-add")]
         cap_add: Vec<String>,
+        /// Allow privilege escalation via exec (sudo, su)
+        #[arg(long)]
+        allow_new_privs: bool,
         #[arg(long = "bind")]
         bind: Vec<String>,
         #[arg(long = "publish", short = 'p')]
@@ -274,6 +281,14 @@ enum Commands {
         /// Drop capability
         #[arg(long = "cap-drop")]
         cap_drop: Vec<String>,
+
+        /// Allow privilege escalation (sudo, su)
+        #[arg(long)]
+        allow_new_privs: bool,
+
+        /// Disallow privilege escalation (default)
+        #[arg(long, conflicts_with = "allow_new_privs")]
+        no_new_privs: bool,
     },
 
     /// Start a previously created container
@@ -796,6 +811,7 @@ fn main() -> anyhow::Result<()> {
             uid_map,
             gid_map,
             command,
+            allow_new_privs,
         } => {
             let name = name.unwrap_or_else(|| petname::petname(2, "-").unwrap());
             let resolved_env = resolve_env(&env);
@@ -820,6 +836,7 @@ fn main() -> anyhow::Result<()> {
                 uid_map,
                 gid_map,
                 command,
+                allow_new_privs,
             )?;
             // For `run` (interactive), default to /bin/sh if no command given
             if spec.command.is_empty() {
@@ -865,6 +882,7 @@ fn main() -> anyhow::Result<()> {
             gateway,
             seccomp,
             cap_add,
+            allow_new_privs,
             bind,
             publish,
             volume,
@@ -907,6 +925,7 @@ fn main() -> anyhow::Result<()> {
                 uid_map,
                 gid_map,
                 command,
+                allow_new_privs,
             )?;
             spec.publish = parse_port_mappings(&publish)?;
             spec.volumes = parse_volume_mounts(&volume)?;
@@ -967,6 +986,8 @@ fn main() -> anyhow::Result<()> {
             seccomp,
             cap_add,
             cap_drop,
+            allow_new_privs,
+            no_new_privs,
         } => {
             let restart_policy = restart
                 .map(|r| {
@@ -1043,6 +1064,13 @@ fn main() -> anyhow::Result<()> {
                 seccomp: seccomp_mode,
                 cap_add,
                 cap_drop,
+                no_new_privs: if allow_new_privs {
+                    Some(false)
+                } else if no_new_privs {
+                    Some(true)
+                } else {
+                    None
+                },
             };
 
             // Check at least one flag was given
@@ -1816,6 +1844,9 @@ fn print_container_inspect(d: &sandbox_proto::ContainerDetail) {
     println!("Ephemeral:  {}", if d.ephemeral { "yes" } else { "no" });
     println!("Restart:    {}", d.restart_policy);
     println!("Init:       {}", if d.use_init { "yes" } else { "no" });
+    if !d.no_new_privs {
+        println!("NewPrivs:   allowed (sudo/su enabled)");
+    }
     println!(
         "User:       {}",
         d.user.as_deref().unwrap_or("root (default)")
@@ -1947,6 +1978,7 @@ fn build_spec(
     uid_map: Vec<String>,
     gid_map: Vec<String>,
     command: Vec<String>,
+    allow_new_privs: bool,
 ) -> anyhow::Result<ContainerSpec> {
     let memory_max = memory.map(parse_size).transpose()?;
 
@@ -2042,6 +2074,7 @@ fn build_spec(
         detach: false,
         user,
         restart_policy: sandbox_proto::RestartPolicy::No, // caller sets this
+        no_new_privs: !allow_new_privs,
     })
 }
 

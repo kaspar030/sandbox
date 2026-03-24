@@ -1275,6 +1275,9 @@ impl ContainerManager {
         for cap in &update.cap_drop {
             container.spec.capabilities.keep.retain(|c| c != cap);
         }
+        if let Some(nnp) = update.no_new_privs {
+            container.spec.no_new_privs = nnp;
+        }
 
         // If running, apply cgroup changes live
         if is_running {
@@ -3085,6 +3088,7 @@ impl ContainerManager {
             cgroup: container.spec.cgroup.clone(),
             seccomp: container.spec.seccomp.clone(),
             restart_policy: container.spec.restart_policy.clone(),
+            no_new_privs: container.spec.no_new_privs,
             rootfs_path: container
                 .rootfs_path
                 .as_ref()

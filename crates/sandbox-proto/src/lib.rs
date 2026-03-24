@@ -84,6 +84,14 @@ pub struct ContainerSpec {
     /// CLI `create` defaults to UnlessStopped; `run` always uses No.
     #[serde(default)]
     pub restart_policy: RestartPolicy,
+    /// Prevent gaining privileges via exec (PR_SET_NO_NEW_PRIVS).
+    /// Default: true (secure). Set to false to allow sudo/su inside the container.
+    #[serde(default = "default_true")]
+    pub no_new_privs: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_working_dir() -> String {
@@ -114,6 +122,7 @@ impl Default for ContainerSpec {
             detach: false,
             user: None,
             restart_policy: RestartPolicy::No,
+            no_new_privs: true,
         }
     }
 }
@@ -445,6 +454,8 @@ pub struct ContainerUpdate {
     /// Capabilities to drop.
     #[serde(default)]
     pub cap_drop: Vec<String>,
+    /// Set no_new_privs. Some(true) = enable, Some(false) = disable (allow sudo).
+    pub no_new_privs: Option<bool>,
 }
 
 impl ContainerUpdate {
@@ -466,6 +477,7 @@ impl ContainerUpdate {
             && self.seccomp.is_none()
             && self.cap_add.is_empty()
             && self.cap_drop.is_empty()
+            && self.no_new_privs.is_none()
     }
 }
 
@@ -550,6 +562,8 @@ pub struct ContainerDetail {
     pub cgroup: CgroupSpec,
     pub seccomp: SeccompMode,
     pub restart_policy: RestartPolicy,
+    #[serde(default = "default_true")]
+    pub no_new_privs: bool,
     pub rootfs_path: Option<String>,
     pub cgroup_path: String,
 }

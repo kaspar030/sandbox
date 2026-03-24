@@ -51,6 +51,7 @@ fn test_roundtrip_request_create() {
         detach: false,
         user: Some("1000:1000".to_string()),
         restart_policy: RestartPolicy::UnlessStopped,
+        no_new_privs: true,
     };
 
     let req = Request::Create(spec);
@@ -270,6 +271,7 @@ fn test_roundtrip_all_response_variants() {
             cgroup: CgroupSpec::default(),
             seccomp: SeccompMode::Default,
             restart_policy: RestartPolicy::Always,
+            no_new_privs: true,
             rootfs_path: Some("/pool/fs/test".to_string()),
             cgroup_path: "/sys/fs/cgroup/sandbox/test".to_string(),
         })),
@@ -538,6 +540,7 @@ fn test_roundtrip_update_container_full() {
             seccomp: Some(SeccompMode::Disabled),
             cap_add: vec!["NET_RAW".to_string()],
             cap_drop: vec!["SYS_ADMIN".to_string()],
+            no_new_privs: Some(false),
         },
     };
 
