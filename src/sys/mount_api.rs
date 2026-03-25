@@ -135,6 +135,12 @@ pub fn set_readonly(mount_fd: &OwnedFd) -> Result<()> {
 }
 
 /// Apply an idmap to a detached mount using a user namespace fd.
+///
+/// Non-recursive: only the top-level mount is idmapped. When open_tree
+/// clones a subtree that already contains idmapped child mounts (e.g.,
+/// bind mounts from other containers), applying MOUNT_ATTR_IDMAP
+/// recursively would fail with EPERM because the kernel rejects
+/// re-idmapping an already-idmapped mount.
 pub fn set_idmap(mount_fd: &OwnedFd, userns_fd: &OwnedFd) -> Result<()> {
     let attr = MountAttr {
         attr_set: MOUNT_ATTR_IDMAP,
@@ -142,5 +148,5 @@ pub fn set_idmap(mount_fd: &OwnedFd, userns_fd: &OwnedFd) -> Result<()> {
         propagation: 0,
         userns_fd: userns_fd.as_raw_fd() as u64,
     };
-    mount_setattr(mount_fd, &attr, true)
+    mount_setattr(mount_fd, &attr, false)
 }
