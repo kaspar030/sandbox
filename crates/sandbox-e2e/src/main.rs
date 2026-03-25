@@ -438,6 +438,23 @@ fn all_tests() -> Vec<Test> {
             "clone_independence",
             tests::clone::test_clone_independence,
         ),
+        // Rename
+        Test::Immutable("Rename", "rename_basic", tests::rename::test_rename_basic),
+        Test::Immutable(
+            "Rename",
+            "rename_preserves_data",
+            tests::rename::test_rename_preserves_data,
+        ),
+        Test::Immutable(
+            "Rename",
+            "rename_running_fails",
+            tests::rename::test_rename_running_fails,
+        ),
+        Test::Immutable(
+            "Rename",
+            "rename_with_snapshots",
+            tests::rename::test_rename_with_snapshots,
+        ),
         // Session mode
         Test::Immutable(
             "Session",

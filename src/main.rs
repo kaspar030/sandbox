@@ -328,6 +328,15 @@ enum Commands {
         name: String,
     },
 
+    /// Rename a container (must be stopped)
+    Rename {
+        /// Current container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
+        name: String,
+        /// New container name
+        new_name: String,
+    },
+
     /// Snapshot a container (rootfs + config + volumes, restorable)
     #[command(alias = "snap")]
     Snapshot {
@@ -1212,6 +1221,12 @@ fn main() -> anyhow::Result<()> {
             print_response(&resp);
         }
 
+        Commands::Rename { name, new_name } => {
+            let mut client = Client::connect(cli.socket.as_deref())?;
+            let resp = client.request(&Request::RenameContainer { name, new_name })?;
+            print_response(&resp);
+        }
+
         Commands::Snapshot {
             name,
             snapshot_name,
@@ -1852,6 +1867,9 @@ fn print_response(resp: &Response) {
         Response::ImagePulled { name } => println!("Pulled image: {name}"),
         Response::Snapshotted { image_name } => println!("Snapshotted as image: {image_name}"),
         Response::ContainerUpdated { name } => println!("Updated container: {name}"),
+        Response::ContainerRenamed { old_name, new_name } => {
+            println!("Renamed container: {old_name} -> {new_name}")
+        }
         Response::StackUp { name, containers } => {
             println!("Stack '{name}' up ({} containers)", containers.len());
         }

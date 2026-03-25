@@ -198,6 +198,10 @@ fn test_roundtrip_all_request_variants() {
                 bind_mounts: vec![],
             },
         },
+        Request::RenameContainer {
+            name: "old".to_string(),
+            new_name: "new".to_string(),
+        },
         Request::Shutdown,
         Request::EnableSession,
     ];
@@ -235,6 +239,10 @@ fn test_roundtrip_all_response_variants() {
         Response::ContainerList(vec![]),
         Response::ContainerUpdated {
             name: "test".to_string(),
+        },
+        Response::ContainerRenamed {
+            old_name: "old".to_string(),
+            new_name: "new".to_string(),
         },
         Response::SessionEnabled,
         Response::ContainerSnapshotted {

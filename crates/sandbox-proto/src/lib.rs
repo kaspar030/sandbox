@@ -777,6 +777,8 @@ pub enum Request {
         #[serde(default)]
         show_size: bool,
     },
+    /// Rename a container (must be stopped).
+    RenameContainer { name: String, new_name: String },
     /// Clone a container from another container or from a snapshot.
     CloneContainer {
         /// Source to clone from.
@@ -958,6 +960,8 @@ pub enum Response {
     Snapshotted { image_name: String },
     /// Container configuration updated.
     ContainerUpdated { name: String },
+    /// Container renamed.
+    ContainerRenamed { old_name: String, new_name: String },
     /// Session mode enabled — connection will accept multiple requests.
     SessionEnabled,
     /// Container snapshotted (rootfs + config + volumes).

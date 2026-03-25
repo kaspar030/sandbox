@@ -8,6 +8,7 @@ pub mod mounts;
 pub mod networking;
 pub mod networks;
 pub mod persistence;
+pub mod rename;
 pub mod restart;
 pub mod session;
 pub mod snapshot_restore;

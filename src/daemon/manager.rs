@@ -1066,6 +1066,9 @@ impl ContainerManager {
                 name,
                 overrides,
             } => self.handle_clone_container(source, &name, overrides),
+            Request::RenameContainer { name, new_name } => {
+                self.handle_rename_container(&name, &new_name)
+            }
             Request::EnableSession => {
                 // Handled at the connection level in handle_client, not here.
                 HandleResult::response_only(Response::SessionEnabled)
@@ -1406,6 +1409,107 @@ impl ContainerManager {
         let name = new_name.to_string();
         self.containers.insert(name.clone(), container);
         HandleResult::response_only(Response::Created { name })
+    }
+
+    fn handle_rename_container(&mut self, name: &str, new_name: &str) -> HandleResult {
+        // Validate
+        if !self.containers.contains_key(name) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("container '{name}' not found"),
+            });
+        }
+        if self.containers.contains_key(new_name) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("container '{new_name}' already exists"),
+            });
+        }
+        if self.containers[name].state.is_running() {
+            return HandleResult::response_only(Response::Error {
+                message: format!("container '{name}' is running — stop it before renaming"),
+            });
+        }
+
+        let pool = match self
+            .storage
+            .resolve_pool(self.containers[name].spec.pool.as_deref())
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
+
+        // Rename rootfs: <pool>/fs/<old> -> <pool>/fs/<new>
+        let old_rootfs = pool.container_path(name);
+        let new_rootfs = pool.container_path(new_name);
+        if old_rootfs.exists() {
+            if let Err(e) = std::fs::rename(&old_rootfs, &new_rootfs) {
+                return HandleResult::response_only(Response::Error {
+                    message: format!(
+                        "failed to rename rootfs {} -> {}: {e}",
+                        old_rootfs.display(),
+                        new_rootfs.display()
+                    ),
+                });
+            }
+        }
+
+        // Rename snapshots dir: <pool>/snapshots/<old> -> <pool>/snapshots/<new>
+        let old_snaps = pool.path.join("snapshots").join(name);
+        let new_snaps = pool.path.join("snapshots").join(new_name);
+        if old_snaps.exists() {
+            if let Err(e) = std::fs::rename(&old_snaps, &new_snaps) {
+                tracing::warn!("failed to rename snapshots dir: {e}");
+            } else {
+                // Update container name in snapshot manifests
+                if let Ok(entries) = std::fs::read_dir(&new_snaps) {
+                    for entry in entries.flatten() {
+                        let manifest_path = entry.path().join("manifest.json");
+                        if manifest_path.exists() {
+                            if let Ok(json) = std::fs::read_to_string(&manifest_path) {
+                                if let Ok(mut manifest) = serde_json::from_str::<
+                                    storage::snapshot::SnapshotManifest,
+                                >(&json)
+                                {
+                                    manifest.container = new_name.to_string();
+                                    manifest.spec.name = new_name.to_string();
+                                    if let Ok(updated) = serde_json::to_string_pretty(&manifest) {
+                                        let _ = std::fs::write(&manifest_path, updated);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clean up old idmap mount
+        let mut container = self.containers.remove(name).unwrap();
+        if let Some(ref mount_path) = container.idmap_mount {
+            let _ = nix::mount::umount2(mount_path, nix::mount::MntFlags::MNT_DETACH);
+            let _ = std::fs::remove_dir(mount_path);
+        }
+        container.idmap_mount = None;
+
+        // Update container state
+        container.spec.name = new_name.to_string();
+        if old_rootfs.exists() || new_rootfs.exists() {
+            container.rootfs_path = Some(new_rootfs);
+        }
+
+        // Remove old persistence file, save new one
+        persist::remove_state(&self.state_dir, name);
+        Self::persist_container(&self.state_dir, new_name, &container);
+
+        self.containers.insert(new_name.to_string(), container);
+
+        HandleResult::response_only(Response::ContainerRenamed {
+            old_name: name.to_string(),
+            new_name: new_name.to_string(),
+        })
     }
 
     fn handle_update_container(
