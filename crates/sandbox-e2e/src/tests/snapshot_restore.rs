@@ -318,6 +318,53 @@ pub fn test_snapshot_list_and_delete(ctx: &TestContext) -> Result<(), String> {
     Ok(())
 }
 
+/// Test snapshot list with --size shows size information.
+pub fn test_snapshot_list_size(ctx: &TestContext) -> Result<(), String> {
+    let name = "snap-size";
+
+    ctx.cli_ok(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "alpine",
+        "--restart",
+        "no",
+    ]);
+
+    // Create a snapshot
+    ctx.cli_ok(&["snapshot", name, "v1"]);
+
+    // List without --size — should NOT show size
+    let output = ctx.cli_ok(&["snapshots", name]);
+    if !output.contains("v1") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("expected 'v1' in list: {output}"));
+    }
+
+    // List with --size — should show a size suffix (e.g., "1.2M", "512K", etc.)
+    let output = ctx.cli_ok(&["snapshots", "--size", name]);
+    if !output.contains("v1") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("expected 'v1' in sized list: {output}"));
+    }
+    // Size should contain a unit (B, K, M, or G)
+    let has_size = output.contains('K')
+        || output.contains('M')
+        || output.contains('G')
+        || output.contains('B');
+    if !has_size {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!(
+            "expected size info (K/M/G/B) in --size output: {output}"
+        ));
+    }
+
+    let _ = ctx.cli(&["snapshot-rm", name, "v1"]);
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
+
 /// Test auto-generated snapshot name.
 pub fn test_snapshot_auto_name(ctx: &TestContext) -> Result<(), String> {
     let name = "snap-auto";

@@ -228,6 +228,30 @@ impl ContainerManager {
                 }
             }
 
+            // Also kill any orphaned processes remaining in the container's
+            // cgroup. This handles the case where the persisted PID was 0
+            // (e.g., state saved after stop) but processes survived.
+            let procs_path = record.cgroup_path.join("cgroup.procs");
+            if let Ok(content) = std::fs::read_to_string(&procs_path) {
+                for line in content.lines() {
+                    if let Ok(pid) = line.trim().parse::<i32>() {
+                        if pid > 0 {
+                            tracing::info!(
+                                "killing orphaned process in cgroup for {name} (pid {pid})"
+                            );
+                            let pid = nix::unistd::Pid::from_raw(pid);
+                            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+                        }
+                    }
+                }
+            }
+
+            // Clean up idmapped mounts that propagated to the host from
+            // this container's bind mounts (must happen before cgroup/idmap
+            // cleanup since propagated mounts may reference the container's
+            // mount namespace resources)
+            Self::cleanup_propagated_mounts(&record.spec.bind_mounts);
+
             // Clean up cgroup (transient, re-created on start)
             if record.cgroup_path.exists() {
                 tracing::debug!("removing leftover cgroup {}", record.cgroup_path.display());
@@ -539,6 +563,23 @@ impl ContainerManager {
         block_volumes.clear();
     }
 
+    /// Clean up idmapped mounts that propagated from a container's bind mounts
+    /// to the host mount namespace. These appear as idmapped submounts under
+    /// the bind mount source paths on the host.
+    fn cleanup_propagated_mounts(bind_mounts: &[sandbox::protocol::BindMount]) {
+        if bind_mounts.is_empty() {
+            return;
+        }
+        let propagated = sandbox::sys::mountinfo::find_propagated_mounts(bind_mounts);
+        for mount_point in &propagated {
+            tracing::debug!("unmounting propagated mount {}", mount_point.display());
+            let _ = nix::mount::umount2(mount_point, nix::mount::MntFlags::MNT_DETACH);
+        }
+        if !propagated.is_empty() {
+            tracing::info!("cleaned up {} propagated bind mount(s)", propagated.len());
+        }
+    }
+
     fn persist_container(state_dir: &std::path::Path, name: &str, container: &Container) {
         if container.ephemeral {
             return;
@@ -812,6 +853,9 @@ impl ContainerManager {
         // Clean up block volume mounts and loop devices
         Self::cleanup_block_volumes(&mut container.block_volumes);
 
+        // Clean up idmapped mounts that propagated to the host
+        Self::cleanup_propagated_mounts(&container.spec.bind_mounts);
+
         // Clean up cgroup
         if let Some(ref cgroup) = container.cgroup {
             let _ = cgroup.destroy();
@@ -1007,7 +1051,9 @@ impl ContainerManager {
                 name,
                 snapshot_name,
             } => self.handle_restore_container(&name, &snapshot_name),
-            Request::ListContainerSnapshots { name } => self.handle_list_container_snapshots(&name),
+            Request::ListContainerSnapshots { name, show_size } => {
+                self.handle_list_container_snapshots(&name, show_size)
+            }
             Request::DeleteContainerSnapshot {
                 name,
                 snapshot_name,
@@ -1021,7 +1067,10 @@ impl ContainerManager {
                 stack_name,
                 snapshot_name,
             } => self.handle_stack_restore(&stack_name, &snapshot_name),
-            Request::StackSnapshots { stack_name } => self.handle_stack_snapshots(&stack_name),
+            Request::StackSnapshots {
+                stack_name,
+                show_size,
+            } => self.handle_stack_snapshots(&stack_name, show_size),
             Request::EnableSession => {
                 // Handled at the connection level in handle_client, not here.
                 HandleResult::response_only(Response::SessionEnabled)
@@ -1453,7 +1502,7 @@ impl ContainerManager {
         })
     }
 
-    fn handle_list_container_snapshots(&self, name: &str) -> HandleResult {
+    fn handle_list_container_snapshots(&self, name: &str, show_size: bool) -> HandleResult {
         let container = match self.containers.get(name) {
             Some(c) => c,
             None => {
@@ -1484,6 +1533,11 @@ impl ContainerManager {
         let mut snapshots = Vec::new();
         for sn in snap_names {
             let manifest = storage::snapshot::read_manifest(pool, name, &sn);
+            let size_bytes = if show_size {
+                storage::snapshot::snapshot_size(pool, name, &sn).ok()
+            } else {
+                None
+            };
             snapshots.push(sandbox::protocol::SnapshotInfo {
                 name: sn.clone(),
                 timestamp: manifest
@@ -1492,6 +1546,7 @@ impl ContainerManager {
                     .unwrap_or_default(),
                 container: name.to_string(),
                 includes_volumes: manifest.as_ref().is_ok_and(|m| !m.volumes.is_empty()),
+                size_bytes,
             });
         }
 
@@ -1673,7 +1728,7 @@ impl ContainerManager {
         })
     }
 
-    fn handle_stack_snapshots(&self, stack_name: &str) -> HandleResult {
+    fn handle_stack_snapshots(&self, stack_name: &str, show_size: bool) -> HandleResult {
         // Find one container from the stack to determine the pool
         let container = match self
             .containers
@@ -1718,11 +1773,26 @@ impl ContainerManager {
 
         let snapshots = all_snaps
             .into_iter()
-            .map(|sn| sandbox::protocol::StackSnapshotInfo {
-                name: sn,
-                timestamp: String::new(),
-                containers: stack_containers.clone(),
-                includes_volumes: true,
+            .map(|sn| {
+                let size_bytes = if show_size {
+                    // Sum sizes across all stack containers for this snapshot
+                    let mut total = 0u64;
+                    for cname in &stack_containers {
+                        if let Ok(s) = storage::snapshot::snapshot_size(pool, cname, &sn) {
+                            total += s;
+                        }
+                    }
+                    Some(total)
+                } else {
+                    None
+                };
+                sandbox::protocol::StackSnapshotInfo {
+                    name: sn,
+                    timestamp: String::new(),
+                    containers: stack_containers.clone(),
+                    includes_volumes: true,
+                    size_bytes,
+                }
             })
             .collect();
 

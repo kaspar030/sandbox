@@ -388,6 +388,9 @@ pub struct SnapshotInfo {
     pub timestamp: String,
     pub container: String,
     pub includes_volumes: bool,
+    /// Total size in bytes (only populated when --size is requested).
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
 }
 
 /// Info about a stack snapshot (for listing).
@@ -397,6 +400,9 @@ pub struct StackSnapshotInfo {
     pub timestamp: String,
     pub containers: Vec<String>,
     pub includes_volumes: bool,
+    /// Total size in bytes (only populated when --size is requested).
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
 }
 
 /// Partial update for a container's configuration.
@@ -718,7 +724,11 @@ pub enum Request {
     /// Restore a container from a snapshot.
     RestoreContainer { name: String, snapshot_name: String },
     /// List snapshots for a container.
-    ListContainerSnapshots { name: String },
+    ListContainerSnapshots {
+        name: String,
+        #[serde(default)]
+        show_size: bool,
+    },
     /// Delete a container snapshot.
     DeleteContainerSnapshot { name: String, snapshot_name: String },
     /// Snapshot all containers in a stack.
@@ -734,7 +744,11 @@ pub enum Request {
         snapshot_name: String,
     },
     /// List snapshots for a stack.
-    StackSnapshots { stack_name: String },
+    StackSnapshots {
+        stack_name: String,
+        #[serde(default)]
+        show_size: bool,
+    },
     /// Shut down the daemon.
     Shutdown,
     /// Enable session mode: keep the connection alive for multiple requests.

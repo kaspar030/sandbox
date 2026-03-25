@@ -412,6 +412,11 @@ fn all_tests() -> Vec<Test> {
             "snapshot_auto_name",
             tests::snapshot_restore::test_snapshot_auto_name,
         ),
+        Test::Immutable(
+            "Snapshot",
+            "snapshot_list_size",
+            tests::snapshot_restore::test_snapshot_list_size,
+        ),
         // Session mode
         Test::Immutable(
             "Session",

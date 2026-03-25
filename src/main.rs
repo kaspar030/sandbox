@@ -350,6 +350,10 @@ enum Commands {
         /// Container name
         #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
+
+        /// Show snapshot sizes (slower, walks directory tree)
+        #[arg(long)]
+        size: bool,
     },
 
     /// Delete a container snapshot
@@ -689,6 +693,10 @@ enum StackAction {
         /// Stack name
         #[arg(add = ArgValueCandidates::new(completer::stack_completer))]
         name: String,
+
+        /// Show snapshot sizes (slower, walks directory tree)
+        #[arg(long)]
+        size: bool,
     },
 }
 
@@ -1136,9 +1144,12 @@ fn main() -> anyhow::Result<()> {
             print_response(&resp);
         }
 
-        Commands::Snapshots { name } => {
+        Commands::Snapshots { name, size } => {
             let mut client = Client::connect(cli.socket.as_deref())?;
-            let resp = client.request(&Request::ListContainerSnapshots { name })?;
+            let resp = client.request(&Request::ListContainerSnapshots {
+                name,
+                show_size: size,
+            })?;
             print_response(&resp);
         }
 
@@ -1605,9 +1616,12 @@ fn main() -> anyhow::Result<()> {
                 })?;
                 print_response(&resp);
             }
-            StackAction::Snapshots { name } => {
+            StackAction::Snapshots { name, size } => {
                 let mut client = Client::connect(cli.socket.as_deref())?;
-                let resp = client.request(&Request::StackSnapshots { stack_name: name })?;
+                let resp = client.request(&Request::StackSnapshots {
+                    stack_name: name,
+                    show_size: size,
+                })?;
                 print_response(&resp);
             }
         },
@@ -1791,7 +1805,11 @@ fn print_response(resp: &Response) {
                     } else {
                         ""
                     };
-                    println!("  {}{vols}", s.name);
+                    let size = s
+                        .size_bytes
+                        .map(|b| format!("  {}", format_size(b)))
+                        .unwrap_or_default();
+                    println!("  {}{vols}{size}", s.name);
                 }
             }
         }
@@ -1812,7 +1830,11 @@ fn print_response(resp: &Response) {
                 println!("No snapshots");
             } else {
                 for s in snapshots {
-                    println!("  {} ({} containers)", s.name, s.containers.len());
+                    let size = s
+                        .size_bytes
+                        .map(|b| format!("  {}", format_size(b)))
+                        .unwrap_or_default();
+                    println!("  {} ({} containers){size}", s.name, s.containers.len());
                 }
             }
         }

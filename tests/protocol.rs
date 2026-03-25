@@ -158,6 +158,7 @@ fn test_roundtrip_all_request_variants() {
         },
         Request::ListContainerSnapshots {
             name: "foo".to_string(),
+            show_size: false,
         },
         Request::DeleteContainerSnapshot {
             name: "foo".to_string(),
@@ -174,6 +175,7 @@ fn test_roundtrip_all_request_variants() {
         },
         Request::StackSnapshots {
             stack_name: "mystack".to_string(),
+            show_size: false,
         },
         Request::Shutdown,
         Request::EnableSession,
@@ -228,6 +230,7 @@ fn test_roundtrip_all_response_variants() {
                 timestamp: "123".to_string(),
                 container: "foo".to_string(),
                 includes_volumes: true,
+                size_bytes: Some(1024),
             }],
         },
         Response::ContainerSnapshotDeleted {
@@ -248,6 +251,7 @@ fn test_roundtrip_all_response_variants() {
                 timestamp: "123".to_string(),
                 containers: vec!["a".to_string()],
                 includes_volumes: true,
+                size_bytes: Some(2048),
             }],
         },
         Response::ContainerInspect(Box::new(ContainerDetail {
