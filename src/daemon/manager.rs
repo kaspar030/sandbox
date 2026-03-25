@@ -2293,6 +2293,7 @@ impl ContainerManager {
                     sandbox::protocol::RestartPolicy::parse(restart_str)
                         .unwrap_or(sandbox::protocol::RestartPolicy::UnlessStopped)
                 },
+                no_new_privs: !svc.allow_new_privs,
                 ..Default::default()
             };
 

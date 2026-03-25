@@ -809,6 +809,9 @@ pub struct StackContainer {
     /// PID limit
     #[serde(default)]
     pub pids: Option<u32>,
+    /// Allow privilege escalation (sudo/su). Default: false (secure).
+    #[serde(default)]
+    pub allow_new_privs: bool,
 }
 
 /// Information about a running stack.

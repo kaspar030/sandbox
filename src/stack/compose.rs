@@ -130,6 +130,7 @@ fn convert_container(name: String, c: ContainerYaml) -> StackContainer {
         cpus: c.cpus.unwrap_or_default(),
         memory: c.memory.unwrap_or_default(),
         pids: c.pids,
+        allow_new_privs: false, // Docker Compose compat: default secure
     }
 }
 
