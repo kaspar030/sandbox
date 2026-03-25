@@ -70,6 +70,54 @@ pub fn create_container_rootfs(
     Ok(container_path)
 }
 
+/// Clone a container rootfs from an arbitrary source path.
+///
+/// Used for `create --from` (source = live container rootfs) and
+/// `create --from-snapshot` (source = snapshot rootfs). Same CoW dispatch
+/// as `create_container_rootfs` but the source is a path, not an image name.
+#[tracing::instrument(skip_all, level = "debug", fields(container = container_name))]
+pub fn clone_container_rootfs(
+    pool: &StoragePool,
+    source: &Path,
+    container_name: &str,
+) -> Result<PathBuf> {
+    if !source.exists() {
+        return Err(Error::Other(format!(
+            "clone source not found: {}",
+            source.display()
+        )));
+    }
+
+    let container_path = pool.container_path(container_name);
+    if container_path.exists() {
+        return Err(Error::Other(format!(
+            "container rootfs for '{container_name}' already exists in pool '{}'",
+            pool.name
+        )));
+    }
+
+    match pool.fs_type {
+        FsType::Btrfs => {
+            btrfs_snapshot(source, &container_path)?;
+        }
+        FsType::Bcachefs => {
+            bcachefs_snapshot(source, &container_path)?;
+        }
+        FsType::Zfs => {
+            zfs::zfs_clone(source, &container_path)?;
+        }
+        _ => {
+            cp_reflink(source, &container_path)?;
+        }
+    }
+
+    tracing::info!(
+        "cloned rootfs for container '{container_name}' from {}",
+        source.display()
+    );
+    Ok(container_path)
+}
+
 /// Destroy a container's rootfs.
 ///
 /// On btrfs/bcachefs: deletes the subvolume/snapshot.

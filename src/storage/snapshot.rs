@@ -53,7 +53,11 @@ fn snapshot_dir(pool: &StoragePool, container_name: &str, snapshot_name: &str) -
 }
 
 /// Path to the rootfs snapshot within a snapshot directory.
-fn snapshot_rootfs_path(pool: &StoragePool, container_name: &str, snapshot_name: &str) -> PathBuf {
+pub fn snapshot_rootfs_path(
+    pool: &StoragePool,
+    container_name: &str,
+    snapshot_name: &str,
+) -> PathBuf {
     snapshot_dir(pool, container_name, snapshot_name).join("rootfs")
 }
 

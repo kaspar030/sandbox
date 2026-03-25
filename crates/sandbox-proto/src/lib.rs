@@ -405,6 +405,34 @@ pub struct StackSnapshotInfo {
     pub size_bytes: Option<u64>,
 }
 
+/// Source for cloning a container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CloneSource {
+    /// Clone from a running or stopped container's current rootfs.
+    Container(String),
+    /// Clone from a container's snapshot (container_name, snapshot_name).
+    Snapshot(String, String),
+}
+
+/// Overrides applied when cloning a container.
+/// All fields are optional — only specified fields override the source spec.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContainerOverrides {
+    #[serde(default)]
+    pub env: Vec<String>,
+    pub hostname: Option<String>,
+    pub command: Option<Vec<String>>,
+    pub entrypoint: Option<Vec<String>>,
+    pub user: Option<String>,
+    pub working_dir: Option<String>,
+    pub restart_policy: Option<RestartPolicy>,
+    pub use_init: Option<bool>,
+    #[serde(default)]
+    pub volumes: Vec<VolumeMount>,
+    #[serde(default)]
+    pub bind_mounts: Vec<BindMount>,
+}
+
 /// Partial update for a container's configuration.
 ///
 /// All fields are optional — only specified (Some) fields are applied.
@@ -748,6 +776,16 @@ pub enum Request {
         stack_name: String,
         #[serde(default)]
         show_size: bool,
+    },
+    /// Clone a container from another container or from a snapshot.
+    CloneContainer {
+        /// Source to clone from.
+        source: CloneSource,
+        /// New container name.
+        name: String,
+        /// Optional overrides applied on top of the source spec.
+        #[serde(default)]
+        overrides: ContainerOverrides,
     },
     /// Shut down the daemon.
     Shutdown,

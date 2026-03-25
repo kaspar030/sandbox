@@ -417,6 +417,27 @@ fn all_tests() -> Vec<Test> {
             "snapshot_list_size",
             tests::snapshot_restore::test_snapshot_list_size,
         ),
+        // Clone
+        Test::Immutable(
+            "Clone",
+            "clone_from_container",
+            tests::clone::test_clone_from_container,
+        ),
+        Test::Immutable(
+            "Clone",
+            "clone_from_snapshot",
+            tests::clone::test_clone_from_snapshot,
+        ),
+        Test::Immutable(
+            "Clone",
+            "clone_with_overrides",
+            tests::clone::test_clone_with_overrides,
+        ),
+        Test::Immutable(
+            "Clone",
+            "clone_independence",
+            tests::clone::test_clone_independence,
+        ),
         // Session mode
         Test::Immutable(
             "Session",

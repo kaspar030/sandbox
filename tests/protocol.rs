@@ -177,6 +177,27 @@ fn test_roundtrip_all_request_variants() {
             stack_name: "mystack".to_string(),
             show_size: false,
         },
+        Request::CloneContainer {
+            source: CloneSource::Container("source".to_string()),
+            name: "clone1".to_string(),
+            overrides: ContainerOverrides::default(),
+        },
+        Request::CloneContainer {
+            source: CloneSource::Snapshot("mycontainer".to_string(), "v1".to_string()),
+            name: "clone2".to_string(),
+            overrides: ContainerOverrides {
+                env: vec!["FOO=bar".to_string()],
+                hostname: Some("myclone".to_string()),
+                command: Some(vec!["/bin/sh".to_string()]),
+                entrypoint: None,
+                user: Some("1000".to_string()),
+                working_dir: Some("/app".to_string()),
+                restart_policy: Some(RestartPolicy::Always),
+                use_init: Some(true),
+                volumes: vec![],
+                bind_mounts: vec![],
+            },
+        },
         Request::Shutdown,
         Request::EnableSession,
     ];

@@ -132,8 +132,16 @@ enum Commands {
         /// Container name (auto-generated if omitted)
         #[arg(long)]
         name: Option<String>,
+        /// Image to create from (required unless --from or --from-snapshot is used)
         #[arg(long, add = ArgValueCandidates::new(completer::image_completer))]
-        image: String,
+        image: Option<String>,
+        /// Clone from an existing container
+        #[arg(long, conflicts_with_all = ["image", "from_snapshot"],
+              add = ArgValueCandidates::new(completer::container_completer))]
+        from: Option<String>,
+        /// Clone from a container snapshot (format: container:snapshot)
+        #[arg(long, conflicts_with_all = ["image", "from"])]
+        from_snapshot: Option<String>,
         #[arg(long, add = ArgValueCandidates::new(completer::pool_completer))]
         pool: Option<String>,
         #[arg(long)]
@@ -879,6 +887,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Create {
             name,
             image,
+            from,
+            from_snapshot,
             pool,
             hostname,
             memory,
@@ -905,41 +915,125 @@ fn main() -> anyhow::Result<()> {
             command,
         } => {
             let name = name.unwrap_or_else(|| petname::petname(2, "-").unwrap());
-            let resolved_env = resolve_env(&env);
-            let restart_policy = sandbox_proto::RestartPolicy::parse(&restart)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "unknown restart policy: {restart} (expected: no, always, on-failure, unless-stopped)"
-                    )
-                })?;
-            let mut spec = build_spec(
-                name,
-                image,
-                pool,
-                hostname,
-                memory,
-                cpus,
-                pids_max,
-                network,
-                bridge,
-                ip,
-                gateway,
-                seccomp,
-                cap_add,
-                bind,
-                resolved_env,
-                user,
-                init,
-                uid_map,
-                gid_map,
-                command,
-                allow_new_privs,
-            )?;
-            spec.publish = parse_port_mappings(&publish)?;
-            spec.volumes = parse_volume_mounts(&volume)?;
-            spec.restart_policy = restart_policy;
             let mut client = Client::connect(cli.socket.as_deref())?;
-            let resp = client.request(&Request::Create(spec))?;
+
+            // Determine creation mode: --from, --from-snapshot, or --image
+            let resp = if let Some(source_container) = from {
+                // Clone from existing container
+                let resolved_env = resolve_env(&env);
+                let restart_policy = sandbox_proto::RestartPolicy::parse(&restart);
+                let overrides = sandbox_proto::ContainerOverrides {
+                    env: resolved_env,
+                    hostname,
+                    command: if command.is_empty() {
+                        None
+                    } else {
+                        Some(command)
+                    },
+                    entrypoint: None,
+                    user,
+                    working_dir: None,
+                    restart_policy,
+                    use_init: if init { Some(true) } else { None },
+                    volumes: parse_volume_mounts(&volume)?,
+                    bind_mounts: bind
+                        .iter()
+                        .map(|b| {
+                            let (source, target, readonly) = parse_mount_spec(b)?;
+                            Ok(sandbox_proto::BindMount {
+                                source,
+                                target,
+                                readonly,
+                            })
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?,
+                };
+                client.request(&Request::CloneContainer {
+                    source: sandbox_proto::CloneSource::Container(source_container),
+                    name,
+                    overrides,
+                })?
+            } else if let Some(snap_spec) = from_snapshot {
+                // Clone from snapshot — parse "container:snapshot"
+                let (container_name, snapshot_name) = snap_spec.split_once(':')
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "invalid --from-snapshot format: expected 'container:snapshot', got '{snap_spec}'"
+                    ))?;
+                let resolved_env = resolve_env(&env);
+                let restart_policy = sandbox_proto::RestartPolicy::parse(&restart);
+                let overrides = sandbox_proto::ContainerOverrides {
+                    env: resolved_env,
+                    hostname,
+                    command: if command.is_empty() {
+                        None
+                    } else {
+                        Some(command)
+                    },
+                    entrypoint: None,
+                    user,
+                    working_dir: None,
+                    restart_policy,
+                    use_init: if init { Some(true) } else { None },
+                    volumes: parse_volume_mounts(&volume)?,
+                    bind_mounts: bind
+                        .iter()
+                        .map(|b| {
+                            let (source, target, readonly) = parse_mount_spec(b)?;
+                            Ok(sandbox_proto::BindMount {
+                                source,
+                                target,
+                                readonly,
+                            })
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?,
+                };
+                client.request(&Request::CloneContainer {
+                    source: sandbox_proto::CloneSource::Snapshot(
+                        container_name.to_string(),
+                        snapshot_name.to_string(),
+                    ),
+                    name,
+                    overrides,
+                })?
+            } else if let Some(image) = image {
+                // Standard create from image
+                let resolved_env = resolve_env(&env);
+                let restart_policy = sandbox_proto::RestartPolicy::parse(&restart)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "unknown restart policy: {restart} (expected: no, always, on-failure, unless-stopped)"
+                        )
+                    })?;
+                let mut spec = build_spec(
+                    name,
+                    image,
+                    pool,
+                    hostname,
+                    memory,
+                    cpus,
+                    pids_max,
+                    network,
+                    bridge,
+                    ip,
+                    gateway,
+                    seccomp,
+                    cap_add,
+                    bind,
+                    resolved_env,
+                    user,
+                    init,
+                    uid_map,
+                    gid_map,
+                    command,
+                    allow_new_privs,
+                )?;
+                spec.publish = parse_port_mappings(&publish)?;
+                spec.volumes = parse_volume_mounts(&volume)?;
+                spec.restart_policy = restart_policy;
+                client.request(&Request::Create(spec))?
+            } else {
+                anyhow::bail!("one of --image, --from, or --from-snapshot is required");
+            };
 
             if start {
                 if let Response::Created { ref name } = resp {

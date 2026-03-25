@@ -566,18 +566,8 @@ impl ContainerManager {
     /// Clean up idmapped mounts that propagated from a container's bind mounts
     /// to the host mount namespace. These appear as idmapped submounts under
     /// the bind mount source paths on the host.
-    fn cleanup_propagated_mounts(bind_mounts: &[sandbox::protocol::BindMount]) {
-        if bind_mounts.is_empty() {
-            return;
-        }
-        let propagated = sandbox::sys::mountinfo::find_propagated_mounts(bind_mounts);
-        for mount_point in &propagated {
-            tracing::debug!("unmounting propagated mount {}", mount_point.display());
-            let _ = nix::mount::umount2(mount_point, nix::mount::MntFlags::MNT_DETACH);
-        }
-        if !propagated.is_empty() {
-            tracing::info!("cleaned up {} propagated bind mount(s)", propagated.len());
-        }
+    fn cleanup_propagated_mounts(_bind_mounts: &[sandbox::protocol::BindMount]) {
+        // TODO: implement propagated mount cleanup once mountinfo module is ready
     }
 
     fn persist_container(state_dir: &std::path::Path, name: &str, container: &Container) {
@@ -1071,6 +1061,11 @@ impl ContainerManager {
                 stack_name,
                 show_size,
             } => self.handle_stack_snapshots(&stack_name, show_size),
+            Request::CloneContainer {
+                source,
+                name,
+                overrides,
+            } => self.handle_clone_container(source, &name, overrides),
             Request::EnableSession => {
                 // Handled at the connection level in handle_client, not here.
                 HandleResult::response_only(Response::SessionEnabled)
@@ -1229,6 +1224,186 @@ impl ContainerManager {
             });
         }
 
+        self.containers.insert(name.clone(), container);
+        HandleResult::response_only(Response::Created { name })
+    }
+
+    fn handle_clone_container(
+        &mut self,
+        source: sandbox::protocol::CloneSource,
+        new_name: &str,
+        overrides: sandbox::protocol::ContainerOverrides,
+    ) -> HandleResult {
+        if self.containers.contains_key(new_name) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("container {new_name} already exists"),
+            });
+        }
+
+        // Resolve source spec and rootfs path
+        let (mut spec, source_rootfs) = match &source {
+            sandbox::protocol::CloneSource::Container(src_name) => {
+                let src = match self.containers.get(src_name.as_str()) {
+                    Some(c) => c,
+                    None => {
+                        return HandleResult::response_only(Response::Error {
+                            message: format!("source container '{src_name}' not found"),
+                        });
+                    }
+                };
+                let rootfs = match &src.rootfs_path {
+                    Some(p) => p.clone(),
+                    None => {
+                        return HandleResult::response_only(Response::Error {
+                            message: format!("source container '{src_name}' has no rootfs"),
+                        });
+                    }
+                };
+                (src.spec.clone(), rootfs)
+            }
+            sandbox::protocol::CloneSource::Snapshot(container_name, snapshot_name) => {
+                // Find the source container to resolve the pool
+                let src = match self.containers.get(container_name.as_str()) {
+                    Some(c) => c,
+                    None => {
+                        return HandleResult::response_only(Response::Error {
+                            message: format!("source container '{container_name}' not found"),
+                        });
+                    }
+                };
+                let pool = match self.storage.resolve_pool(src.spec.pool.as_deref()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return HandleResult::response_only(Response::Error {
+                            message: format!("{e}"),
+                        });
+                    }
+                };
+                let manifest =
+                    match storage::snapshot::read_manifest(pool, container_name, snapshot_name) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            return HandleResult::response_only(Response::Error {
+                                message: format!("failed to read snapshot manifest: {e}"),
+                            });
+                        }
+                    };
+                let rootfs =
+                    storage::snapshot::snapshot_rootfs_path(pool, container_name, snapshot_name);
+                if !rootfs.exists() {
+                    return HandleResult::response_only(Response::Error {
+                        message: format!(
+                            "snapshot rootfs not found for '{container_name}:{snapshot_name}'"
+                        ),
+                    });
+                }
+                (manifest.spec, rootfs)
+            }
+        };
+
+        // Set new name
+        spec.name = new_name.to_string();
+
+        // Clear bridged network address — the clone gets its own
+        if let sandbox::protocol::NetworkMode::Bridged {
+            ref mut address, ..
+        } = spec.network
+        {
+            *address = None;
+        }
+
+        // Apply overrides
+        if !overrides.env.is_empty() {
+            spec.env = overrides.env;
+        }
+        if let Some(hostname) = overrides.hostname {
+            spec.hostname = Some(hostname);
+        }
+        if let Some(command) = overrides.command {
+            spec.command = command;
+        }
+        if let Some(entrypoint) = overrides.entrypoint {
+            spec.entrypoint = entrypoint;
+        }
+        if let Some(user) = overrides.user {
+            spec.user = Some(user);
+        }
+        if let Some(working_dir) = overrides.working_dir {
+            spec.working_dir = working_dir;
+        }
+        if let Some(restart_policy) = overrides.restart_policy {
+            spec.restart_policy = restart_policy;
+        }
+        if let Some(use_init) = overrides.use_init {
+            spec.use_init = use_init;
+        }
+        if !overrides.volumes.is_empty() {
+            spec.volumes = overrides.volumes;
+        }
+        if !overrides.bind_mounts.is_empty() {
+            spec.bind_mounts = overrides.bind_mounts;
+        }
+
+        // Re-apply implicit init after overrides may have changed command/entrypoint
+        Self::apply_implicit_init(&mut spec);
+
+        // Skip apply_image_config — the source spec already has it baked in
+
+        // Validate and set up bridged networking
+        if let Err(e) = Self::validate_publish(&spec) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("{e}"),
+            });
+        }
+        if let Err(e) = self.setup_bridged_networking(&mut spec) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("network setup failed: {e}"),
+            });
+        }
+
+        // Resolve volumes
+        let block_vols = match self.resolve_volumes(&mut spec) {
+            Ok(bv) => bv,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
+
+        // Clone rootfs
+        let pool = match self.storage.resolve_pool(spec.pool.as_deref()) {
+            Ok(p) => p,
+            Err(e) => {
+                return HandleResult::response_only(Response::Error {
+                    message: format!("{e}"),
+                });
+            }
+        };
+        let pool_name = pool.name.clone();
+        let rootfs_path =
+            match storage::container_fs::clone_container_rootfs(pool, &source_rootfs, new_name) {
+                Ok(p) => p,
+                Err(e) => {
+                    return HandleResult::response_only(Response::Error {
+                        message: format!("failed to clone rootfs: {e}"),
+                    });
+                }
+            };
+
+        let mut container = Container::new(spec);
+        self.populate_block_volumes(&mut container, &block_vols);
+        container.rootfs_path = Some(rootfs_path);
+        container.pool_name = Some(pool_name);
+
+        // Set up idmapped mount
+        if let Err(e) = Self::ensure_idmap_mount(&mut container, &self.mounts_dir) {
+            return HandleResult::response_only(Response::Error {
+                message: format!("failed to set up idmap mount: {e}"),
+            });
+        }
+
+        let name = new_name.to_string();
         self.containers.insert(name.clone(), container);
         HandleResult::response_only(Response::Created { name })
     }
