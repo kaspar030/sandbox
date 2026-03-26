@@ -2382,6 +2382,23 @@ fn parse_id_mapping(s: &str) -> anyhow::Result<IdMapping> {
 
 /// Run an interactive session, proxying between the local terminal and
 /// a PTY master fd received from the daemon.
+/// Global PTY fd for SIGWINCH handler (async-signal-safe).
+static SIGWINCH_PTY_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// SIGWINCH handler: propagate terminal resize to the PTY.
+///
+/// Uses only async-signal-safe syscalls (ioctl).
+extern "C" fn handle_sigwinch(_sig: libc::c_int) {
+    let pty_fd = SIGWINCH_PTY_FD.load(std::sync::atomic::Ordering::Relaxed);
+    if pty_fd >= 0 {
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, &mut ws);
+            libc::ioctl(pty_fd, libc::TIOCSWINSZ, &ws);
+        }
+    }
+}
+
 fn interactive_session(pty_master: std::os::fd::OwnedFd) -> anyhow::Result<()> {
     use nix::sys::termios::{SetArg, cfmakeraw, tcgetattr, tcsetattr};
     use std::io::{Read, Write};
@@ -2397,12 +2414,17 @@ fn interactive_session(pty_master: std::os::fd::OwnedFd) -> anyhow::Result<()> {
         None
     };
 
-    // Guard to restore terminal on exit (including panic)
+    // Guard to restore terminal and SIGWINCH handler on exit (including panic)
     struct TerminalGuard {
         original: Option<nix::sys::termios::Termios>,
     }
     impl Drop for TerminalGuard {
         fn drop(&mut self) {
+            // Restore SIGWINCH to default
+            SIGWINCH_PTY_FD.store(-1, std::sync::atomic::Ordering::Relaxed);
+            unsafe {
+                libc::signal(libc::SIGWINCH, libc::SIG_DFL);
+            }
             if let Some(ref orig) = self.original {
                 let stdin = std::io::stdin();
                 let _ =
@@ -2429,6 +2451,14 @@ fn interactive_session(pty_master: std::os::fd::OwnedFd) -> anyhow::Result<()> {
     }
 
     let master_raw = pty_master.as_raw_fd();
+
+    // Set up SIGWINCH handler to propagate terminal resizes to the PTY
+    if is_tty {
+        SIGWINCH_PTY_FD.store(master_raw, std::sync::atomic::Ordering::Relaxed);
+        unsafe {
+            libc::signal(libc::SIGWINCH, handle_sigwinch as libc::sighandler_t);
+        }
+    }
 
     // Thread 1: stdin → PTY master
     let _stdin_handle = std::thread::spawn(move || {
