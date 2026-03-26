@@ -2456,7 +2456,10 @@ fn interactive_session(pty_master: std::os::fd::OwnedFd) -> anyhow::Result<()> {
     if is_tty {
         SIGWINCH_PTY_FD.store(master_raw, std::sync::atomic::Ordering::Relaxed);
         unsafe {
-            libc::signal(libc::SIGWINCH, handle_sigwinch as libc::sighandler_t);
+            libc::signal(
+                libc::SIGWINCH,
+                handle_sigwinch as *const () as libc::sighandler_t,
+            );
         }
     }
 
