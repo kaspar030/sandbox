@@ -121,3 +121,56 @@ pub fn test_edit_change_workdir(ctx: &TestContext) -> Result<(), String> {
     let _ = ctx.cli(&["destroy", name]);
     Ok(())
 }
+
+/// Test adding a bind mount via edit on a stopped container.
+pub fn test_edit_add_bind_mount(ctx: &TestContext) -> Result<(), String> {
+    let name = "edit-bind";
+
+    ctx.cli_ok(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "alpine",
+        "--restart",
+        "no",
+    ]);
+
+    // Write an editor script that adds a bind mount
+    let script = "/tmp/sandbox-test-editor-bind.sh";
+    std::fs::write(
+        script,
+        concat!(
+            "#!/bin/sh\n",
+            "sed -i 's/^bind_mounts: \\[\\]/bind_mounts:\\n",
+            "  - source: \"\\/tmp\"\\n",
+            "    target: \"\\/mnt\"/' \"$1\"\n"
+        ),
+    )
+    .map_err(|e| format!("write script: {e}"))?;
+    std::fs::set_permissions(script, PermissionsExt::from_mode(0o755))
+        .map_err(|e| format!("chmod: {e}"))?;
+    let output = ctx.cli_with_env(&["edit", name], &[("EDITOR", script)]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("edit failed: stdout={stdout} stderr={stderr}"));
+    }
+    if !stdout.contains("bind_mounts") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!(
+            "expected bind_mounts change summary, got: {stdout}"
+        ));
+    }
+
+    // Verify via mount list
+    let mounts = ctx.cli_ok(&["mount", "list", name]);
+    if !mounts.contains("/tmp") || !mounts.contains("/mnt") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("expected bind mount in mount list: {mounts}"));
+    }
+
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}

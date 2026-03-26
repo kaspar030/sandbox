@@ -574,6 +574,22 @@ fn test_roundtrip_update_container_full() {
             cap_add: vec!["NET_RAW".to_string()],
             cap_drop: vec!["SYS_ADMIN".to_string()],
             no_new_privs: Some(false),
+            bind_mounts: Some(vec![sandbox_proto::BindMount {
+                source: "/tmp".to_string(),
+                target: "/mnt".to_string(),
+                readonly: true,
+            }]),
+            volumes: Some(vec![sandbox_proto::VolumeMount {
+                name: "data".to_string(),
+                target: "/data".to_string(),
+                readonly: false,
+                volume_type: sandbox_proto::VolumeType::Filesystem,
+            }]),
+            publish: Some(vec![sandbox_proto::PortMapping {
+                host_port: 8080,
+                container_port: 80,
+                protocol: sandbox_proto::PortProtocol::Tcp,
+            }]),
         },
     };
 

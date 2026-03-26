@@ -1189,6 +1189,9 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     None
                 },
+                bind_mounts: None,
+                volumes: None,
+                publish: None,
             };
 
             // Check at least one flag was given
@@ -2408,6 +2411,30 @@ struct EditSpec {
     memory: Option<String>,
     cpus: Option<f64>,
     pids_max: Option<u32>,
+    #[serde(default)]
+    bind_mounts: Vec<EditBindMount>,
+    #[serde(default)]
+    volumes: Vec<EditVolumeMount>,
+    #[serde(default)]
+    publish: Vec<String>,
+}
+
+/// Simplified bind mount for YAML editing.
+#[derive(serde::Deserialize, Debug, Clone)]
+struct EditBindMount {
+    source: String,
+    target: String,
+    #[serde(default)]
+    readonly: bool,
+}
+
+/// Simplified volume mount for YAML editing.
+#[derive(serde::Deserialize, Debug, Clone)]
+struct EditVolumeMount {
+    name: String,
+    target: String,
+    #[serde(default)]
+    readonly: bool,
 }
 
 fn default_edit_workdir() -> String {
@@ -2536,6 +2563,56 @@ fn generate_edit_yaml(name: &str, d: &sandbox_proto::ContainerDetail) -> String 
         Some(n) => custom.push_str(&format!("pids_max: {n}\n")),
     }
 
+    // -- bind_mounts --
+    if d.bind_mounts.is_empty() {
+        defaults.push_str("bind_mounts: []\n");
+    } else {
+        custom.push_str("bind_mounts:\n");
+        for m in &d.bind_mounts {
+            custom.push_str(&format!("  - source: \"{}\"\n", m.source));
+            custom.push_str(&format!("    target: \"{}\"\n", m.target));
+            if m.readonly {
+                custom.push_str("    readonly: true\n");
+            }
+        }
+    }
+
+    // -- volumes (filesystem only) --
+    let fs_vols: Vec<_> = d
+        .volumes
+        .iter()
+        .filter(|v| v.volume_type == sandbox_proto::VolumeType::Filesystem)
+        .collect();
+    if fs_vols.is_empty() {
+        defaults.push_str("volumes: []\n");
+    } else {
+        custom.push_str("volumes:\n");
+        for v in &fs_vols {
+            custom.push_str(&format!("  - name: \"{}\"\n", v.name));
+            custom.push_str(&format!("    target: \"{}\"\n", v.target));
+            if v.readonly {
+                custom.push_str("    readonly: true\n");
+            }
+        }
+    }
+
+    // -- publish --
+    if d.publish.is_empty() {
+        defaults.push_str("publish: []\n");
+    } else {
+        custom.push_str("publish:\n");
+        for p in &d.publish {
+            let proto = match p.protocol {
+                sandbox_proto::PortProtocol::Tcp => "tcp",
+                sandbox_proto::PortProtocol::Udp => "udp",
+            };
+            custom.push_str(&format!(
+                "  - \"{}:{}/{proto}\"\n",
+                p.host_port, p.container_port
+            ));
+        }
+    }
+
     // Assemble: header, custom settings, then defaults
     let mut yaml = String::new();
     yaml.push_str(&format!("# sandbox edit: {name}\n"));
@@ -2601,6 +2678,44 @@ fn validate_edit_spec(spec: &EditSpec) -> Vec<String> {
     for cap in &spec.capabilities {
         if sandbox::security::capabilities::resolve_capability(cap).is_none() {
             errors.push(format!("capabilities: unknown capability \"{cap}\""));
+        }
+    }
+
+    // bind_mounts: check target is absolute path
+    for (i, m) in spec.bind_mounts.iter().enumerate() {
+        if !m.target.starts_with('/') {
+            errors.push(format!(
+                "bind_mounts[{i}]: target \"{}\" must be an absolute path",
+                m.target
+            ));
+        }
+    }
+
+    // volumes: check target is absolute path
+    for (i, v) in spec.volumes.iter().enumerate() {
+        if !v.target.starts_with('/') {
+            errors.push(format!(
+                "volumes[{i}]: target \"{}\" must be an absolute path",
+                v.target
+            ));
+        }
+        if v.name.is_empty() {
+            errors.push(format!("volumes[{i}]: name cannot be empty"));
+        }
+    }
+
+    // publish: validate format
+    for (i, p) in spec.publish.iter().enumerate() {
+        let s = p
+            .strip_suffix("/tcp")
+            .or_else(|| p.strip_suffix("/udp"))
+            .unwrap_or(p);
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() != 2 || parts[0].parse::<u16>().is_err() || parts[1].parse::<u16>().is_err()
+        {
+            errors.push(format!(
+                "publish[{i}]: invalid \"{p}\" (expected: hostPort:containerPort[/tcp|udp])"
+            ));
         }
     }
 
@@ -2708,7 +2823,94 @@ fn build_update_from_diff(
         update.pids_max = edited.pids_max;
     }
 
+    // bind_mounts
+    let orig_binds: Vec<(&str, &str, bool)> = original
+        .bind_mounts
+        .iter()
+        .map(|m| (m.source.as_str(), m.target.as_str(), m.readonly))
+        .collect();
+    let edit_binds: Vec<(&str, &str, bool)> = edited
+        .bind_mounts
+        .iter()
+        .map(|m| (m.source.as_str(), m.target.as_str(), m.readonly))
+        .collect();
+    if orig_binds != edit_binds {
+        update.bind_mounts = Some(
+            edited
+                .bind_mounts
+                .iter()
+                .map(|m| sandbox_proto::BindMount {
+                    source: m.source.clone(),
+                    target: m.target.clone(),
+                    readonly: m.readonly,
+                })
+                .collect(),
+        );
+    }
+
+    // volumes
+    let orig_vols: Vec<(&str, &str, bool)> = original
+        .volumes
+        .iter()
+        .filter(|v| v.volume_type == sandbox_proto::VolumeType::Filesystem)
+        .map(|v| (v.name.as_str(), v.target.as_str(), v.readonly))
+        .collect();
+    let edit_vols: Vec<(&str, &str, bool)> = edited
+        .volumes
+        .iter()
+        .map(|v| (v.name.as_str(), v.target.as_str(), v.readonly))
+        .collect();
+    if orig_vols != edit_vols {
+        update.volumes = Some(
+            edited
+                .volumes
+                .iter()
+                .map(|v| sandbox_proto::VolumeMount {
+                    name: v.name.clone(),
+                    target: v.target.clone(),
+                    readonly: v.readonly,
+                    volume_type: sandbox_proto::VolumeType::Filesystem,
+                })
+                .collect(),
+        );
+    }
+
+    // publish
+    let edited_publish = parse_edit_publish(&edited.publish);
+    if edited_publish != original.publish {
+        update.publish = Some(edited_publish);
+    }
+
     update
+}
+
+/// Parse publish strings from YAML ("8080:80/tcp") into PortMappings.
+fn parse_edit_publish(entries: &[String]) -> Vec<sandbox_proto::PortMapping> {
+    entries
+        .iter()
+        .filter_map(|s| {
+            // Format: hostPort:containerPort[/proto]
+            let (ports_str, proto) = if let Some(p) = s.strip_suffix("/udp") {
+                (p, sandbox_proto::PortProtocol::Udp)
+            } else if let Some(p) = s.strip_suffix("/tcp") {
+                (p, sandbox_proto::PortProtocol::Tcp)
+            } else {
+                (s.as_str(), sandbox_proto::PortProtocol::Tcp)
+            };
+            let parts: Vec<&str> = ports_str.split(':').collect();
+            if parts.len() == 2 {
+                let host_port = parts[0].parse().ok()?;
+                let container_port = parts[1].parse().ok()?;
+                Some(sandbox_proto::PortMapping {
+                    host_port,
+                    container_port,
+                    protocol: proto,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Print a human-readable summary of changes.
@@ -2766,6 +2968,31 @@ fn print_edit_summary(original: &sandbox_proto::ContainerDetail, edited: &EditSp
     let orig_rp_str = format!("{}", original.restart_policy);
     if *edited_rp_str != orig_rp_str {
         println!("  restart_policy: {orig_rp_str} → {edited_rp_str}");
+    }
+    // bind_mounts changes
+    let orig_bind_count = original.bind_mounts.len();
+    let edit_bind_count = edited.bind_mounts.len();
+    if orig_bind_count != edit_bind_count {
+        println!("  bind_mounts: {orig_bind_count} → {edit_bind_count}");
+    }
+    // volume changes
+    let orig_vol_count = original
+        .volumes
+        .iter()
+        .filter(|v| v.volume_type == sandbox_proto::VolumeType::Filesystem)
+        .count();
+    let edit_vol_count = edited.volumes.len();
+    if orig_vol_count != edit_vol_count {
+        println!("  volumes: {orig_vol_count} → {edit_vol_count}");
+    }
+    // publish changes
+    let edited_publish = parse_edit_publish(&edited.publish);
+    if edited_publish != original.publish {
+        println!(
+            "  publish: {} → {}",
+            original.publish.len(),
+            edited_publish.len()
+        );
     }
 }
 

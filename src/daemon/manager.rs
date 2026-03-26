@@ -1607,6 +1607,102 @@ impl ContainerManager {
             container.spec.no_new_privs = nnp;
         }
 
+        // -- Bind mounts --
+        if let Some(new_binds) = &update.bind_mounts {
+            if is_running {
+                let pid = container.pid.unwrap_or(0);
+                // Remove mounts no longer in the new list
+                let old_targets: Vec<String> = container
+                    .spec
+                    .bind_mounts
+                    .iter()
+                    .map(|m| m.target.clone())
+                    .collect();
+                for target in &old_targets {
+                    if !new_binds.iter().any(|b| b.target == *target) {
+                        if let Err(e) = sandbox::sys::hot_mount::hot_unmount(pid, target) {
+                            tracing::warn!("failed to unmount {target}: {e}");
+                        }
+                    }
+                }
+                // Add new mounts
+                for bind in new_binds {
+                    if !container
+                        .spec
+                        .bind_mounts
+                        .iter()
+                        .any(|b| b.target == bind.target)
+                    {
+                        let source_path = std::path::Path::new(&bind.source);
+                        if let Err(e) = sandbox::sys::hot_mount::hot_bind_mount(
+                            pid,
+                            source_path,
+                            &bind.target,
+                            bind.readonly,
+                        ) {
+                            tracing::warn!("failed to mount {}: {e}", bind.target);
+                        }
+                    }
+                }
+            }
+            container.spec.bind_mounts = new_binds.clone();
+        }
+
+        // -- Volumes --
+        if let Some(new_vols) = &update.volumes {
+            if is_running {
+                let pid = container.pid.unwrap_or(0);
+                // Unmount removed volumes
+                let old_targets: Vec<String> = container
+                    .spec
+                    .volumes
+                    .iter()
+                    .filter(|v| v.volume_type == sandbox::protocol::VolumeType::Filesystem)
+                    .map(|v| v.target.clone())
+                    .collect();
+                for target in &old_targets {
+                    if !new_vols.iter().any(|v| v.target == *target) {
+                        if let Err(e) = sandbox::sys::hot_mount::hot_unmount(pid, target) {
+                            tracing::warn!("failed to unmount volume at {target}: {e}");
+                        }
+                    }
+                }
+                // Mount new volumes
+                if let Ok(pool) = self.storage.resolve_pool(container.spec.pool.as_deref()) {
+                    for vol in new_vols {
+                        if !container
+                            .spec
+                            .volumes
+                            .iter()
+                            .any(|v| v.target == vol.target)
+                        {
+                            let vol_path = storage::volume::volume_path(pool, &vol.name);
+                            if let Err(e) = sandbox::sys::hot_mount::hot_bind_mount(
+                                pid,
+                                &vol_path,
+                                &vol.target,
+                                vol.readonly,
+                            ) {
+                                tracing::warn!("failed to mount volume {}: {e}", vol.target);
+                            }
+                        }
+                    }
+                }
+            }
+            container.spec.volumes = new_vols.clone();
+        }
+
+        // -- Publish ports (stopped only) --
+        if let Some(new_publish) = &update.publish {
+            if is_running && *new_publish != container.spec.publish {
+                return HandleResult::response_only(Response::Error {
+                    message: "cannot change port mappings on a running container — stop it first"
+                        .to_string(),
+                });
+            }
+            container.spec.publish = new_publish.clone();
+        }
+
         // If running, apply cgroup changes live
         if is_running {
             let cgroup_path = PathBuf::from("/sys/fs/cgroup/sandbox").join(name);

@@ -467,6 +467,11 @@ fn all_tests() -> Vec<Test> {
             "edit_change_workdir",
             tests::edit::test_edit_change_workdir,
         ),
+        Test::Immutable(
+            "Edit",
+            "edit_add_bind_mount",
+            tests::edit::test_edit_add_bind_mount,
+        ),
         // Session mode
         Test::Immutable(
             "Session",

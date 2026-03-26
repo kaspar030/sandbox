@@ -244,7 +244,7 @@ pub struct NetworkInfo {
 }
 
 /// Port mapping for bridged networking.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortMapping {
     pub host_port: u16,
     pub container_port: u16,
@@ -252,7 +252,7 @@ pub struct PortMapping {
 }
 
 /// Protocol for port mapping.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PortProtocol {
     Tcp,
     Udp,
@@ -490,6 +490,14 @@ pub struct ContainerUpdate {
     pub cap_drop: Vec<String>,
     /// Set no_new_privs. Some(true) = enable, Some(false) = disable (allow sudo).
     pub no_new_privs: Option<bool>,
+
+    // -- Mounts / Networking --
+    /// Replace bind mounts list. None = no change.
+    pub bind_mounts: Option<Vec<BindMount>>,
+    /// Replace volumes list (filesystem type only). None = no change.
+    pub volumes: Option<Vec<VolumeMount>>,
+    /// Replace publish ports list. None = no change. Requires stopped container.
+    pub publish: Option<Vec<PortMapping>>,
 }
 
 impl ContainerUpdate {
@@ -512,6 +520,9 @@ impl ContainerUpdate {
             && self.cap_add.is_empty()
             && self.cap_drop.is_empty()
             && self.no_new_privs.is_none()
+            && self.bind_mounts.is_none()
+            && self.volumes.is_none()
+            && self.publish.is_none()
     }
 }
 
