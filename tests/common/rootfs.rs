@@ -90,10 +90,7 @@ fn download_busybox(target: &Path) {
 }
 
 fn download_with_ureq(target: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
-    let resp = ureq::get(BUSYBOX_URL).call()?;
-    let mut data = Vec::new();
-    resp.into_reader().read_to_end(&mut data)?;
+    let data = ureq::get(BUSYBOX_URL).call()?.body_mut().read_to_vec()?;
     fs::write(target, &data)?;
     Ok(())
 }

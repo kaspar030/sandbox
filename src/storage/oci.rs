@@ -184,23 +184,36 @@ struct TokenResponse {
 
 /// Obtain a bearer token for anonymous access to a registry repository.
 fn authenticate(reference: &Reference) -> Result<String> {
+    use ureq::config::Config;
+
     let api_base = reference.api_base();
 
-    // First, try GET /v2/ to see if we get a 401 with WWW-Authenticate
-    let resp = match ureq::get(&format!("{api_base}/v2/")).call() {
-        Ok(_resp) => return Ok(String::new()), // No auth needed
-        Err(ureq::Error::Status(401, resp)) => resp,
-        Err(ureq::Error::Status(code, _)) => {
-            return Err(Error::Other(format!("registry returned HTTP {code}")));
-        }
-        Err(e) => {
-            return Err(Error::Other(format!("HTTP error: {e}")));
-        }
-    };
+    // Use an agent that doesn't treat HTTP errors as Rust errors,
+    // so we can inspect the 401 response and its headers directly.
+    let agent = Config::builder()
+        .http_status_as_error(false)
+        .build()
+        .new_agent();
 
-    // Parse WWW-Authenticate header
+    // First, try GET /v2/ to see if we get a 401 with WWW-Authenticate
+    let resp = agent
+        .get(&format!("{api_base}/v2/"))
+        .call()
+        .map_err(|e| Error::Other(format!("HTTP error: {e}")))?;
+
+    let status = resp.status().as_u16();
+    if status == 200 {
+        return Ok(String::new()); // No auth needed
+    }
+    if status != 401 {
+        return Err(Error::Other(format!("registry returned HTTP {status}")));
+    }
+
+    // Parse WWW-Authenticate header from the 401 response
     let www_auth = resp
-        .header("www-authenticate")
+        .headers()
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
         .ok_or_else(|| Error::Other("no WWW-Authenticate header in 401 response".to_string()))?
         .to_string();
 
@@ -217,7 +230,8 @@ fn authenticate(reference: &Reference) -> Result<String> {
     let token_resp: TokenResponse = ureq::get(&url)
         .call()
         .map_err(|e| Error::Other(format!("token request failed: {e}")))?
-        .into_json()
+        .body_mut()
+        .read_json()
         .map_err(|e| Error::Other(format!("token parse error: {e}")))?;
 
     Ok(token_resp.token)
@@ -431,19 +445,19 @@ pub fn pull_image(
 // --- Helpers ---
 
 fn authed_get(url: &str, token: &str) -> Result<Vec<u8>> {
-    let mut req = ureq::get(url).set("Accept", ACCEPT_MANIFEST);
+    let mut req = ureq::get(url).header("Accept", ACCEPT_MANIFEST);
 
     if !token.is_empty() {
-        req = req.set("Authorization", &format!("Bearer {token}"));
+        req = req.header("Authorization", &format!("Bearer {token}"));
     }
 
-    let resp = req
+    let mut resp = req
         .call()
         .map_err(|e| Error::Other(format!("HTTP GET {url} failed: {e}")))?;
 
-    let mut body = Vec::new();
-    resp.into_reader()
-        .read_to_end(&mut body)
+    let body = resp
+        .body_mut()
+        .read_to_vec()
         .map_err(|e| Error::Other(format!("read body error: {e}")))?;
     Ok(body)
 }

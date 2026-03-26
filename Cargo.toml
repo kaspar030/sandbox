@@ -75,7 +75,7 @@ signal-hook = "0.4"
 signal-hook-async-std = "0.4"
 
 # OCI registry pull
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
 sha2 = "0.10"
 hex = "0.4"
 flate2 = "1"
