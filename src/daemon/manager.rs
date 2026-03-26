@@ -2258,8 +2258,14 @@ impl ContainerManager {
         // Allow re-starting a stopped container
         if container.state.is_stopped() {
             let _ = container.state.reset();
-            container.manually_stopped = false;
         }
+
+        // Clear manually_stopped unconditionally: if the user explicitly starts
+        // a container, it should be eligible for restart-policy restarts again.
+        // This must happen outside the is_stopped() branch because after daemon
+        // recovery the container is in Created state (not Stopped), so the flag
+        // would otherwise stay true forever.
+        container.manually_stopped = false;
 
         if let Some(cmd) = command {
             container.spec.command = cmd;

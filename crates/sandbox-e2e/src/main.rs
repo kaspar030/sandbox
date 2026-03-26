@@ -496,6 +496,11 @@ fn all_tests() -> Vec<Test> {
         ),
         Test::Mutable(
             "Persistence",
+            "manually_stopped_cleared_on_start",
+            tests::persistence::test_manually_stopped_cleared_on_start,
+        ),
+        Test::Mutable(
+            "Persistence",
             "graceful_shutdown",
             tests::persistence::test_graceful_shutdown,
         ),
