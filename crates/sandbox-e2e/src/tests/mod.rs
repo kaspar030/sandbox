@@ -1,4 +1,5 @@
 pub mod clone;
+pub mod edit;
 pub mod env;
 pub mod exec;
 pub mod idle;

@@ -117,6 +117,19 @@ impl TestContext {
             .unwrap_or_else(|e| panic!("failed to run sandbox CLI: {e}"))
     }
 
+    /// Run a sandbox CLI command with extra environment variables.
+    pub fn cli_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
+        let mut cmd = Command::new(&self.sandbox_bin);
+        cmd.arg("--socket")
+            .arg(self.socket_path.to_str().unwrap())
+            .args(args);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.output()
+            .unwrap_or_else(|e| panic!("failed to run sandbox CLI: {e}"))
+    }
+
     /// Run a sandbox CLI command and return stdout as a string.
     /// Panics with stderr if the command fails.
     pub fn cli_ok(&self, args: &[&str]) -> String {

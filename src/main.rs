@@ -399,6 +399,13 @@ enum Commands {
         json: bool,
     },
 
+    /// Edit a container's configuration in $EDITOR
+    Edit {
+        /// Container name
+        #[arg(add = ArgValueCandidates::new(completer::container_completer))]
+        name: String,
+    },
+
     /// Execute a command in a running container
     Exec {
         /// Container name
@@ -1319,6 +1326,31 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 _ => print_response(&resp),
+            }
+        }
+
+        Commands::Edit { name } => {
+            let mut client = Client::connect(cli.socket.as_deref())?;
+            let resp = client.request(&Request::Inspect { name: name.clone() })?;
+            let detail = match resp {
+                Response::ContainerInspect(d) => *d,
+                Response::Error { message } => {
+                    eprintln!("Error: {message}");
+                    std::process::exit(1);
+                }
+                _ => {
+                    eprintln!("unexpected response");
+                    std::process::exit(1);
+                }
+            };
+
+            match run_edit_loop(&name, &detail, cli.socket.as_deref()) {
+                Ok(true) => {} // changes applied
+                Ok(false) => println!("No changes"),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
             }
         }
 
@@ -2344,6 +2376,539 @@ fn make_absolute(path: &str) -> String {
         std::env::current_dir()
             .map(|cwd| cwd.join(p).to_string_lossy().to_string())
             .unwrap_or_else(|_| path.to_string())
+    }
+}
+
+// -- Edit command implementation --
+
+/// Intermediate struct for YAML edit parsing.
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct EditSpec {
+    #[serde(default)]
+    command: Vec<String>,
+    #[serde(default)]
+    entrypoint: Vec<String>,
+    #[serde(default)]
+    env: Vec<String>,
+    #[serde(default = "default_edit_workdir")]
+    working_dir: String,
+    hostname: Option<String>,
+    user: Option<String>,
+    #[serde(default = "default_edit_true")]
+    use_init: bool,
+    #[serde(default = "default_edit_true")]
+    no_new_privs: bool,
+    #[serde(default = "default_edit_restart")]
+    restart_policy: String,
+    #[serde(default = "default_edit_seccomp")]
+    seccomp: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
+    memory: Option<String>,
+    cpus: Option<f64>,
+    pids_max: Option<u32>,
+}
+
+fn default_edit_workdir() -> String {
+    "/".to_string()
+}
+fn default_edit_true() -> bool {
+    true
+}
+fn default_edit_restart() -> String {
+    "unless-stopped".to_string()
+}
+fn default_edit_seccomp() -> String {
+    "default".to_string()
+}
+
+/// Generate YAML content for editing.
+/// Custom settings appear at the top; defaults are grouped at the bottom.
+fn generate_edit_yaml(name: &str, d: &sandbox_proto::ContainerDetail) -> String {
+    let mut custom = String::new();
+    let mut defaults = String::new();
+
+    let seccomp_str = match d.seccomp {
+        sandbox_proto::SeccompMode::Default => "default",
+        sandbox_proto::SeccompMode::Disabled => "disabled",
+    };
+
+    // Helper: each field goes to custom or defaults section
+    // -- command --
+    if d.command.is_empty() {
+        defaults.push_str("command: []\n");
+    } else {
+        custom.push_str(&format!("command: {:?}\n", d.command));
+    }
+
+    // -- entrypoint --
+    if d.entrypoint.is_empty() {
+        defaults.push_str("entrypoint: []\n");
+    } else {
+        custom.push_str(&format!("entrypoint: {:?}\n", d.entrypoint));
+    }
+
+    // -- env --
+    if d.env.is_empty() {
+        defaults.push_str("env: []\n");
+    } else {
+        custom.push_str("env:\n");
+        for e in &d.env {
+            custom.push_str(&format!("  - \"{}\"\n", e.replace('"', "\\\"")));
+        }
+    }
+
+    // -- working_dir --
+    if d.working_dir == "/" {
+        defaults.push_str("working_dir: \"/\"\n");
+    } else {
+        custom.push_str(&format!("working_dir: \"{}\"\n", d.working_dir));
+    }
+
+    // -- hostname --
+    if d.hostname.is_none() {
+        defaults.push_str("hostname: null\n");
+    } else {
+        custom.push_str(&format!(
+            "hostname: \"{}\"\n",
+            d.hostname.as_deref().unwrap()
+        ));
+    }
+
+    // -- user --
+    if d.user.is_none() {
+        defaults.push_str("user: null\n");
+    } else {
+        custom.push_str(&format!("user: \"{}\"\n", d.user.as_deref().unwrap()));
+    }
+
+    // -- use_init --
+    // Default is true when command is empty (idle mode), but just check true
+    if d.use_init {
+        defaults.push_str("use_init: true\n");
+    } else {
+        custom.push_str("use_init: false\n");
+    }
+
+    // -- no_new_privs --
+    if d.no_new_privs {
+        defaults.push_str("no_new_privs: true\n");
+    } else {
+        custom.push_str("no_new_privs: false\n");
+    }
+
+    // -- restart_policy --
+    let rp_str = format!("{}", d.restart_policy);
+    if rp_str == "unless-stopped" {
+        defaults.push_str("restart_policy: unless-stopped\n");
+    } else {
+        custom.push_str(&format!("restart_policy: {rp_str}\n"));
+    }
+
+    // -- seccomp --
+    if seccomp_str == "default" {
+        defaults.push_str("seccomp: default\n");
+    } else {
+        custom.push_str(&format!("seccomp: {seccomp_str}\n"));
+    }
+
+    // -- capabilities --
+    defaults.push_str("capabilities: []\n");
+
+    // -- memory --
+    match d.cgroup.memory_max {
+        None => defaults.push_str("memory: null\n"),
+        Some(bytes) => custom.push_str(&format!("memory: \"{}\"\n", format_size(bytes))),
+    }
+
+    // -- cpus --
+    match d.cgroup.cpu_max {
+        None => defaults.push_str("cpus: null\n"),
+        Some((quota, period)) => {
+            custom.push_str(&format!("cpus: {}\n", quota as f64 / period as f64));
+        }
+    }
+
+    // -- pids_max --
+    match d.cgroup.pids_max {
+        None => defaults.push_str("pids_max: null\n"),
+        Some(n) => custom.push_str(&format!("pids_max: {n}\n")),
+    }
+
+    // Assemble: header, custom settings, then defaults
+    let mut yaml = String::new();
+    yaml.push_str(&format!("# sandbox edit: {name}\n"));
+    yaml.push_str(&format!("# Image: {} (read-only)\n", d.image));
+    yaml.push_str(&format!("# Pool: {} (read-only)\n", d.pool));
+    yaml.push_str("# Save and quit to apply changes.\n\n");
+
+    if !custom.is_empty() {
+        yaml.push_str(&custom);
+        yaml.push_str("\n");
+    }
+
+    yaml.push_str("# Defaults (modify to customize):\n");
+    yaml.push_str(&defaults);
+
+    yaml
+}
+
+/// Validate a parsed EditSpec, returning a list of error messages.
+fn validate_edit_spec(spec: &EditSpec) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    // restart_policy
+    if sandbox_proto::RestartPolicy::parse(&spec.restart_policy).is_none() {
+        errors.push(format!(
+            "restart_policy: unknown \"{}\" (expected: no, always, on-failure, unless-stopped)",
+            spec.restart_policy
+        ));
+    }
+
+    // seccomp
+    if !matches!(spec.seccomp.as_str(), "default" | "disabled") {
+        errors.push(format!(
+            "seccomp: unknown \"{}\" (expected: default, disabled)",
+            spec.seccomp
+        ));
+    }
+
+    // memory
+    if let Some(ref mem) = spec.memory {
+        if parse_size(mem.clone()).is_err() {
+            errors.push(format!(
+                "memory: invalid \"{mem}\" (expected: null, or size like 512M, 1G)"
+            ));
+        }
+    }
+
+    // cpus
+    if let Some(cpus) = spec.cpus {
+        if cpus <= 0.0 {
+            errors.push("cpus: must be positive".to_string());
+        }
+    }
+
+    // env
+    for e in &spec.env {
+        if !e.contains('=') {
+            errors.push(format!("env: \"{e}\" must be KEY=VALUE format"));
+        }
+    }
+
+    // capabilities
+    for cap in &spec.capabilities {
+        if sandbox::security::capabilities::resolve_capability(cap).is_none() {
+            errors.push(format!("capabilities: unknown capability \"{cap}\""));
+        }
+    }
+
+    errors
+}
+
+/// Build a ContainerUpdate from the diff between the original detail and the edited spec.
+fn build_update_from_diff(
+    original: &sandbox_proto::ContainerDetail,
+    edited: &EditSpec,
+) -> sandbox_proto::ContainerUpdate {
+    let mut update = sandbox_proto::ContainerUpdate::default();
+
+    // command
+    if edited.command != original.command {
+        update.command = Some(edited.command.clone());
+    }
+
+    // entrypoint
+    if edited.entrypoint != original.entrypoint {
+        update.entrypoint = Some(edited.entrypoint.clone());
+    }
+
+    // env — compute add/remove lists
+    let orig_env: std::collections::HashSet<&str> =
+        original.env.iter().map(|s| s.as_str()).collect();
+    let edit_env: std::collections::HashSet<&str> = edited.env.iter().map(|s| s.as_str()).collect();
+
+    // Added or changed env vars
+    for e in &edited.env {
+        if !orig_env.contains(e.as_str()) {
+            update.env_set.push(e.clone());
+        }
+    }
+    // Removed env vars
+    for e in &original.env {
+        if !edit_env.contains(e.as_str()) {
+            if let Some(key) = e.split('=').next() {
+                update.env_remove.push(key.to_string());
+            }
+        }
+    }
+
+    // working_dir
+    if edited.working_dir != original.working_dir {
+        update.working_dir = Some(edited.working_dir.clone());
+    }
+
+    // hostname
+    if edited.hostname != original.hostname {
+        update.hostname = Some(edited.hostname.clone());
+    }
+
+    // user
+    if edited.user != original.user {
+        update.user = Some(edited.user.clone());
+    }
+
+    // use_init
+    if edited.use_init != original.use_init {
+        update.use_init = Some(edited.use_init);
+    }
+
+    // no_new_privs
+    if edited.no_new_privs != original.no_new_privs {
+        update.no_new_privs = Some(edited.no_new_privs);
+    }
+
+    // restart_policy
+    let edited_rp = sandbox_proto::RestartPolicy::parse(&edited.restart_policy)
+        .unwrap_or(sandbox_proto::RestartPolicy::No);
+    if edited_rp != original.restart_policy {
+        update.restart_policy = Some(edited_rp);
+    }
+
+    // seccomp
+    let edited_seccomp = match edited.seccomp.as_str() {
+        "disabled" => sandbox_proto::SeccompMode::Disabled,
+        _ => sandbox_proto::SeccompMode::Default,
+    };
+    if edited_seccomp != original.seccomp {
+        update.seccomp = Some(edited_seccomp);
+    }
+
+    // cgroup: memory
+    let edited_mem = edited
+        .memory
+        .as_ref()
+        .and_then(|s| parse_size(s.clone()).ok());
+    if edited_mem != original.cgroup.memory_max {
+        update.memory_max = edited_mem;
+    }
+
+    // cgroup: cpus
+    let edited_cpu = edited.cpus.map(|c| {
+        let quota = (c * 100_000.0) as u64;
+        (quota, 100_000u64)
+    });
+    if edited_cpu != original.cgroup.cpu_max {
+        update.cpu_max = edited_cpu;
+    }
+
+    // cgroup: pids_max
+    if edited.pids_max != original.cgroup.pids_max {
+        update.pids_max = edited.pids_max;
+    }
+
+    update
+}
+
+/// Print a human-readable summary of changes.
+fn print_edit_summary(original: &sandbox_proto::ContainerDetail, edited: &EditSpec) {
+    if edited.command != original.command {
+        println!("  command: {:?} → {:?}", original.command, edited.command);
+    }
+    if edited.entrypoint != original.entrypoint {
+        println!(
+            "  entrypoint: {:?} → {:?}",
+            original.entrypoint, edited.entrypoint
+        );
+    }
+    if edited.env != original.env {
+        // Show added/removed
+        let orig: std::collections::HashSet<&str> =
+            original.env.iter().map(|s| s.as_str()).collect();
+        let edit: std::collections::HashSet<&str> = edited.env.iter().map(|s| s.as_str()).collect();
+        for e in &edited.env {
+            if !orig.contains(e.as_str()) {
+                println!("  env: +{e}");
+            }
+        }
+        for e in &original.env {
+            if !edit.contains(e.as_str()) {
+                println!("  env: -{e}");
+            }
+        }
+    }
+    if edited.working_dir != original.working_dir {
+        println!(
+            "  working_dir: {} → {}",
+            original.working_dir, edited.working_dir
+        );
+    }
+    if edited.hostname != original.hostname {
+        println!(
+            "  hostname: {:?} → {:?}",
+            original.hostname, edited.hostname
+        );
+    }
+    if edited.user != original.user {
+        println!("  user: {:?} → {:?}", original.user, edited.user);
+    }
+    if edited.use_init != original.use_init {
+        println!("  use_init: {} → {}", original.use_init, edited.use_init);
+    }
+    if edited.no_new_privs != original.no_new_privs {
+        println!(
+            "  no_new_privs: {} → {}",
+            original.no_new_privs, edited.no_new_privs
+        );
+    }
+    let edited_rp_str = &edited.restart_policy;
+    let orig_rp_str = format!("{}", original.restart_policy);
+    if *edited_rp_str != orig_rp_str {
+        println!("  restart_policy: {orig_rp_str} → {edited_rp_str}");
+    }
+}
+
+/// Run the edit loop: generate YAML, open editor, validate, apply.
+/// Returns Ok(true) if changes were applied, Ok(false) if no changes.
+fn run_edit_loop(
+    name: &str,
+    detail: &sandbox_proto::ContainerDetail,
+    socket_path: Option<&str>,
+) -> anyhow::Result<bool> {
+    use std::io::Write;
+
+    let yaml = generate_edit_yaml(name, detail);
+    let tmp_path =
+        std::env::temp_dir().join(format!("sandbox-edit-{name}-{}.yaml", std::process::id()));
+
+    std::fs::write(&tmp_path, &yaml)?;
+
+    // Clean up temp file on exit
+    struct TempFileGuard(std::path::PathBuf);
+    impl Drop for TempFileGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _guard = TempFileGuard(tmp_path.clone());
+
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    let is_interactive = {
+        use std::os::fd::AsFd;
+        nix::unistd::isatty(std::io::stdin().as_fd()).unwrap_or(false)
+    };
+
+    loop {
+        // Open editor. Split EDITOR into words so "sed -i s/x/y/" works.
+        // For complex shell expressions, users can set EDITOR to a script.
+        let editor_words: Vec<&str> = editor.split_whitespace().collect();
+        let status = if editor_words.len() <= 1 {
+            std::process::Command::new(&editor)
+                .arg(&tmp_path)
+                .status()?
+        } else {
+            std::process::Command::new(editor_words[0])
+                .args(&editor_words[1..])
+                .arg(&tmp_path)
+                .status()?
+        };
+
+        if !status.success() {
+            anyhow::bail!("editor exited with non-zero status");
+        }
+
+        // Read back
+        let content = std::fs::read_to_string(&tmp_path)?;
+
+        // Strip comment lines for parsing
+        let clean: String = content
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Parse
+        let edited: EditSpec = match serde_yaml::from_str(&clean) {
+            Ok(spec) => spec,
+            Err(e) => {
+                let err_msg = format!("YAML parse error: {e}");
+                if !is_interactive {
+                    anyhow::bail!("{err_msg}");
+                }
+                // Prepend error to file and re-edit
+                let mut errored = format!(
+                    "# ERRORS (fix and save again, or quit without saving to abort):\n#   - {err_msg}\n#\n"
+                );
+                errored.push_str(&content);
+                std::fs::write(&tmp_path, &errored)?;
+                eprintln!("Error: {err_msg}");
+                eprint!("Press Enter to re-edit, or Ctrl+C to abort... ");
+                std::io::stderr().flush()?;
+                let _ = std::io::stdin().read_line(&mut String::new());
+                continue;
+            }
+        };
+
+        // Validate
+        let errors = validate_edit_spec(&edited);
+        if !errors.is_empty() {
+            if !is_interactive {
+                anyhow::bail!(
+                    "Validation errors:\n{}",
+                    errors
+                        .iter()
+                        .map(|e| format!("  - {e}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+            }
+            // Prepend errors to file and re-edit
+            let mut errored =
+                String::from("# ERRORS (fix and save again, or quit without saving to abort):\n");
+            for e in &errors {
+                errored.push_str(&format!("#   - {e}\n"));
+            }
+            errored.push_str("#\n");
+            errored.push_str(&content);
+            std::fs::write(&tmp_path, &errored)?;
+            for e in &errors {
+                eprintln!("Error: {e}");
+            }
+            eprint!("Press Enter to re-edit, or Ctrl+C to abort... ");
+            std::io::stderr().flush()?;
+            let _ = std::io::stdin().read_line(&mut String::new());
+            continue;
+        }
+
+        // Build diff
+        let update = build_update_from_diff(detail, &edited);
+        if update.is_empty() {
+            return Ok(false);
+        }
+
+        // Apply — reconnect since the inspect consumed the first connection
+        let mut client = Client::connect(socket_path)?;
+        let resp = client.request(&Request::UpdateContainer {
+            name: name.to_string(),
+            update,
+        })?;
+        match resp {
+            Response::ContainerUpdated { .. } => {
+                println!("Updated {name}:");
+                print_edit_summary(detail, &edited);
+                return Ok(true);
+            }
+            Response::Error { message } => {
+                anyhow::bail!("update failed: {message}");
+            }
+            _ => {
+                anyhow::bail!("unexpected response");
+            }
+        }
     }
 }
 

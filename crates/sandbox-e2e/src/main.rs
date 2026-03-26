@@ -455,6 +455,18 @@ fn all_tests() -> Vec<Test> {
             "rename_with_snapshots",
             tests::rename::test_rename_with_snapshots,
         ),
+        // Edit
+        Test::Immutable("Edit", "edit_noop", tests::edit::test_edit_noop),
+        Test::Immutable(
+            "Edit",
+            "edit_change_restart",
+            tests::edit::test_edit_change_restart,
+        ),
+        Test::Immutable(
+            "Edit",
+            "edit_change_workdir",
+            tests::edit::test_edit_change_workdir,
+        ),
         // Session mode
         Test::Immutable(
             "Session",
