@@ -2411,30 +2411,144 @@ struct EditSpec {
     memory: Option<String>,
     cpus: Option<f64>,
     pids_max: Option<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bind_mounts")]
     bind_mounts: Vec<EditBindMount>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_volume_mounts")]
     volumes: Vec<EditVolumeMount>,
     #[serde(default)]
     publish: Vec<String>,
 }
 
-/// Simplified bind mount for YAML editing.
-#[derive(serde::Deserialize, Debug, Clone)]
+/// Parsed bind mount for editing.
+#[derive(Debug, Clone)]
 struct EditBindMount {
     source: String,
     target: String,
-    #[serde(default)]
     readonly: bool,
 }
 
-/// Simplified volume mount for YAML editing.
-#[derive(serde::Deserialize, Debug, Clone)]
+/// Parse a bind mount string: "/path", "/src:/dst", "/src:/dst:ro"
+fn parse_bind_mount_str(s: &str) -> EditBindMount {
+    let (s, readonly) = if let Some(stripped) = s.strip_suffix(":ro") {
+        (stripped, true)
+    } else {
+        (s, false)
+    };
+    if let Some((source, target)) = s.split_once(':') {
+        EditBindMount {
+            source: source.to_string(),
+            target: target.to_string(),
+            readonly,
+        }
+    } else {
+        EditBindMount {
+            source: s.to_string(),
+            target: s.to_string(),
+            readonly,
+        }
+    }
+}
+
+/// Deserialize bind_mounts accepting both string shorthand and map form.
+fn deserialize_bind_mounts<'de, D>(deserializer: D) -> Result<Vec<EditBindMount>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Entry {
+        Short(String),
+        Full {
+            source: String,
+            target: String,
+            #[serde(default)]
+            readonly: bool,
+        },
+    }
+
+    let entries: Vec<Entry> = Vec::deserialize(deserializer)?;
+    Ok(entries
+        .into_iter()
+        .map(|e| match e {
+            Entry::Short(s) => parse_bind_mount_str(&s),
+            Entry::Full {
+                source,
+                target,
+                readonly,
+            } => EditBindMount {
+                source,
+                target,
+                readonly,
+            },
+        })
+        .collect())
+}
+
+/// Parsed volume mount for editing.
+#[derive(Debug, Clone)]
 struct EditVolumeMount {
     name: String,
     target: String,
-    #[serde(default)]
     readonly: bool,
+}
+
+/// Parse a volume mount string: "name:target" or "name:target:ro"
+fn parse_volume_mount_str(s: &str) -> Option<EditVolumeMount> {
+    let (s, readonly) = if let Some(stripped) = s.strip_suffix(":ro") {
+        (stripped, true)
+    } else {
+        (s, false)
+    };
+    let (name, target) = s.split_once(':')?;
+    Some(EditVolumeMount {
+        name: name.to_string(),
+        target: target.to_string(),
+        readonly,
+    })
+}
+
+/// Deserialize volumes accepting both string shorthand and map form.
+fn deserialize_volume_mounts<'de, D>(deserializer: D) -> Result<Vec<EditVolumeMount>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    use serde::de::Error;
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Entry {
+        Short(String),
+        Full {
+            name: String,
+            target: String,
+            #[serde(default)]
+            readonly: bool,
+        },
+    }
+
+    let entries: Vec<Entry> = Vec::deserialize(deserializer)?;
+    entries
+        .into_iter()
+        .map(|e| match e {
+            Entry::Short(s) => parse_volume_mount_str(&s).ok_or_else(|| {
+                D::Error::custom(format!(
+                    "invalid volume: \"{s}\" (expected name:target[:ro])"
+                ))
+            }),
+            Entry::Full {
+                name,
+                target,
+                readonly,
+            } => Ok(EditVolumeMount {
+                name,
+                target,
+                readonly,
+            }),
+        })
+        .collect()
 }
 
 fn default_edit_workdir() -> String {
@@ -2563,21 +2677,22 @@ fn generate_edit_yaml(name: &str, d: &sandbox_proto::ContainerDetail) -> String 
         Some(n) => custom.push_str(&format!("pids_max: {n}\n")),
     }
 
-    // -- bind_mounts --
+    // -- bind_mounts (compact: "source:target[:ro]", or just "path" if source==target) --
     if d.bind_mounts.is_empty() {
         defaults.push_str("bind_mounts: []\n");
     } else {
         custom.push_str("bind_mounts:\n");
         for m in &d.bind_mounts {
-            custom.push_str(&format!("  - source: \"{}\"\n", m.source));
-            custom.push_str(&format!("    target: \"{}\"\n", m.target));
-            if m.readonly {
-                custom.push_str("    readonly: true\n");
+            let ro = if m.readonly { ":ro" } else { "" };
+            if m.source == m.target {
+                custom.push_str(&format!("  - \"{}{ro}\"\n", m.source));
+            } else {
+                custom.push_str(&format!("  - \"{}:{}{ro}\"\n", m.source, m.target));
             }
         }
     }
 
-    // -- volumes (filesystem only) --
+    // -- volumes (compact: "name:target[:ro]") --
     let fs_vols: Vec<_> = d
         .volumes
         .iter()
@@ -2588,11 +2703,8 @@ fn generate_edit_yaml(name: &str, d: &sandbox_proto::ContainerDetail) -> String 
     } else {
         custom.push_str("volumes:\n");
         for v in &fs_vols {
-            custom.push_str(&format!("  - name: \"{}\"\n", v.name));
-            custom.push_str(&format!("    target: \"{}\"\n", v.target));
-            if v.readonly {
-                custom.push_str("    readonly: true\n");
-            }
+            let ro = if v.readonly { ":ro" } else { "" };
+            custom.push_str(&format!("  - \"{}:{}{ro}\"\n", v.name, v.target));
         }
     }
 

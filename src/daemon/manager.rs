@@ -1611,28 +1611,26 @@ impl ContainerManager {
         if let Some(new_binds) = &update.bind_mounts {
             if is_running {
                 let pid = container.pid.unwrap_or(0);
-                // Remove mounts no longer in the new list
-                let old_targets: Vec<String> = container
-                    .spec
-                    .bind_mounts
-                    .iter()
-                    .map(|m| m.target.clone())
-                    .collect();
-                for target in &old_targets {
-                    if !new_binds.iter().any(|b| b.target == *target) {
-                        if let Err(e) = sandbox::sys::hot_mount::hot_unmount(pid, target) {
-                            tracing::warn!("failed to unmount {target}: {e}");
+                // Compare full (source, target, readonly) tuples.
+                // Unmount any old bind that doesn't have an exact match in new list.
+                for old in &container.spec.bind_mounts {
+                    if !new_binds.iter().any(|b| {
+                        b.source == old.source
+                            && b.target == old.target
+                            && b.readonly == old.readonly
+                    }) {
+                        if let Err(e) = sandbox::sys::hot_mount::hot_unmount(pid, &old.target) {
+                            tracing::warn!("failed to unmount {}: {e}", old.target);
                         }
                     }
                 }
-                // Add new mounts
+                // Mount any new bind that doesn't have an exact match in old list.
                 for bind in new_binds {
-                    if !container
-                        .spec
-                        .bind_mounts
-                        .iter()
-                        .any(|b| b.target == bind.target)
-                    {
+                    if !container.spec.bind_mounts.iter().any(|b| {
+                        b.source == bind.source
+                            && b.target == bind.target
+                            && b.readonly == bind.readonly
+                    }) {
                         let source_path = std::path::Path::new(&bind.source);
                         if let Err(e) = sandbox::sys::hot_mount::hot_bind_mount(
                             pid,
@@ -1652,30 +1650,32 @@ impl ContainerManager {
         if let Some(new_vols) = &update.volumes {
             if is_running {
                 let pid = container.pid.unwrap_or(0);
-                // Unmount removed volumes
-                let old_targets: Vec<String> = container
+                // Compare full (name, target, readonly) tuples.
+                let old_fs_vols: Vec<_> = container
                     .spec
                     .volumes
                     .iter()
                     .filter(|v| v.volume_type == sandbox::protocol::VolumeType::Filesystem)
-                    .map(|v| v.target.clone())
                     .collect();
-                for target in &old_targets {
-                    if !new_vols.iter().any(|v| v.target == *target) {
-                        if let Err(e) = sandbox::sys::hot_mount::hot_unmount(pid, target) {
-                            tracing::warn!("failed to unmount volume at {target}: {e}");
+
+                // Unmount removed/changed volumes
+                for old in &old_fs_vols {
+                    if !new_vols.iter().any(|v| {
+                        v.name == old.name && v.target == old.target && v.readonly == old.readonly
+                    }) {
+                        if let Err(e) = sandbox::sys::hot_mount::hot_unmount(pid, &old.target) {
+                            tracing::warn!("failed to unmount volume at {}: {e}", old.target);
                         }
                     }
                 }
-                // Mount new volumes
+                // Mount new/changed volumes
                 if let Ok(pool) = self.storage.resolve_pool(container.spec.pool.as_deref()) {
                     for vol in new_vols {
-                        if !container
-                            .spec
-                            .volumes
-                            .iter()
-                            .any(|v| v.target == vol.target)
-                        {
+                        if !old_fs_vols.iter().any(|v| {
+                            v.name == vol.name
+                                && v.target == vol.target
+                                && v.readonly == vol.readonly
+                        }) {
                             let vol_path = storage::volume::volume_path(pool, &vol.name);
                             if let Err(e) = sandbox::sys::hot_mount::hot_bind_mount(
                                 pid,
