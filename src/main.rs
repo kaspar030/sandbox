@@ -2913,6 +2913,33 @@ fn parse_edit_publish(entries: &[String]) -> Vec<sandbox_proto::PortMapping> {
         .collect()
 }
 
+/// Check if any restart-requiring fields changed (for running containers).
+/// Live fields (cgroup limits, bind_mounts, volumes) don't need restart.
+fn needs_restart(original: &sandbox_proto::ContainerDetail, edited: &EditSpec) -> bool {
+    edited.command != original.command
+        || edited.entrypoint != original.entrypoint
+        || edited.env != original.env
+        || edited.working_dir != original.working_dir
+        || edited.hostname != original.hostname
+        || edited.user != original.user
+        || edited.use_init != original.use_init
+        || edited.no_new_privs != original.no_new_privs
+        || edited.seccomp.as_str()
+            != match original.seccomp {
+                sandbox_proto::SeccompMode::Default => "default",
+                sandbox_proto::SeccompMode::Disabled => "disabled",
+            }
+        || {
+            let edited_publish = parse_edit_publish(&edited.publish);
+            edited_publish != original.publish
+        }
+        || {
+            let edited_rp = sandbox_proto::RestartPolicy::parse(&edited.restart_policy)
+                .unwrap_or(sandbox_proto::RestartPolicy::No);
+            edited_rp != original.restart_policy
+        }
+}
+
 /// Print a human-readable summary of changes.
 fn print_edit_summary(original: &sandbox_proto::ContainerDetail, edited: &EditSpec) {
     if edited.command != original.command {
@@ -3127,6 +3154,12 @@ fn run_edit_loop(
             Response::ContainerUpdated { .. } => {
                 println!("Updated {name}:");
                 print_edit_summary(detail, &edited);
+                // Warn if running and restart-requiring fields changed
+                if detail.state == sandbox_proto::ContainerState::Running {
+                    if needs_restart(detail, &edited) {
+                        println!("Note: some changes require a container restart to take effect.");
+                    }
+                }
                 return Ok(true);
             }
             Response::Error { message } => {

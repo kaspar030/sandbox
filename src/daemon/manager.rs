@@ -1692,14 +1692,10 @@ impl ContainerManager {
             container.spec.volumes = new_vols.clone();
         }
 
-        // -- Publish ports (stopped only) --
+        // -- Publish ports --
+        // Always update the spec. Port forwarding rules are set up at container
+        // start and cleaned up at stop, so changes take effect on next restart.
         if let Some(new_publish) = &update.publish {
-            if is_running && *new_publish != container.spec.publish {
-                return HandleResult::response_only(Response::Error {
-                    message: "cannot change port mappings on a running container — stop it first"
-                        .to_string(),
-                });
-            }
             container.spec.publish = new_publish.clone();
         }
 
