@@ -319,6 +319,11 @@ fn all_tests() -> Vec<Test> {
             "idle_reaps_zombies",
             tests::idle::test_idle_reaps_zombies,
         ),
+        Test::Immutable(
+            "Idle",
+            "init_process_name",
+            tests::idle::test_init_process_name,
+        ),
         // Restart policies
         Test::Immutable(
             "Restart",

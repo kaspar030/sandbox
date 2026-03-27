@@ -202,3 +202,40 @@ pub fn test_idle_reaps_zombies(ctx: &TestContext) -> Result<(), String> {
     let _ = ctx.cli(&["destroy", name]);
     Ok(())
 }
+
+/// Test that the container's PID 1 has comm name "sandbox-init".
+pub fn test_init_process_name(ctx: &TestContext) -> Result<(), String> {
+    let name = "init-procname";
+
+    if ctx.cli_fails(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "alpine",
+        "--restart",
+        "no",
+    ]) {
+        return Err("create failed".into());
+    }
+
+    if ctx.cli_fails(&["start", name]) {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err("start failed".into());
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Read /proc/1/comm inside the container — should be "sandbox-init"
+    let output = ctx.cli(&["exec", name, "--", "cat", "/proc/1/comm"]);
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout != "sandbox-init" {
+        let _ = ctx.cli(&["stop", "--timeout", "2", name]);
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("expected comm 'sandbox-init', got: '{stdout}'"));
+    }
+
+    let _ = ctx.cli(&["stop", "--timeout", "2", name]);
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}

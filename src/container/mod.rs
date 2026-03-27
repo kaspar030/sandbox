@@ -401,6 +401,10 @@ impl Container {
         nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL)
             .map_err(|e| Error::Other(format!("set_pdeathsig failed: {e}")))?;
 
+        // Set the kernel thread name so top/htop/`ps -o comm` show
+        // "sandbox-init" instead of the daemon's binary name.
+        let _ = nix::sys::prctl::set_name(c"sandbox-init");
+
         // Wait for parent to finish uid_map / gid_map / network setup
         sync_fd.wait()?;
 
