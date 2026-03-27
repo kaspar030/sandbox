@@ -142,3 +142,71 @@ pub fn test_mount_stopped(ctx: &TestContext) -> Result<(), String> {
     ctx.cli_ok(&["destroy", name]);
     Ok(())
 }
+
+/// Test that idmap mounts are cleaned up when a container is stopped,
+/// and re-created when the container is started again.
+pub fn test_mount_cleanup_on_stop(ctx: &TestContext) -> Result<(), String> {
+    let name = "mount-cleanup-stop";
+
+    // Create test dir for a bind mount
+    let test_dir = ctx.workdir.join("mount-cleanup-src");
+    fs::create_dir_all(&test_dir).unwrap();
+    fs::write(test_dir.join("data"), "cleanup-test").unwrap();
+    let src = test_dir.to_str().unwrap();
+    let bind_spec = format!("{src}:/mnt/test");
+
+    // Run a detached container with a bind mount
+    ctx.cli_ok(&[
+        "run", "--name", name, "--image", "alpine", "--init", "-d", "--bind", &bind_spec, "--",
+        "sleep", "300",
+    ]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Verify the idmap mount exists
+    let mounts_dir = ctx.workdir.join("mounts").join(name);
+    if !mounts_dir.exists() {
+        ctx.cli_ok(&["stop", "--timeout", "1", name]);
+        ctx.cli_ok(&["destroy", name]);
+        return Err(format!(
+            "idmap mount {} should exist while running",
+            mounts_dir.display()
+        ));
+    }
+
+    // Stop the container
+    ctx.cli_ok(&["stop", "--timeout", "2", name]);
+
+    // Verify the idmap mount is gone
+    if mounts_dir.exists() {
+        ctx.cli_ok(&["destroy", name]);
+        return Err(format!(
+            "idmap mount {} should be cleaned up after stop",
+            mounts_dir.display()
+        ));
+    }
+
+    // Start again — idmap mount should be re-created
+    ctx.cli_ok(&["start", name]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    if !mounts_dir.exists() {
+        ctx.cli_ok(&["stop", "--timeout", "1", name]);
+        ctx.cli_ok(&["destroy", name]);
+        return Err(format!(
+            "idmap mount {} should be re-created on start",
+            mounts_dir.display()
+        ));
+    }
+
+    // Verify bind mount still works after restart
+    let output = ctx.cli_ok(&["exec", name, "--", "cat", "/mnt/test/data"]);
+    if !output.contains("cleanup-test") {
+        ctx.cli_ok(&["stop", "--timeout", "1", name]);
+        ctx.cli_ok(&["destroy", name]);
+        return Err(format!("expected cleanup-test, got: {output}"));
+    }
+
+    ctx.cli_ok(&["stop", "--timeout", "1", name]);
+    ctx.cli_ok(&["destroy", name]);
+    Ok(())
+}

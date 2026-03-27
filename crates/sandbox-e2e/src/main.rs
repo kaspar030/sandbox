@@ -145,6 +145,11 @@ fn all_tests() -> Vec<Test> {
             tests::mounts::test_mount_shorthand,
         ),
         Test::Immutable("Mounts", "mount_stopped", tests::mounts::test_mount_stopped),
+        Test::Immutable(
+            "Mounts",
+            "mount_cleanup_on_stop",
+            tests::mounts::test_mount_cleanup_on_stop,
+        ),
         // Environment
         Test::Immutable(
             "Environment",

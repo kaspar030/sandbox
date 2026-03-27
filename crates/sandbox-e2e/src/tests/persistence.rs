@@ -118,31 +118,73 @@ pub fn test_manually_stopped_cleared_on_start(ctx: &mut TestContext) -> Result<(
 }
 
 pub fn test_graceful_shutdown(ctx: &mut TestContext) -> Result<(), String> {
-    // Start a container
+    let name = "shutdown-test";
+
+    // Create a bind mount source
+    let test_dir = ctx.workdir.join("shutdown-mount-src");
+    std::fs::create_dir_all(&test_dir).unwrap();
+    std::fs::write(test_dir.join("data"), "shutdown-test").unwrap();
+    let src = test_dir.to_str().unwrap();
+    let bind_spec = format!("{src}:/mnt/test");
+
+    // Start a container with a bind mount
     ctx.cli_ok(&[
-        "run",
-        "--name",
-        "shutdown-test",
-        "--image",
-        "alpine",
-        "--init",
-        "-d",
-        "--",
-        "sleep",
-        "300",
+        "run", "--name", name, "--image", "alpine", "--init", "-d", "--bind", &bind_spec, "--",
+        "sleep", "300",
     ]);
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    // Stop the daemon — should cleanly shut down
-    // Stop daemon via CLI
-    let _ = ctx.cli(&["daemon", "stop"]);
+    // Verify idmap mount exists
+    let idmap_mount = ctx.workdir.join("mounts").join(name);
+    if !idmap_mount.exists() {
+        ctx.stop_daemon();
+        ctx.start_daemon();
+        return Err(format!(
+            "idmap mount {} should exist while running",
+            idmap_mount.display()
+        ));
+    }
 
-    // Wait for daemon to exit
+    // Stop the daemon — should cleanly shut down and unmount everything
+    let _ = ctx.cli(&["daemon", "stop"]);
     std::thread::sleep(std::time::Duration::from_secs(2));
 
-    // Restart for remaining tests
+    // Verify idmap mount is cleaned up
+    if idmap_mount.exists() {
+        // Check if it's still a mount point (exists could mean empty dir)
+        // The daemon should have removed the directory too.
+        ctx.start_daemon();
+        return Err(format!(
+            "idmap mount {} should be cleaned up after daemon shutdown",
+            idmap_mount.display()
+        ));
+    }
+
+    // Restart daemon and verify container is recovered
     ctx.start_daemon();
     std::thread::sleep(std::time::Duration::from_millis(500));
 
+    // Container should be recovered as Created (not running)
+    let list = ctx.cli_ok(&["list"]);
+    if !list.contains(name) {
+        return Err(format!(
+            "container should be recovered after shutdown, list: {list}"
+        ));
+    }
+
+    // Start the container again — idmap mount should be re-created
+    ctx.cli_ok(&["start", name, "--", "sleep", "300"]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Verify bind mount works after recovery + restart
+    let output = ctx.cli_ok(&["exec", name, "--", "cat", "/mnt/test/data"]);
+    if !output.contains("shutdown-test") {
+        let _ = ctx.cli(&["stop", "--timeout", "1", name]);
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!("expected shutdown-test, got: {output}"));
+    }
+
+    let _ = ctx.cli(&["stop", "--timeout", "1", name]);
+    let _ = ctx.cli(&["destroy", name]);
     Ok(())
 }

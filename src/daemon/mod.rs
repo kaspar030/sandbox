@@ -204,62 +204,67 @@ pub fn run_daemon(
     Ok(())
 }
 
-/// Graceful shutdown: SIGTERM all containers → wait → SIGKILL survivors → cleanup.
+/// Graceful shutdown: batch-kill all containers, wait on pidfds, reap & clean up.
+///
+/// Uses the same exit path as `sandbox stop` (handle_container_exit) so that
+/// all mounts (propagated, idmap, block volumes) are cleaned up consistently.
 async fn graceful_shutdown(mgr: &Arc<smol::lock::Mutex<manager::ContainerManager>>) {
-    // Collect running containers and their PIDs, and set the shutting_down flag
-    // so that await_pidfd_and_reap tasks don't attempt to restart containers.
-    let running: Vec<(String, i32)> = {
-        let m = mgr.lock().await;
-        m.shutting_down.store(true, Ordering::Relaxed);
-        m.running_containers()
+    // Batch-kill all running containers and collect pidfds for async waiting.
+    // initiate_shutdown() sets the shutting_down flag, writes cgroup.kill,
+    // and sends SIGTERM to each container's PID 1.
+    let containers = {
+        let mut m = mgr.lock().await;
+        m.initiate_shutdown()
     };
 
-    if running.is_empty() {
+    if containers.is_empty() {
         tracing::info!("no running containers, shutting down");
         return;
     }
 
     tracing::info!(
         "shutting down: sending SIGTERM to {} container(s)",
-        running.len()
+        containers.len()
     );
 
-    // Kill all processes in each container's cgroup, then send SIGTERM to PID 1
-    for (name, pid) in &running {
-        // cgroup.kill ensures ALL processes (including exec'd) are killed
-        let cgroup_kill = format!("/sys/fs/cgroup/sandbox/{name}/cgroup.kill");
-        let _ = std::fs::write(&cgroup_kill, "1");
-        let pid = nix::unistd::Pid::from_raw(*pid);
-        if let Err(e) = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM) {
-            tracing::warn!("failed to SIGTERM container {name}: {e}");
-        }
+    // Wait for all containers to exit via pidfds (parallel), with a shared timeout.
+    let names: Vec<String> = containers.iter().map(|(n, _, _)| n.clone()).collect();
+    let mut remaining: Vec<(String, i32)> = containers
+        .iter()
+        .map(|(n, pid, _)| (n.clone(), *pid))
+        .collect();
+
+    // Spawn a pidfd wait task per container
+    let mut wait_tasks = Vec::new();
+    for (name, pid, pidfd) in containers {
+        let task = smol::spawn(async move {
+            if let Some(pidfd) = pidfd {
+                if let Ok(async_fd) = Async::new(pidfd) {
+                    let _ = async_fd.readable().await;
+                }
+            }
+            (name, pid)
+        });
+        wait_tasks.push(task);
     }
 
-    // Wait for containers to exit (with timeout)
+    // Race all pidfd waits against the shutdown timeout
     let deadline = smol::Timer::after(Duration::from_secs(SHUTDOWN_TIMEOUT));
-    let mut remaining = running.clone();
-
-    // Poll for container exits
-    let poll_result = smol::future::race(
+    smol::future::race(
         async {
-            loop {
-                smol::Timer::after(Duration::from_millis(100)).await;
-                remaining.retain(|(_, pid)| {
-                    nix::sys::signal::kill(nix::unistd::Pid::from_raw(*pid), None).is_ok()
-                });
-                if remaining.is_empty() {
-                    return true; // all exited
-                }
+            for task in wait_tasks {
+                let (name, _) = task.await;
+                remaining.retain(|(n, _)| n != &name);
             }
         },
         async {
             deadline.await;
-            false // timeout
         },
     )
     .await;
 
-    if !poll_result && !remaining.is_empty() {
+    // SIGKILL any survivors
+    if !remaining.is_empty() {
         tracing::warn!(
             "timeout: sending SIGKILL to {} remaining container(s)",
             remaining.len()
@@ -270,14 +275,14 @@ async fn graceful_shutdown(mgr: &Arc<smol::lock::Mutex<manager::ContainerManager
                 tracing::warn!("failed to SIGKILL container {name}: {e}");
             }
         }
-        // Brief wait for SIGKILL to take effect
         smol::Timer::after(Duration::from_millis(500)).await;
     }
 
-    // Reap all containers and clean up
+    // Reap all containers — handle_container_exit cleans up propagated mounts,
+    // idmap mounts, block volumes, and cgroups for each container.
     {
         let mut m = mgr.lock().await;
-        for (name, _) in &running {
+        for name in &names {
             m.handle_container_exit(name);
         }
     }

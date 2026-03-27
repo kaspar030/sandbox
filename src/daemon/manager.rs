@@ -444,12 +444,43 @@ impl ContainerManager {
     }
 
     /// Get all running containers as (name, pid) pairs.
-    pub fn running_containers(&self) -> Vec<(String, i32)> {
-        self.containers
+    /// Initiate shutdown: set the shutting_down flag, batch-kill all running
+    /// containers (cgroup.kill + SIGTERM), and return their (name, pid, pidfd)
+    /// for async waiting.  Does NOT set manually_stopped so that restart
+    /// policies are preserved across daemon restarts.
+    pub fn initiate_shutdown(&mut self) -> Vec<(String, i32, Option<OwnedFd>)> {
+        self.shutting_down.store(true, Ordering::Relaxed);
+
+        let mut result = Vec::new();
+        let names: Vec<String> = self
+            .containers
             .iter()
             .filter(|(_, c)| c.state.is_running())
-            .filter_map(|(name, c)| c.pid.map(|pid| (name.clone(), pid)))
-            .collect()
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        for name in &names {
+            let container = self.containers.get_mut(name).unwrap();
+            let pid = match container.pid {
+                Some(pid) => pid,
+                None => continue,
+            };
+
+            // Kill all processes in the cgroup
+            let cgroup_kill_path = format!("/sys/fs/cgroup/sandbox/{name}/cgroup.kill");
+            let _ = std::fs::write(&cgroup_kill_path, "1");
+
+            // SIGTERM PID 1
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+
+            let pidfd = container.pidfd.take();
+            result.push((name.clone(), pid, pidfd));
+        }
+
+        result
     }
 
     /// Initiate an async stop: send SIGTERM and return pid + pidfd.
@@ -566,8 +597,12 @@ impl ContainerManager {
     /// Clean up idmapped mounts that propagated from a container's bind mounts
     /// to the host mount namespace. These appear as idmapped submounts under
     /// the bind mount source paths on the host.
-    fn cleanup_propagated_mounts(_bind_mounts: &[sandbox::protocol::BindMount]) {
-        // TODO: implement propagated mount cleanup once mountinfo module is ready
+    fn cleanup_propagated_mounts(bind_mounts: &[sandbox::protocol::BindMount]) {
+        let propagated = sandbox::sys::mountinfo::find_propagated_mounts(bind_mounts);
+        for path in propagated {
+            tracing::debug!("unmounting propagated mount {}", path.display());
+            let _ = nix::mount::umount2(&path, nix::mount::MntFlags::MNT_DETACH);
+        }
     }
 
     fn persist_container(state_dir: &std::path::Path, name: &str, container: &Container) {
@@ -851,6 +886,17 @@ impl ContainerManager {
             let _ = cgroup.destroy();
         }
         container.cgroup = None;
+
+        // Unmount idmapped mount (re-created cheaply on next start).
+        // Done before clearing pid / ephemeral cleanup so that
+        // Container::destroy() for ephemeral containers won't double-unmount.
+        if let Some(ref mount) = container.idmap_mount {
+            tracing::debug!("unmounting idmap mount {}", mount.display());
+            let _ = nix::mount::umount2(mount, nix::mount::MntFlags::MNT_DETACH);
+            let _ = std::fs::remove_dir(mount);
+        }
+        container.idmap_mount = None;
+
         container.pid = None;
 
         // Auto-remove ephemeral containers
