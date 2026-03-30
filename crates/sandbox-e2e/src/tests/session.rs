@@ -64,6 +64,8 @@ pub fn test_session_multi_request(ctx: &TestContext) -> Result<(), String> {
             user: None,
             env: Vec::new(),
             piped: false,
+            workdir: None,
+            mounts: Vec::new(),
         })
         .map_err(|e| format!("exec failed: {e}"))?;
     if matches!(resp, sandbox_proto::Response::Error { .. }) {
@@ -181,6 +183,8 @@ pub fn test_session_piped_exec(ctx: &TestContext) -> Result<(), String> {
             user: None,
             env: Vec::new(),
             piped: true,
+            workdir: None,
+            mounts: Vec::new(),
         })
         .map_err(|e| format!("piped exec failed: {e}"))?;
 

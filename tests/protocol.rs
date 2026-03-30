@@ -16,7 +16,7 @@ fn test_roundtrip_request_create() {
         entrypoint: Vec::new(),
         command: vec!["/bin/sh".to_string()],
         env: vec!["PATH=/usr/bin".to_string()],
-        working_dir: "/app".to_string(),
+        working_dir: Some("/app".to_string()),
         hostname: Some("myhost".to_string()),
         uid_mappings: vec![IdMapping {
             container_id: 0,
@@ -132,12 +132,11 @@ fn test_roundtrip_all_request_variants() {
             name: "foo".to_string(),
             command: vec!["/bin/ls".to_string(), "-la".to_string()],
             detach: false,
-            user: Some(sandbox_proto::ExecUser {
-                uid: 1000,
-                gid: 1000,
-            }),
+            user: Some("1000:1000".to_string()),
             env: vec!["FOO=bar".to_string()],
             piped: false,
+            workdir: None,
+            mounts: Vec::new(),
         },
         Request::UpdateContainer {
             name: "foo".to_string(),
@@ -294,7 +293,7 @@ fn test_roundtrip_all_response_variants() {
             command: vec!["/bin/sh".to_string()],
             entrypoint: Vec::new(),
             env: vec!["FOO=bar".to_string()],
-            working_dir: "/".to_string(),
+            working_dir: Some("/".to_string()),
             hostname: None,
             use_init: false,
             network: NetworkMode::Host,
@@ -421,7 +420,7 @@ fn test_container_spec_backward_compat() {
     assert!(spec.publish.is_empty());
     assert!(spec.entrypoint.is_empty());
     assert!(spec.env.is_empty());
-    assert_eq!(spec.working_dir, "/");
+    assert_eq!(spec.working_dir, None);
     // restart_policy should default to No for old specs
     assert_eq!(spec.restart_policy, RestartPolicy::No);
 }
@@ -664,6 +663,8 @@ fn test_exec_with_env_roundtrip() {
         user: None,
         env: vec!["FOO=bar".to_string(), "BAZ=qux".to_string()],
         piped: false,
+        workdir: None,
+        mounts: Vec::new(),
     };
 
     let encoded = encode_message(&req).unwrap();
@@ -692,6 +693,8 @@ fn test_exec_piped_roundtrip() {
         user: None,
         env: Vec::new(),
         piped: true,
+        workdir: None,
+        mounts: Vec::new(),
     };
 
     let encoded = encode_message(&req).unwrap();

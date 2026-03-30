@@ -88,6 +88,8 @@ pub fn test_edit_change_workdir(ctx: &TestContext) -> Result<(), String> {
         "alpine",
         "--restart",
         "no",
+        "--workdir",
+        "/",
         "-e",
         "EXISTING=yes",
     ]);

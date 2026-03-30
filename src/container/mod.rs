@@ -537,8 +537,10 @@ impl Container {
         }
 
         // Set working directory (after pivot_root so container paths work)
-        if !self.spec.working_dir.is_empty() && self.spec.working_dir != "/" {
-            let _ = std::env::set_current_dir(&self.spec.working_dir);
+        if let Some(ref wd) = self.spec.working_dir {
+            if !wd.is_empty() && wd != "/" {
+                let _ = std::env::set_current_dir(wd);
+            }
         }
 
         // Apply seccomp filter (must be before uid switch, needs prctl)

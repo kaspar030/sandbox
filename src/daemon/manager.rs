@@ -51,6 +51,9 @@ pub struct HandleResult {
     pub exec_pidfd: Option<OwnedFd>,
     /// Pipe fds for piped exec mode: (stdout_read, stderr_read).
     pub pipe_fds: Option<(OwnedFd, OwnedFd)>,
+    /// Ephemeral mounts to unmount after exec exits: (container_pid, target_path).
+    /// Only mounts that were actually performed during this exec are listed.
+    pub exec_cleanup_mounts: Vec<(i32, String)>,
 }
 
 impl HandleResult {
@@ -60,6 +63,7 @@ impl HandleResult {
             pty_master: None,
             exec_pidfd: None,
             pipe_fds: None,
+            exec_cleanup_mounts: Vec::new(),
         }
     }
 
@@ -69,6 +73,7 @@ impl HandleResult {
             pty_master,
             exec_pidfd: None,
             pipe_fds: None,
+            exec_cleanup_mounts: Vec::new(),
         }
     }
 }
@@ -973,10 +978,14 @@ impl ContainerManager {
     }
 
     /// Handle a request and return a response + optional PTY fd.
-    pub fn handle_request(&mut self, request: Request) -> HandleResult {
+    pub fn handle_request(
+        &mut self,
+        request: Request,
+        caller: &sandbox::protocol::CallerContext,
+    ) -> HandleResult {
         match request {
-            Request::Create(spec) => self.handle_create(spec),
-            Request::Run(spec) => self.handle_run(spec),
+            Request::Create(spec) => self.handle_create(spec, caller),
+            Request::Run(spec) => self.handle_run(spec, caller),
             Request::Start { name, command } => self.handle_start(&name, command),
             Request::Stop { .. } => {
                 // Stop is handled asynchronously in handle_client via handle_stop_async.
@@ -1001,7 +1010,11 @@ impl ContainerManager {
                 user,
                 env,
                 piped,
-            } => self.handle_exec(&name, command, detach, piped, user, env),
+                workdir,
+                mounts,
+            } => self.handle_exec(
+                &name, command, detach, piped, user, env, workdir, mounts, caller,
+            ),
             Request::ImageImport { name, source, pool } => {
                 self.handle_image_import(&name, &source, pool.as_deref())
             }
@@ -1207,8 +1220,8 @@ impl ContainerManager {
                 spec.env = meta.config.env;
             }
             // Working dir: use image default if user didn't set one
-            if spec.working_dir == "/" && !meta.config.working_dir.is_empty() {
-                spec.working_dir = meta.config.working_dir;
+            if spec.working_dir.is_none() && !meta.config.working_dir.is_empty() {
+                spec.working_dir = Some(meta.config.working_dir);
             }
             // User: use image default if CLI didn't set one
             if spec.user.is_none() {
@@ -1226,7 +1239,11 @@ impl ContainerManager {
         }
     }
 
-    fn handle_create(&mut self, mut spec: ContainerSpec) -> HandleResult {
+    fn handle_create(
+        &mut self,
+        mut spec: ContainerSpec,
+        caller: &sandbox::protocol::CallerContext,
+    ) -> HandleResult {
         let name = spec.name.clone();
 
         if self.containers.contains_key(&name) {
@@ -1240,6 +1257,16 @@ impl ContainerManager {
         // may later fill in the image's CMD, but init is already set.
         Self::apply_implicit_init(&mut spec);
         self.apply_image_config(&mut spec);
+
+        // Apply caller defaults for user and working_dir.
+        // Resolution order: explicit --user > image USER > caller UID
+        if spec.user.is_none() {
+            spec.user = Some(caller.uid.to_string());
+        }
+        // Resolution order: explicit --workdir > image WORKDIR > "/"
+        if spec.working_dir.is_none() {
+            spec.working_dir = Some("/".to_string());
+        }
 
         // Validate and set up bridged networking
         if let Err(e) = Self::validate_publish(&spec) {
@@ -1378,7 +1405,7 @@ impl ContainerManager {
             spec.user = Some(user);
         }
         if let Some(working_dir) = overrides.working_dir {
-            spec.working_dir = working_dir;
+            spec.working_dir = Some(working_dir);
         }
         if let Some(restart_policy) = overrides.restart_policy {
             spec.restart_policy = restart_policy;
@@ -1629,7 +1656,7 @@ impl ContainerManager {
             container.spec.hostname = h;
         }
         if let Some(wd) = update.working_dir {
-            container.spec.working_dir = wd;
+            container.spec.working_dir = Some(wd);
         }
 
         // -- Init --
@@ -2217,7 +2244,11 @@ impl ContainerManager {
     }
 
     #[tracing::instrument(skip_all, level = "debug", fields(name = %spec.name))]
-    fn handle_run(&mut self, mut spec: ContainerSpec) -> HandleResult {
+    fn handle_run(
+        &mut self,
+        mut spec: ContainerSpec,
+        caller: &sandbox::protocol::CallerContext,
+    ) -> HandleResult {
         let name = spec.name.clone();
 
         if self.containers.contains_key(&name) {
@@ -2228,6 +2259,14 @@ impl ContainerManager {
 
         Self::apply_implicit_init(&mut spec);
         self.apply_image_config(&mut spec);
+
+        // Apply caller defaults for user and working_dir.
+        if spec.user.is_none() {
+            spec.user = Some(caller.uid.to_string());
+        }
+        if spec.working_dir.is_none() {
+            spec.working_dir = Some("/".to_string());
+        }
 
         // Validate and set up bridged networking (IPAM, NAT, port forwarding)
         if let Err(e) = Self::validate_publish(&spec) {
@@ -2744,9 +2783,9 @@ impl ContainerManager {
                 entrypoint: svc.entrypoint.clone(),
                 env: svc.env.clone(),
                 working_dir: if svc.working_dir.is_empty() {
-                    "/".to_string()
+                    None
                 } else {
-                    svc.working_dir.clone()
+                    Some(svc.working_dir.clone())
                 },
                 hostname: if svc.hostname.is_empty() {
                     None
@@ -3593,16 +3632,20 @@ impl ContainerManager {
         HandleResult::response_only(Response::ContainerInspect(Box::new(detail)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_exec(
         &mut self,
         name: &str,
         command: Vec<String>,
         detach: bool,
         piped: bool,
-        user: Option<sandbox::protocol::ExecUser>,
+        user: Option<String>,
         exec_env: Vec<String>,
+        workdir: Option<String>,
+        mounts: Vec<sandbox::protocol::ExecMount>,
+        caller: &sandbox::protocol::CallerContext,
     ) -> HandleResult {
-        let container = match self.containers.get(name) {
+        let container = match self.containers.get_mut(name) {
             Some(c) => c,
             None => {
                 return HandleResult::response_only(Response::Error {
@@ -3626,9 +3669,88 @@ impl ContainerManager {
             }
         };
 
+        // Process exec mounts
+        let mut cleanup_mounts: Vec<(i32, String)> = Vec::new();
+        let mut need_persist = false;
+
+        for mount in &mounts {
+            let source_path = std::path::Path::new(&mount.source);
+            if !source_path.exists() {
+                // Rollback any mounts we already did
+                for (rpid, rtarget) in &cleanup_mounts {
+                    let _ = sandbox::sys::hot_mount::hot_unmount(*rpid, rtarget);
+                }
+                return HandleResult::response_only(Response::Error {
+                    message: format!("source path does not exist: {}", mount.source),
+                });
+            }
+
+            // Skip if already accessible via an existing same-path bind mount
+            let already_accessible = container
+                .spec
+                .bind_mounts
+                .iter()
+                .any(|bm| bm.source == bm.target && mount.target.starts_with(&bm.source));
+
+            if !already_accessible {
+                if let Err(e) = sandbox::sys::hot_mount::hot_bind_mount(
+                    pid,
+                    source_path,
+                    &mount.target,
+                    mount.readonly,
+                ) {
+                    // Rollback any mounts we already did
+                    for (rpid, rtarget) in &cleanup_mounts {
+                        let _ = sandbox::sys::hot_mount::hot_unmount(*rpid, rtarget);
+                    }
+                    return HandleResult::response_only(Response::Error {
+                        message: format!("exec mount failed: {e}"),
+                    });
+                }
+
+                if mount.ephemeral {
+                    cleanup_mounts.push((pid, mount.target.clone()));
+                } else {
+                    // Persistent: add to spec (like mount add)
+                    container
+                        .spec
+                        .bind_mounts
+                        .push(sandbox::protocol::BindMount {
+                            source: mount.source.clone(),
+                            target: mount.target.clone(),
+                            readonly: mount.readonly,
+                        });
+                    need_persist = true;
+                }
+            }
+        }
+
+        if need_persist {
+            Self::persist_container(&self.state_dir, name, container);
+        }
+
+        // Resolve user: explicit --user > container spec.user > caller UID
+        let resolved_user = user
+            .or_else(|| container.spec.user.clone())
+            .unwrap_or_else(|| caller.uid.to_string());
+
+        // Resolve workdir: explicit --workdir > container spec.working_dir > "/"
+        let resolved_workdir = workdir
+            .or_else(|| container.spec.working_dir.clone())
+            .unwrap_or_else(|| "/".to_string());
+
         // Merge: container env is the base, per-exec env overrides per-key
         let env = merge_env(&container.spec.env, &exec_env);
-        match exec_in_container(pid, name, &command, detach, piped, user, &env) {
+        match exec_in_container(
+            pid,
+            name,
+            &command,
+            detach,
+            piped,
+            resolved_user,
+            &env,
+            &resolved_workdir,
+        ) {
             Ok(result) => {
                 if result.pipe_fds.is_some() {
                     HandleResult {
@@ -3638,6 +3760,7 @@ impl ContainerManager {
                         pty_master: None,
                         exec_pidfd: Some(result.pidfd),
                         pipe_fds: result.pipe_fds,
+                        exec_cleanup_mounts: cleanup_mounts,
                     }
                 } else {
                     HandleResult {
@@ -3647,12 +3770,19 @@ impl ContainerManager {
                         pty_master: result.pty_master,
                         exec_pidfd: Some(result.pidfd),
                         pipe_fds: None,
+                        exec_cleanup_mounts: cleanup_mounts,
                     }
                 }
             }
-            Err(e) => HandleResult::response_only(Response::Error {
-                message: format!("exec failed: {e}"),
-            }),
+            Err(e) => {
+                // Exec failed — clean up any mounts we did
+                for (rpid, rtarget) in &cleanup_mounts {
+                    let _ = sandbox::sys::hot_mount::hot_unmount(*rpid, rtarget);
+                }
+                HandleResult::response_only(Response::Error {
+                    message: format!("exec failed: {e}"),
+                })
+            }
         }
     }
 
@@ -3882,14 +4012,16 @@ extern "C" fn exec_forward_signal(sig: libc::c_int) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exec_in_container(
     container_pid: libc::pid_t,
     container_name: &str,
     command: &[String],
     detach: bool,
     piped: bool,
-    user: Option<sandbox::protocol::ExecUser>,
+    user: String,
     env: &[String],
+    workdir: &str,
 ) -> Result<ExecResult> {
     use std::os::fd::FromRawFd;
 
@@ -4054,15 +4186,24 @@ fn exec_in_container(
             eprintln!("chroot failed: {e}");
             std::process::exit(1);
         }
-        let _ = std::env::set_current_dir("/");
+        // Set working directory (use resolved workdir from handle_exec)
+        let _ = std::env::set_current_dir(workdir);
 
         // Become a session leader so that bash job control (setpgid) works.
         let _ = nix::unistd::setsid();
 
-        // Switch to target user (default: container root)
-        let (uid, gid) = match &user {
-            Some(u) => (u.uid, u.gid),
-            None => (0, 0),
+        // Resolve user spec (supports UID, UID:GID, name, name:group).
+        // After chroot so we read the container's /etc/passwd.
+        let (uid, gid) = if let Some(resolved) = sandbox::sys::passwd::resolve_user_spec(&user) {
+            (resolved.uid, resolved.gid)
+        } else {
+            // Resolution failed — try parsing as bare numeric UID for backward compat
+            if let Ok(uid) = user.parse::<u32>() {
+                (uid, uid)
+            } else {
+                eprintln!("failed to resolve user: {user}");
+                std::process::exit(1);
+            }
         };
 
         // Set supplementary groups from /etc/group (after chroot so we read container's file).

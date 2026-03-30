@@ -46,8 +46,9 @@ pub struct ContainerSpec {
     #[serde(default)]
     pub env: Vec<String>,
     /// Working directory inside the container.
-    #[serde(default = "default_working_dir")]
-    pub working_dir: String,
+    /// None = use image WORKDIR, then caller's CWD, then "/".
+    #[serde(default)]
+    pub working_dir: Option<String>,
     #[serde(default)]
     pub hostname: Option<String>,
     #[serde(default)]
@@ -77,7 +78,7 @@ pub struct ContainerSpec {
     #[serde(default)]
     pub detach: bool,
     /// User to run as (e.g., "1000", "1000:1000", "nobody").
-    /// Resolved from image config if not set by CLI. Default: root (uid 0).
+    /// None = use image USER, then caller's UID.
     #[serde(default)]
     pub user: Option<String>,
     /// Restart policy. Default: No (for backward compatibility with old specs).
@@ -94,10 +95,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_working_dir() -> String {
-    "/".to_string()
-}
-
 impl Default for ContainerSpec {
     fn default() -> Self {
         Self {
@@ -107,7 +104,7 @@ impl Default for ContainerSpec {
             entrypoint: Vec::new(),
             command: Vec::new(),
             env: Vec::new(),
-            working_dir: "/".to_string(),
+            working_dir: None,
             hostname: None,
             uid_mappings: Vec::new(),
             gid_mappings: Vec::new(),
@@ -125,6 +122,35 @@ impl Default for ContainerSpec {
             no_new_privs: true,
         }
     }
+}
+
+/// Caller context attached to every request.
+/// The `uid` field is set by the daemon from SO_PEERCRED (kernel-verified,
+/// never trusted from the client).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CallerContext {
+    /// Caller's Unix UID. Set by the daemon from SO_PEERCRED.
+    #[serde(default)]
+    pub uid: u32,
+}
+
+/// Bind mount for an exec call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecMount {
+    pub source: String,
+    pub target: String,
+    pub readonly: bool,
+    /// If true, mount is removed when exec exits.
+    /// If false, mount is added permanently (like `mount add`).
+    pub ephemeral: bool,
+}
+
+/// Wire message: a request paired with caller context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientMessage {
+    pub request: Request,
+    #[serde(default)]
+    pub caller: CallerContext,
 }
 
 /// Information about a stored image (for list view).
@@ -597,7 +623,7 @@ pub struct ContainerDetail {
     pub command: Vec<String>,
     pub entrypoint: Vec<String>,
     pub env: Vec<String>,
-    pub working_dir: String,
+    pub working_dir: Option<String>,
     pub hostname: Option<String>,
     pub use_init: bool,
     pub network: NetworkMode,
@@ -641,8 +667,9 @@ pub enum Request {
         command: Vec<String>,
         /// If true, run without PTY (fire-and-forget). Default: false (interactive).
         detach: bool,
-        /// Run as a specific user (default: container root, uid 0).
-        user: Option<ExecUser>,
+        /// Run as a specific user (UID, UID:GID, name, or name:group).
+        /// None = inherit container's spec.user, then caller UID.
+        user: Option<String>,
         /// Per-exec environment variables (merged on top of container env).
         #[serde(default)]
         env: Vec<String>,
@@ -650,6 +677,13 @@ pub enum Request {
         /// Client receives two fds (stdout, stderr) via SCM_RIGHTS.
         #[serde(default)]
         piped: bool,
+        /// Working directory for this exec.
+        /// None = inherit container's working_dir, then "/".
+        #[serde(default)]
+        workdir: Option<String>,
+        /// Bind mounts for this exec. Ephemeral mounts are removed on exit.
+        #[serde(default)]
+        mounts: Vec<ExecMount>,
     },
     /// Import an image from a path (directory or tar.gz).
     ImageImport {

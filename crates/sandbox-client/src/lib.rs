@@ -23,10 +23,17 @@
 
 pub use sandbox_proto;
 
-use sandbox_proto::{Request, Response};
+use sandbox_proto::{CallerContext, ClientMessage, Request, Response};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+
+/// Build caller context from the current process environment.
+/// The uid field is set to 0 here — the daemon overwrites it
+/// from SO_PEERCRED (kernel-verified).
+fn build_caller_context() -> CallerContext {
+    CallerContext { uid: 0 }
+}
 
 mod scm_rights;
 
@@ -97,7 +104,11 @@ impl Client {
     ///
     /// Use this for non-interactive operations (list, stop, destroy, image ops).
     pub fn request(&mut self, req: &Request) -> Result<Response> {
-        sandbox_proto::write_message(&mut self.stream, req)?;
+        let msg = ClientMessage {
+            request: req.clone(),
+            caller: build_caller_context(),
+        };
+        sandbox_proto::write_message(&mut self.stream, &msg)?;
         Ok(sandbox_proto::read_message(&mut self.stream)?)
     }
 
@@ -110,7 +121,11 @@ impl Client {
     /// After the PTY session ends (fd EOF), call [`read_exit_code`] to get the
     /// container/exec exit code.
     pub fn request_with_fd(&mut self, req: &Request) -> Result<(Response, Option<OwnedFd>)> {
-        sandbox_proto::write_message(&mut self.stream, req)?;
+        let msg = ClientMessage {
+            request: req.clone(),
+            caller: build_caller_context(),
+        };
+        sandbox_proto::write_message(&mut self.stream, &msg)?;
         let response: Response = sandbox_proto::read_message(&mut self.stream)?;
 
         let expects_pty = matches!(
@@ -144,7 +159,11 @@ impl Client {
         &mut self,
         req: &Request,
     ) -> Result<(Response, Option<(OwnedFd, OwnedFd)>)> {
-        sandbox_proto::write_message(&mut self.stream, req)?;
+        let msg = ClientMessage {
+            request: req.clone(),
+            caller: build_caller_context(),
+        };
+        sandbox_proto::write_message(&mut self.stream, &msg)?;
         let response: Response = sandbox_proto::read_message(&mut self.stream)?;
 
         if matches!(response, Response::ExecStartedPiped { .. }) {

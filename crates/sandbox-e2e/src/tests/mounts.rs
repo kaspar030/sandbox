@@ -155,11 +155,25 @@ pub fn test_mount_cleanup_on_stop(ctx: &TestContext) -> Result<(), String> {
     let src = test_dir.to_str().unwrap();
     let bind_spec = format!("{src}:/mnt/test");
 
-    // Run a detached container with a bind mount
+    // Create a persistent container with a bind mount, then start it.
+    // Using create+start (not run) so the container is non-ephemeral
+    // and survives stop for the re-start test below.
     ctx.cli_ok(&[
-        "run", "--name", name, "--image", "alpine", "--init", "-d", "--bind", &bind_spec, "--",
-        "sleep", "300",
+        "create",
+        "--name",
+        name,
+        "--image",
+        "alpine",
+        "--init",
+        "--bind",
+        &bind_spec,
+        "--restart",
+        "no",
+        "--",
+        "sleep",
+        "300",
     ]);
+    ctx.cli_ok(&["start", name]);
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     // Verify the idmap mount exists

@@ -106,6 +106,10 @@ enum Commands {
         #[arg(short = 'u', long)]
         user: Option<String>,
 
+        /// Working directory inside the container
+        #[arg(short = 'w', long)]
+        workdir: Option<String>,
+
         /// Use built-in mini-init as PID 1
         #[arg(long)]
         init: bool,
@@ -179,6 +183,9 @@ enum Commands {
         /// Run as user (UID, UID:GID, name, or name:group)
         #[arg(short = 'u', long)]
         user: Option<String>,
+        /// Working directory inside the container
+        #[arg(short = 'w', long)]
+        workdir: Option<String>,
         #[arg(long)]
         init: bool,
 
@@ -412,13 +419,27 @@ enum Commands {
         #[arg(add = ArgValueCandidates::new(completer::container_completer))]
         name: String,
 
-        /// Run as user UID or UID:GID (default: 0, container root)
+        /// Run as user (UID, UID:GID, name, or name:group). Defaults to container's user.
         #[arg(short = 'u', long)]
         user: Option<String>,
 
         /// Set environment variable for this exec only (KEY=VALUE or KEY to pass from host)
         #[arg(short = 'e', long = "env")]
         env: Vec<String>,
+
+        /// Working directory for this exec (default: container's working directory)
+        #[arg(short = 'w', long)]
+        workdir: Option<String>,
+
+        /// Bind mount for this exec (SOURCE[:TARGET][,MODIFIERS]).
+        /// Modifiers: ro, rw, e/ephemeral (default), p/persistent.
+        /// Ephemeral mounts are removed when exec exits.
+        #[arg(short = 'v', long = "volume")]
+        volume: Vec<String>,
+
+        /// Mount current directory and set as working directory (shorthand for -v . -w .)
+        #[arg(long)]
+        cwd: bool,
 
         /// Run detached (no PTY, no interactive I/O)
         #[arg(short, long)]
@@ -838,6 +859,7 @@ fn main() -> anyhow::Result<()> {
             volume,
             env,
             user,
+            workdir,
             init,
             detach,
             uid_map,
@@ -864,6 +886,7 @@ fn main() -> anyhow::Result<()> {
                 bind,
                 resolved_env,
                 user,
+                workdir,
                 init,
                 uid_map,
                 gid_map,
@@ -922,6 +945,7 @@ fn main() -> anyhow::Result<()> {
             volume,
             env,
             user,
+            workdir,
             init,
             restart,
             start,
@@ -948,7 +972,7 @@ fn main() -> anyhow::Result<()> {
                     },
                     entrypoint: None,
                     user,
-                    working_dir: None,
+                    working_dir: workdir,
                     restart_policy,
                     use_init: if init { Some(true) } else { None },
                     volumes: parse_volume_mounts(&volume)?,
@@ -987,7 +1011,7 @@ fn main() -> anyhow::Result<()> {
                     },
                     entrypoint: None,
                     user,
-                    working_dir: None,
+                    working_dir: workdir,
                     restart_policy,
                     use_init: if init { Some(true) } else { None },
                     volumes: parse_volume_mounts(&volume)?,
@@ -1037,6 +1061,7 @@ fn main() -> anyhow::Result<()> {
                     bind,
                     resolved_env,
                     user,
+                    workdir,
                     init,
                     uid_map,
                     gid_map,
@@ -1364,10 +1389,34 @@ fn main() -> anyhow::Result<()> {
             command,
             detach,
             no_pty,
+            workdir,
+            volume,
+            cwd,
         } => {
-            let exec_user = user.map(|u| parse_exec_user(&u)).transpose()?;
             let resolved_env = resolve_env(&env);
             let mut client = Client::connect(cli.socket.as_deref())?;
+
+            // Parse -v mount specs
+            let mut mounts: Vec<sandbox_proto::ExecMount> = volume
+                .iter()
+                .map(|v| parse_exec_mount_spec(v))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+
+            let mut resolved_workdir = workdir;
+
+            // --cwd is shorthand for -v . -w .
+            if cwd {
+                let cwd_path = make_absolute(".");
+                mounts.push(sandbox_proto::ExecMount {
+                    source: cwd_path.clone(),
+                    target: cwd_path.clone(),
+                    readonly: false,
+                    ephemeral: true,
+                });
+                if resolved_workdir.is_none() {
+                    resolved_workdir = Some(cwd_path);
+                }
+            }
 
             // Auto-detect: use piped mode when stdin is not a TTY (unless -d)
             let use_piped = no_pty
@@ -1381,9 +1430,11 @@ fn main() -> anyhow::Result<()> {
                     name,
                     command,
                     detach: true,
-                    user: exec_user,
+                    user,
                     env: resolved_env,
                     piped: false,
+                    workdir: resolved_workdir,
+                    mounts,
                 })?;
                 print_response(&resp);
             } else if use_piped {
@@ -1392,9 +1443,11 @@ fn main() -> anyhow::Result<()> {
                     name,
                     command,
                     detach: false,
-                    user: exec_user,
+                    user,
                     env: resolved_env,
                     piped: true,
+                    workdir: resolved_workdir,
+                    mounts,
                 })?;
                 if let Response::Error { .. } = &resp {
                     print_response(&resp);
@@ -1413,9 +1466,11 @@ fn main() -> anyhow::Result<()> {
                     name,
                     command,
                     detach: false,
-                    user: exec_user,
+                    user,
                     env: resolved_env,
                     piped: false,
+                    workdir: resolved_workdir,
+                    mounts,
                 })?;
                 if let Response::Error { .. } = &resp {
                     print_response(&resp);
@@ -2025,7 +2080,7 @@ fn print_container_inspect(d: &sandbox_proto::ContainerDetail) {
         println!("Entrypoint: {}", d.entrypoint.join(" "));
     }
     println!("Command:    {}", d.command.join(" "));
-    println!("WorkingDir: {}", d.working_dir);
+    println!("WorkingDir: {}", d.working_dir.as_deref().unwrap_or("/"));
 
     if let Some(ref h) = d.hostname {
         println!("Hostname:   {h}");
@@ -2143,6 +2198,7 @@ fn build_spec(
     bind: Vec<String>,
     env: Vec<String>,
     user: Option<String>,
+    workdir: Option<String>,
     init: bool,
     uid_map: Vec<String>,
     gid_map: Vec<String>,
@@ -2212,7 +2268,7 @@ fn build_spec(
         entrypoint: Vec::new(),
         command,
         env,
-        working_dir: "/".to_string(),
+        working_dir: workdir, // None = resolved by daemon: image WORKDIR > caller CWD > "/"
         hostname,
         uid_mappings,
         gid_mappings,
@@ -2245,22 +2301,6 @@ fn build_spec(
         restart_policy: sandbox_proto::RestartPolicy::No, // caller sets this
         no_new_privs: !allow_new_privs,
     })
-}
-
-/// Parse a user spec: "UID" or "UID:GID"
-fn parse_exec_user(s: &str) -> anyhow::Result<sandbox_proto::ExecUser> {
-    if let Some((uid_str, gid_str)) = s.split_once(':') {
-        let uid: u32 = uid_str
-            .parse()
-            .map_err(|_| anyhow::anyhow!("invalid UID: {uid_str}"))?;
-        let gid: u32 = gid_str
-            .parse()
-            .map_err(|_| anyhow::anyhow!("invalid GID: {gid_str}"))?;
-        Ok(sandbox_proto::ExecUser { uid, gid })
-    } else {
-        let uid: u32 = s.parse().map_err(|_| anyhow::anyhow!("invalid UID: {s}"))?;
-        Ok(sandbox_proto::ExecUser { uid, gid: uid })
-    }
 }
 
 /// Parse a mount spec: "SOURCE:TARGET" or "SOURCE:TARGET:ro"
@@ -2368,6 +2408,57 @@ fn parse_mount_spec(spec: &str) -> anyhow::Result<(String, String, bool)> {
         }
         _ => anyhow::bail!("invalid mount spec: {spec}"),
     }
+}
+
+/// Check if a string is a comma-separated list of known mount modifiers.
+fn is_mount_modifiers(s: &str) -> bool {
+    !s.is_empty()
+        && s.split(',')
+            .all(|t| matches!(t, "ro" | "rw" | "e" | "ephemeral" | "p" | "persistent"))
+}
+
+/// Parse an exec mount spec: SOURCE[:TARGET][:MODIFIERS]
+/// Modifiers are comma-separated: ro, rw, e/ephemeral (default), p/persistent.
+fn parse_exec_mount_spec(spec: &str) -> anyhow::Result<sandbox_proto::ExecMount> {
+    let parts: Vec<&str> = spec.splitn(3, ':').collect();
+
+    let (source_raw, target_raw, modifiers_str) = match parts.len() {
+        1 => (parts[0], None, ""),
+        2 => {
+            if is_mount_modifiers(parts[1]) {
+                (parts[0], None, parts[1])
+            } else {
+                (parts[0], Some(parts[1]), "")
+            }
+        }
+        3 => (parts[0], Some(parts[1]), parts[2]),
+        _ => unreachable!(),
+    };
+
+    let source = make_absolute(source_raw);
+    let target = match target_raw {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => source.clone(),
+    };
+
+    let mut readonly = false;
+    let mut ephemeral = true; // default for exec
+    for modifier in modifiers_str.split(',').filter(|s| !s.is_empty()) {
+        match modifier {
+            "ro" => readonly = true,
+            "rw" => readonly = false,
+            "e" | "ephemeral" => ephemeral = true,
+            "p" | "persistent" => ephemeral = false,
+            _ => anyhow::bail!("unknown mount modifier: {modifier}"),
+        }
+    }
+
+    Ok(sandbox_proto::ExecMount {
+        source,
+        target,
+        readonly,
+        ephemeral,
+    })
 }
 
 /// Make a path absolute (resolve relative to cwd).
@@ -2601,10 +2692,11 @@ fn generate_edit_yaml(name: &str, d: &sandbox_proto::ContainerDetail) -> String 
     }
 
     // -- working_dir --
-    if d.working_dir == "/" {
+    let wd = d.working_dir.as_deref().unwrap_or("/");
+    if wd == "/" {
         defaults.push_str("working_dir: \"/\"\n");
     } else {
-        custom.push_str(&format!("working_dir: \"{}\"\n", d.working_dir));
+        custom.push_str(&format!("working_dir: \"{}\"\n", wd));
     }
 
     // -- hostname --
@@ -2872,7 +2964,8 @@ fn build_update_from_diff(
     }
 
     // working_dir
-    if edited.working_dir != original.working_dir {
+    let orig_wd = original.working_dir.as_deref().unwrap_or("/");
+    if edited.working_dir != orig_wd {
         update.working_dir = Some(edited.working_dir.clone());
     }
 
@@ -3031,7 +3124,7 @@ fn needs_restart(original: &sandbox_proto::ContainerDetail, edited: &EditSpec) -
     edited.command != original.command
         || edited.entrypoint != original.entrypoint
         || edited.env != original.env
-        || edited.working_dir != original.working_dir
+        || edited.working_dir != original.working_dir.as_deref().unwrap_or("/")
         || edited.hostname != original.hostname
         || edited.user != original.user
         || edited.use_init != original.use_init
@@ -3079,10 +3172,11 @@ fn print_edit_summary(original: &sandbox_proto::ContainerDetail, edited: &EditSp
             }
         }
     }
-    if edited.working_dir != original.working_dir {
+    if edited.working_dir != original.working_dir.as_deref().unwrap_or("/") {
         println!(
             "  working_dir: {} → {}",
-            original.working_dir, edited.working_dir
+            original.working_dir.as_deref().unwrap_or("/"),
+            edited.working_dir
         );
     }
     if edited.hostname != original.hostname {

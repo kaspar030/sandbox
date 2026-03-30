@@ -10,7 +10,7 @@ pub mod manager;
 pub mod persist;
 
 use sandbox::error::{Error, Result};
-use sandbox::protocol::{self, Request, Response};
+use sandbox::protocol::{self, CallerContext, ClientMessage, Request, Response};
 use sandbox::storage::StorageManager;
 use sandbox::sys::scm_rights;
 
@@ -320,29 +320,63 @@ async fn handle_client(
     mgr: Arc<smol::lock::Mutex<manager::ContainerManager>>,
     shutting_down: Arc<AtomicBool>,
 ) -> Result<()> {
-    // Read the first request
-    let request: Request = read_async_message(&mut stream).await?;
+    // Extract caller UID from socket peer credentials (kernel-verified).
+    let peer_uid = {
+        use std::os::fd::AsRawFd;
+        let fd = stream.get_ref().as_raw_fd();
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let ret = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if ret == 0 { cred.uid } else { 0 }
+    };
+
+    /// Build an authoritative CallerContext: uid from SO_PEERCRED.
+    fn make_caller(peer_uid: u32, _msg_caller: CallerContext) -> CallerContext {
+        CallerContext { uid: peer_uid }
+    }
+
+    // Read the first message (ClientMessage wraps Request + CallerContext)
+    let msg: ClientMessage = read_async_message(&mut stream).await?;
+    let caller = make_caller(peer_uid, msg.caller);
+    let request = msg.request;
 
     // Check for session mode
     if matches!(request, Request::EnableSession) {
-        tracing::debug!("session mode enabled");
+        tracing::debug!("session mode enabled (uid={peer_uid})");
         write_async_message(&mut stream, &Response::SessionEnabled).await?;
 
         // Session loop: handle requests until connection closes
         loop {
-            let request: Request = match read_async_message(&mut stream).await {
-                Ok(req) => req,
+            let msg: ClientMessage = match read_async_message(&mut stream).await {
+                Ok(m) => m,
                 Err(_) => break, // Connection closed or read error
             };
-            tracing::debug!("session request: {request:?}");
-            handle_single_request(&mut stream, request, &mgr, &shutting_down, true).await?;
+            let session_caller = make_caller(peer_uid, msg.caller);
+            tracing::debug!("session request: {:?}", msg.request);
+            handle_single_request(
+                &mut stream,
+                msg.request,
+                &mgr,
+                &shutting_down,
+                true,
+                &session_caller,
+            )
+            .await?;
         }
         return Ok(());
     }
 
     // Single-shot mode (default): handle one request and return
-    tracing::debug!("received request: {request:?}");
-    handle_single_request(&mut stream, request, &mgr, &shutting_down, false).await
+    tracing::debug!("received request: {request:?} (uid={peer_uid})");
+    handle_single_request(&mut stream, request, &mgr, &shutting_down, false, &caller).await
 }
 
 /// Handle a single request on a client connection.
@@ -358,6 +392,7 @@ async fn handle_single_request(
     mgr: &Arc<smol::lock::Mutex<manager::ContainerManager>>,
     shutting_down: &Arc<AtomicBool>,
     session_mode: bool,
+    caller: &CallerContext,
 ) -> Result<()> {
     // Handle Stop specially: send SIGTERM under mutex, wait async, then reap
     if let Request::Stop {
@@ -377,7 +412,7 @@ async fn handle_single_request(
     // Process request (holds mutex briefly for non-blocking operations)
     let result = {
         let mut mgr = mgr.lock().await;
-        mgr.handle_request(request)
+        mgr.handle_request(request, caller)
     };
 
     // Send response
@@ -448,11 +483,14 @@ async fn handle_single_request(
                 if has_pty {
                     // Interactive exec: keep connection alive, send exit code
                     let exit_code = await_exec_pidfd(exec_pidfd, pid as i32).await;
+                    cleanup_exec_mounts(&result.exec_cleanup_mounts);
                     let _ = write_async_message(stream, &Response::ExecExited { exit_code }).await;
                 } else {
-                    // Detached exec: just reap in background
+                    // Detached exec: reap and clean up in background
+                    let mounts = result.exec_cleanup_mounts;
                     smol::spawn(async move {
                         let _ = await_exec_pidfd(exec_pidfd, pid as i32).await;
+                        cleanup_exec_mounts(&mounts);
                     })
                     .detach();
                 }
@@ -463,6 +501,7 @@ async fn handle_single_request(
             // The pipe fds were already sent via SCM_RIGHTS — the client reads from them.
             if let Some(exec_pidfd) = result.exec_pidfd {
                 let exit_code = await_exec_pidfd(exec_pidfd, pid as i32).await;
+                cleanup_exec_mounts(&result.exec_cleanup_mounts);
                 let _ = write_async_message(stream, &Response::ExecExited { exit_code }).await;
             }
         }
@@ -630,6 +669,20 @@ async fn await_pidfd_and_reap(
                 return result.exit_code;
             }
         }
+    }
+}
+
+/// Clean up ephemeral mounts after an exec process exits.
+/// Only unmounts mounts that were actually performed during the exec call.
+fn cleanup_exec_mounts(mounts: &[(i32, String)]) {
+    for (pid, target) in mounts {
+        let ns_path = format!("/proc/{pid}/ns/mnt");
+        if std::path::Path::new(&ns_path).exists() {
+            if let Err(e) = sandbox::sys::hot_mount::hot_unmount(*pid, target) {
+                tracing::warn!("failed to unmount ephemeral exec mount {target}: {e}");
+            }
+        }
+        // If container stopped, mount namespace is gone — cleanup is automatic
     }
 }
 

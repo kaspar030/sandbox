@@ -405,3 +405,225 @@ pub fn test_update_allow_new_privs(ctx: &TestContext) -> Result<(), String> {
     let _ = ctx.cli(&["destroy", name]);
     Ok(())
 }
+
+/// Test ephemeral mount during exec: mount is available during exec, removed after.
+pub fn test_exec_ephemeral_mount(ctx: &TestContext) -> Result<(), String> {
+    let name = "exec-emount";
+    ctx.cli_ok(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "ubuntu",
+        "--init",
+        "--restart",
+        "no",
+    ]);
+    ctx.cli_ok(&["start", name]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Create a test directory with a marker file
+    let test_dir = ctx.workdir.join("exec-mount-src");
+    std::fs::create_dir_all(&test_dir).unwrap();
+    std::fs::write(test_dir.join("marker"), "ephemeral-test").unwrap();
+    let src = test_dir.to_str().unwrap();
+
+    // Exec with ephemeral mount — file should be readable
+    let output = ctx.cli(&[
+        "exec",
+        "-v",
+        src,
+        name,
+        "--",
+        "cat",
+        &format!("{src}/marker"),
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.status.success() || !stdout.contains("ephemeral-test") {
+        let _ = ctx.cli(&["stop", "--timeout", "1", name]);
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!(
+            "ephemeral mount content not found. stdout='{}' stderr='{}'",
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // After exec, the mount should be gone — verify by listing mount targets
+    let mounts_output = ctx.cli_ok(&["mount", "ls", name]);
+    if mounts_output.contains(src) {
+        let _ = ctx.cli(&["stop", "--timeout", "1", name]);
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!(
+            "ephemeral mount should be removed after exec, but found in: {mounts_output}"
+        ));
+    }
+
+    let _ = ctx.cli(&["stop", "--timeout", "1", name]);
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
+
+/// Test -v . -w . on exec: mounts a directory and sets working directory.
+pub fn test_exec_cwd_shorthand(ctx: &TestContext) -> Result<(), String> {
+    let name = "exec-cwd";
+    ctx.cli_ok(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "ubuntu",
+        "--init",
+        "--restart",
+        "no",
+    ]);
+    ctx.cli_ok(&["start", name]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Create a test directory with a marker file
+    let test_dir = ctx.workdir.join("exec-cwd-src");
+    std::fs::create_dir_all(&test_dir).unwrap();
+    std::fs::write(test_dir.join("cwd-marker"), "cwd-test").unwrap();
+    let src = test_dir.to_str().unwrap();
+
+    // Exec with -v and -w to mount and set workdir
+    let output = ctx.cli(&[
+        "exec",
+        "-v",
+        src,
+        "-w",
+        src,
+        name,
+        "--",
+        "cat",
+        "cwd-marker",
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.status.success() || !stdout.contains("cwd-test") {
+        let _ = ctx.cli(&["stop", "--timeout", "1", name]);
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!(
+            "cwd exec failed. stdout='{}' stderr='{}'",
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let _ = ctx.cli(&["stop", "--timeout", "1", name]);
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
+
+/// Test that exec -v skips mounting if the path is already accessible.
+pub fn test_exec_skip_existing_mount(ctx: &TestContext) -> Result<(), String> {
+    let name = "exec-skip-mount";
+
+    // Create a test directory with a marker
+    let test_dir = ctx.workdir.join("exec-skip-src");
+    std::fs::create_dir_all(&test_dir).unwrap();
+    std::fs::write(test_dir.join("data"), "skip-test").unwrap();
+    let src = test_dir.to_str().unwrap();
+    let bind_spec = format!("{src}:{src}");
+
+    // Create container with the path already bind-mounted
+    ctx.cli_ok(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "ubuntu",
+        "--init",
+        "--restart",
+        "no",
+        "--bind",
+        &bind_spec,
+    ]);
+    ctx.cli_ok(&["start", name]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Exec with -v on the same path — should succeed (skip mount) and file is accessible
+    let output = ctx.cli(&["exec", "-v", src, name, "--", "cat", &format!("{src}/data")]);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.status.success() || !stdout.contains("skip-test") {
+        let _ = ctx.cli(&["stop", "--timeout", "1", name]);
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!(
+            "exec with existing mount failed. stdout='{}' stderr='{}'",
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Original mount should still be there (not unmounted by ephemeral cleanup)
+    let mounts_output = ctx.cli_ok(&["mount", "ls", name]);
+    if !mounts_output.contains(src) {
+        let _ = ctx.cli(&["stop", "--timeout", "1", name]);
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!(
+            "original mount should still exist after exec, but not found in: {mounts_output}"
+        ));
+    }
+
+    let _ = ctx.cli(&["stop", "--timeout", "1", name]);
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
+
+/// Test persistent exec mount: mount survives exec exit.
+pub fn test_exec_persistent_mount(ctx: &TestContext) -> Result<(), String> {
+    let name = "exec-pmount";
+    ctx.cli_ok(&[
+        "create",
+        "--name",
+        name,
+        "--image",
+        "ubuntu",
+        "--init",
+        "--restart",
+        "no",
+    ]);
+    ctx.cli_ok(&["start", name]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Create a test directory with a marker
+    let test_dir = ctx.workdir.join("exec-persist-src");
+    std::fs::create_dir_all(&test_dir).unwrap();
+    std::fs::write(test_dir.join("data"), "persist-test").unwrap();
+    let src = test_dir.to_str().unwrap();
+    let mount_spec = format!("{src}:p");
+
+    // Exec with persistent mount
+    let output = ctx.cli(&[
+        "exec",
+        "-v",
+        &mount_spec,
+        name,
+        "--",
+        "cat",
+        &format!("{src}/data"),
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.status.success() || !stdout.contains("persist-test") {
+        let _ = ctx.cli(&["stop", "--timeout", "1", name]);
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!(
+            "persistent mount exec failed. stdout='{}' stderr='{}'",
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Mount should still be there after exec
+    let mounts_output = ctx.cli_ok(&["mount", "ls", name]);
+    if !mounts_output.contains(src) {
+        let _ = ctx.cli(&["stop", "--timeout", "1", name]);
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!(
+            "persistent mount should survive exec, but not found in: {mounts_output}"
+        ));
+    }
+
+    let _ = ctx.cli(&["stop", "--timeout", "1", name]);
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}

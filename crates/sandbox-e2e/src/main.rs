@@ -128,6 +128,26 @@ fn all_tests() -> Vec<Test> {
             "update_allow_new_privs",
             tests::exec::test_update_allow_new_privs,
         ),
+        Test::Immutable(
+            "Exec",
+            "exec_ephemeral_mount",
+            tests::exec::test_exec_ephemeral_mount,
+        ),
+        Test::Immutable(
+            "Exec",
+            "exec_cwd_shorthand",
+            tests::exec::test_exec_cwd_shorthand,
+        ),
+        Test::Immutable(
+            "Exec",
+            "exec_skip_existing_mount",
+            tests::exec::test_exec_skip_existing_mount,
+        ),
+        Test::Immutable(
+            "Exec",
+            "exec_persistent_mount",
+            tests::exec::test_exec_persistent_mount,
+        ),
         // Mounts
         Test::Immutable(
             "Mounts",
