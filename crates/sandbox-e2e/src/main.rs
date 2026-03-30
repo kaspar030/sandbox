@@ -117,6 +117,7 @@ fn all_tests() -> Vec<Test> {
             "exec_piped_explicit",
             tests::exec::test_exec_piped_explicit,
         ),
+        Test::Immutable("Exec", "piped_stdin", tests::exec::test_exec_piped_stdin),
         Test::Immutable("Exec", "allow_new_privs", tests::exec::test_allow_new_privs),
         Test::Immutable(
             "Exec",

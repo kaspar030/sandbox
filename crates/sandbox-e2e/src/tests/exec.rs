@@ -308,6 +308,30 @@ pub fn test_exec_piped_explicit(ctx: &TestContext) -> Result<(), String> {
     Ok(())
 }
 
+/// Test piping stdin into exec (e.g. echo 'foo' | sandbox exec name -- cat).
+pub fn test_exec_piped_stdin(ctx: &TestContext) -> Result<(), String> {
+    let name = "exec-piped-stdin";
+    ctx.cli_ok(&[
+        "run", "--name", name, "--image", "alpine", "--init", "-d", "--", "sleep", "300",
+    ]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Pipe data into cat via stdin
+    let output = ctx.cli_with_stdin(&["exec", "-T", name, "--", "cat"], b"hello from stdin\n");
+    let _ = ctx.cli(&["stop", "--timeout", "2", name]);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !stdout.contains("hello from stdin") {
+        let _ = ctx.cli(&["destroy", name]);
+        return Err(format!(
+            "expected 'hello from stdin' on stdout, got: {stdout}"
+        ));
+    }
+
+    let _ = ctx.cli(&["destroy", name]);
+    Ok(())
+}
+
 /// Test that --allow-new-privs is reflected in inspect.
 pub fn test_allow_new_privs(ctx: &TestContext) -> Result<(), String> {
     let name = "privs-test";

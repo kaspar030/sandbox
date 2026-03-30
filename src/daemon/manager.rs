@@ -49,8 +49,8 @@ pub struct HandleResult {
     pub pty_master: Option<OwnedFd>,
     /// Pidfd for an exec child (for monitoring + exit code delivery).
     pub exec_pidfd: Option<OwnedFd>,
-    /// Pipe fds for piped exec mode: (stdout_read, stderr_read).
-    pub pipe_fds: Option<(OwnedFd, OwnedFd)>,
+    /// Pipe fds for piped exec mode: (stdin_write, stdout_read, stderr_read).
+    pub pipe_fds: Option<(OwnedFd, OwnedFd, OwnedFd)>,
     /// Ephemeral mounts to unmount after exec exits: (container_pid, target_path).
     /// Only mounts that were actually performed during this exec are listed.
     pub exec_cleanup_mounts: Vec<(i32, String)>,
@@ -3963,8 +3963,8 @@ struct ExecResult {
     pid: libc::pid_t,
     pidfd: OwnedFd,
     pty_master: Option<OwnedFd>,
-    /// Pipe fds for piped mode: (stdout_read, stderr_read).
-    pipe_fds: Option<(OwnedFd, OwnedFd)>,
+    /// Pipe fds for piped mode: (stdin_write, stdout_read, stderr_read).
+    pipe_fds: Option<(OwnedFd, OwnedFd, OwnedFd)>,
 }
 
 /// Merge container env (base) with per-exec env (overrides).
@@ -4045,13 +4045,15 @@ fn exec_in_container(
         None
     };
 
-    // Create pipes for piped mode (stdout + stderr)
+    // Create pipes for piped mode (stdin + stdout + stderr)
     let pipes = if piped && !detach {
+        let stdin_pipe =
+            nix::unistd::pipe().map_err(|e| Error::Other(format!("stdin pipe failed: {e}")))?;
         let stdout_pipe =
             nix::unistd::pipe().map_err(|e| Error::Other(format!("stdout pipe failed: {e}")))?;
         let stderr_pipe =
             nix::unistd::pipe().map_err(|e| Error::Other(format!("stderr pipe failed: {e}")))?;
-        Some((stdout_pipe, stderr_pipe))
+        Some((stdin_pipe, stdout_pipe, stderr_pipe))
     } else {
         None
     };
@@ -4084,15 +4086,18 @@ fn exec_in_container(
                     pty_master: Some(master),
                     pipe_fds: None,
                 });
-            } else if let Some(((stdout_r, stdout_w), (stderr_r, stderr_w))) = pipes {
-                // Piped mode: close write ends in parent, return read ends
+            } else if let Some(((stdin_r, stdin_w), (stdout_r, stdout_w), (stderr_r, stderr_w))) =
+                pipes
+            {
+                // Piped mode: close child-side ends in parent, return client-side ends
+                drop(stdin_r);
                 drop(stdout_w);
                 drop(stderr_w);
                 return Ok(ExecResult {
                     pid: child_pid,
                     pidfd,
                     pty_master: None,
-                    pipe_fds: Some((stdout_r, stderr_r)),
+                    pipe_fds: Some((stdin_w, stdout_r, stderr_r)),
                 });
             } else {
                 // Detached mode
@@ -4153,6 +4158,19 @@ fn exec_in_container(
             Ok(nix::unistd::ForkResult::Parent { child }) => {
                 // Intermediate child: close PTY fds, wait for grandchild, exit
                 drop(pty);
+                // Close pipe fds in the intermediate child — only the grandchild needs them.
+                // We can't move `pipes` (grandchild branch needs it), so close the raw fds.
+                if let Some(ref p) = pipes {
+                    use std::os::fd::AsRawFd;
+                    unsafe {
+                        libc::close(p.0.0.as_raw_fd());
+                        libc::close(p.0.1.as_raw_fd());
+                        libc::close(p.1.0.as_raw_fd());
+                        libc::close(p.1.1.as_raw_fd());
+                        libc::close(p.2.0.as_raw_fd());
+                        libc::close(p.2.1.as_raw_fd());
+                    }
+                }
                 // Forward signals to grandchild so that SIGTERM from daemon reaches it
                 let grandchild_pid = child.as_raw();
                 unsafe {
@@ -4284,20 +4302,21 @@ fn exec_in_container(
                 eprintln!("pty setup failed: {e}");
                 std::process::exit(1);
             }
-        } else if let Some(((_stdout_r, stdout_w), (_stderr_r, stderr_w))) = pipes {
-            // Piped mode: close read ends, dup write ends to stdout/stderr
-            // stdin from /dev/null
+        } else if let Some(((stdin_r, _stdin_w), (_stdout_r, stdout_w), (_stderr_r, stderr_w))) =
+            pipes
+        {
+            // Piped mode: close parent-side ends, dup child-side ends to stdin/stdout/stderr
             use std::os::fd::AsRawFd;
+            drop(_stdin_w);
             drop(_stdout_r);
             drop(_stderr_r);
-            if let Ok(devnull) = std::fs::File::open("/dev/null") {
-                unsafe { libc::dup2(devnull.as_raw_fd(), libc::STDIN_FILENO) };
-            }
             unsafe {
+                libc::dup2(stdin_r.as_raw_fd(), libc::STDIN_FILENO);
                 libc::dup2(stdout_w.as_raw_fd(), libc::STDOUT_FILENO);
                 libc::dup2(stderr_w.as_raw_fd(), libc::STDERR_FILENO);
             }
             // Close original fds (now duped)
+            drop(stdin_r);
             drop(stdout_w);
             drop(stderr_w);
         }

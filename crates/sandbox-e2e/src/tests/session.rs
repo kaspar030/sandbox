@@ -194,7 +194,7 @@ pub fn test_session_piped_exec(ctx: &TestContext) -> Result<(), String> {
         return Err(format!("piped exec error: {resp:?}"));
     }
 
-    if let Some((stdout_fd, _stderr_fd)) = pipe_fds {
+    if let Some((_stdin_fd, stdout_fd, _stderr_fd)) = pipe_fds {
         use std::io::Read;
         let mut stdout_file = std::fs::File::from(stdout_fd);
         let mut output = String::new();

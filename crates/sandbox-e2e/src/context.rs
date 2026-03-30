@@ -130,6 +130,26 @@ impl TestContext {
             .unwrap_or_else(|e| panic!("failed to run sandbox CLI: {e}"))
     }
 
+    /// Run a sandbox CLI command with stdin piped in.
+    pub fn cli_with_stdin(&self, args: &[&str], stdin_data: &[u8]) -> Output {
+        use std::io::Write;
+        let mut child = Command::new(&self.sandbox_bin)
+            .arg("--socket")
+            .arg(self.socket_path.to_str().unwrap())
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("failed to run sandbox CLI: {e}"));
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(stdin_data).ok();
+        }
+        child
+            .wait_with_output()
+            .unwrap_or_else(|e| panic!("failed to wait for sandbox CLI: {e}"))
+    }
+
     /// Run a sandbox CLI command and return stdout as a string.
     /// Panics with stderr if the command fails.
     pub fn cli_ok(&self, args: &[&str]) -> String {

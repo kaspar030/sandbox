@@ -57,27 +57,32 @@ pub fn recv_fd(socket: &impl AsRawFd) -> Result<OwnedFd> {
     ))
 }
 
-/// Send two file descriptors over a Unix domain socket using SCM_RIGHTS.
+/// Send three file descriptors over a Unix domain socket using SCM_RIGHTS.
 ///
-/// Used for piped exec mode (stdout + stderr fds).
-pub fn send_fds(socket: &impl AsRawFd, fd1: &impl AsRawFd, fd2: &impl AsRawFd) -> Result<()> {
-    let fds = [fd1.as_raw_fd(), fd2.as_raw_fd()];
+/// Used for piped exec mode (stdin_write + stdout_read + stderr_read fds).
+pub fn send_fds(
+    socket: &impl AsRawFd,
+    fd1: &impl AsRawFd,
+    fd2: &impl AsRawFd,
+    fd3: &impl AsRawFd,
+) -> Result<()> {
+    let fds = [fd1.as_raw_fd(), fd2.as_raw_fd(), fd3.as_raw_fd()];
     let cmsg = ControlMessage::ScmRights(&fds);
     let iov = [IoSlice::new(&[0u8])];
 
     sendmsg::<()>(socket.as_raw_fd(), &iov, &[cmsg], MsgFlags::empty(), None)
-        .map_err(|e| Error::Other(format!("sendmsg SCM_RIGHTS (2 fds) failed: {e}")))?;
+        .map_err(|e| Error::Other(format!("sendmsg SCM_RIGHTS (3 fds) failed: {e}")))?;
 
     Ok(())
 }
 
-/// Receive two file descriptors from a Unix domain socket via SCM_RIGHTS.
+/// Receive three file descriptors from a Unix domain socket via SCM_RIGHTS.
 ///
-/// Returns (fd1, fd2) as OwnedFds. Used for piped exec mode (stdout, stderr).
-pub fn recv_fds(socket: &impl AsRawFd) -> Result<(OwnedFd, OwnedFd)> {
+/// Returns (fd1, fd2, fd3) as OwnedFds. Used for piped exec mode (stdin_write, stdout_read, stderr_read).
+pub fn recv_fds(socket: &impl AsRawFd) -> Result<(OwnedFd, OwnedFd, OwnedFd)> {
     let mut buf = [0u8; 1];
     let mut iov = [IoSliceMut::new(&mut buf)];
-    let mut cmsg_buf = nix::cmsg_space!([RawFd; 2]);
+    let mut cmsg_buf = nix::cmsg_space!([RawFd; 3]);
 
     let msg = recvmsg::<()>(
         socket.as_raw_fd(),
@@ -85,7 +90,7 @@ pub fn recv_fds(socket: &impl AsRawFd) -> Result<(OwnedFd, OwnedFd)> {
         Some(&mut cmsg_buf),
         MsgFlags::empty(),
     )
-    .map_err(|e| Error::Other(format!("recvmsg SCM_RIGHTS (2 fds) failed: {e}")))?;
+    .map_err(|e| Error::Other(format!("recvmsg SCM_RIGHTS (3 fds) failed: {e}")))?;
 
     let cmsgs = msg
         .cmsgs()
@@ -93,13 +98,19 @@ pub fn recv_fds(socket: &impl AsRawFd) -> Result<(OwnedFd, OwnedFd)> {
 
     for cmsg in cmsgs {
         if let ControlMessageOwned::ScmRights(fds) = cmsg {
-            if fds.len() >= 2 {
-                return Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) });
+            if fds.len() >= 3 {
+                return Ok(unsafe {
+                    (
+                        OwnedFd::from_raw_fd(fds[0]),
+                        OwnedFd::from_raw_fd(fds[1]),
+                        OwnedFd::from_raw_fd(fds[2]),
+                    )
+                });
             }
         }
     }
 
     Err(Error::Other(
-        "expected 2 file descriptors via SCM_RIGHTS".to_string(),
+        "expected 3 file descriptors via SCM_RIGHTS".to_string(),
     ))
 }

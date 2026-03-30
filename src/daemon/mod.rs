@@ -410,7 +410,7 @@ async fn handle_single_request(
     }
 
     // Process request (holds mutex briefly for non-blocking operations)
-    let result = {
+    let mut result = {
         let mut mgr = mgr.lock().await;
         mgr.handle_request(request, caller)
     };
@@ -436,13 +436,17 @@ async fn handle_single_request(
     // If we have pipe fds (piped exec mode), send them via SCM_RIGHTS.
     // In session mode, this is still sent — piped exec explicitly uses
     // request_with_pipe_fds() which expects the fds.
-    if let Some((ref stdout_fd, ref stderr_fd)) = result.pipe_fds {
+    if let Some((stdin_fd, stdout_fd, stderr_fd)) = result.pipe_fds.take() {
         let socket_ref = stream.get_ref();
-        if let Err(e) = scm_rights::send_fds(socket_ref, stdout_fd, stderr_fd) {
+        if let Err(e) = scm_rights::send_fds(socket_ref, &stdin_fd, &stdout_fd, &stderr_fd) {
             tracing::debug!("pipe fd send failed (client may have disconnected): {e}");
         } else {
-            tracing::debug!("sent stdout+stderr pipe fds to client");
+            tracing::debug!("sent stdin+stdout+stderr pipe fds to client");
         }
+        // Drop the daemon's copies so the container sees EOF when the client closes stdin.
+        drop(stdin_fd);
+        drop(stdout_fd);
+        drop(stderr_fd);
     }
 
     // Interactive container start: monitor pidfd and send exit code to client

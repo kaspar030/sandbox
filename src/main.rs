@@ -1451,8 +1451,8 @@ fn main() -> anyhow::Result<()> {
                 })?;
                 if let Response::Error { .. } = &resp {
                     print_response(&resp);
-                } else if let Some((stdout_fd, stderr_fd)) = pipe_fds {
-                    piped_session(stdout_fd, stderr_fd)?;
+                } else if let Some((stdin_fd, stdout_fd, stderr_fd)) = pipe_fds {
+                    piped_session(stdin_fd, stdout_fd, stderr_fd)?;
                     let exit_resp = client.read_exit_code()?;
                     let code = match exit_resp {
                         Response::ExecExited { exit_code } => exit_code,
@@ -3533,13 +3533,33 @@ fn interactive_session(pty_master: std::os::fd::OwnedFd) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run a piped exec session: read from stdout and stderr pipe fds,
+/// Run a piped exec session: forward local stdin to the container's stdin pipe,
+/// and read from stdout and stderr pipe fds,
 /// write to local stdout and stderr respectively.
 fn piped_session(
+    stdin_fd: std::os::fd::OwnedFd,
     stdout_fd: std::os::fd::OwnedFd,
     stderr_fd: std::os::fd::OwnedFd,
 ) -> anyhow::Result<()> {
     use std::io::{Read, Write};
+
+    // Thread: local stdin → container stdin pipe
+    let _stdin_handle = std::thread::spawn(move || {
+        let mut stdin_file = std::fs::File::from(stdin_fd);
+        let mut local_stdin = std::io::stdin().lock();
+        let mut buf = [0u8; 4096];
+        loop {
+            match local_stdin.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if stdin_file.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        // Drop stdin_file to close the pipe, signaling EOF to the child
+    });
 
     // Thread: stderr pipe → local stderr
     let stderr_handle = std::thread::spawn(move || {

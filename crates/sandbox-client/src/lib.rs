@@ -152,13 +152,14 @@ impl Client {
         }
     }
 
-    /// Send a request and receive a response, expecting two pipe fds for piped exec.
+    /// Send a request and receive a response, expecting pipe fds for piped exec.
     ///
-    /// Returns (response, Option<(stdout_fd, stderr_fd)>).
+    /// Returns (response, Option<(stdin_fd, stdout_fd, stderr_fd)>).
+    #[allow(clippy::type_complexity)]
     pub fn request_with_pipe_fds(
         &mut self,
         req: &Request,
-    ) -> Result<(Response, Option<(OwnedFd, OwnedFd)>)> {
+    ) -> Result<(Response, Option<(OwnedFd, OwnedFd, OwnedFd)>)> {
         let msg = ClientMessage {
             request: req.clone(),
             caller: build_caller_context(),

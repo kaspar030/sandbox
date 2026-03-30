@@ -35,13 +35,13 @@ pub fn recv_fd(socket: &impl AsRawFd) -> crate::Result<OwnedFd> {
     ))
 }
 
-/// Receive two file descriptors from a Unix domain socket via SCM_RIGHTS.
+/// Receive three file descriptors from a Unix domain socket via SCM_RIGHTS.
 ///
-/// Returns (fd1, fd2) as OwnedFds. Used for piped exec mode (stdout, stderr).
-pub fn recv_fds(socket: &impl AsRawFd) -> crate::Result<(OwnedFd, OwnedFd)> {
+/// Returns (fd1, fd2, fd3) as OwnedFds. Used for piped exec mode (stdin_write, stdout_read, stderr_read).
+pub fn recv_fds(socket: &impl AsRawFd) -> crate::Result<(OwnedFd, OwnedFd, OwnedFd)> {
     let mut buf = [0u8; 1];
     let mut iov = [IoSliceMut::new(&mut buf)];
-    let mut cmsg_buf = nix::cmsg_space!([RawFd; 2]);
+    let mut cmsg_buf = nix::cmsg_space!([RawFd; 3]);
 
     let msg = recvmsg::<()>(
         socket.as_raw_fd(),
@@ -49,7 +49,7 @@ pub fn recv_fds(socket: &impl AsRawFd) -> crate::Result<(OwnedFd, OwnedFd)> {
         Some(&mut cmsg_buf),
         MsgFlags::empty(),
     )
-    .map_err(|e| crate::Error::Other(format!("recvmsg SCM_RIGHTS (2 fds) failed: {e}")))?;
+    .map_err(|e| crate::Error::Other(format!("recvmsg SCM_RIGHTS (3 fds) failed: {e}")))?;
 
     let cmsgs = msg
         .cmsgs()
@@ -57,13 +57,19 @@ pub fn recv_fds(socket: &impl AsRawFd) -> crate::Result<(OwnedFd, OwnedFd)> {
 
     for cmsg in cmsgs {
         if let ControlMessageOwned::ScmRights(fds) = cmsg {
-            if fds.len() >= 2 {
-                return Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) });
+            if fds.len() >= 3 {
+                return Ok(unsafe {
+                    (
+                        OwnedFd::from_raw_fd(fds[0]),
+                        OwnedFd::from_raw_fd(fds[1]),
+                        OwnedFd::from_raw_fd(fds[2]),
+                    )
+                });
             }
         }
     }
 
     Err(crate::Error::Other(
-        "expected 2 file descriptors via SCM_RIGHTS".to_string(),
+        "expected 3 file descriptors via SCM_RIGHTS".to_string(),
     ))
 }
