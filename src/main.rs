@@ -2461,14 +2461,33 @@ fn parse_exec_mount_spec(spec: &str) -> anyhow::Result<sandbox_proto::ExecMount>
     })
 }
 
-/// Make a path absolute (resolve relative to cwd).
+/// Lexically clean a path by resolving `.` and `..` components without
+/// touching the filesystem (so symlinks are preserved and the path need not
+/// exist).
+fn clean_path(path: &std::path::Path) -> String {
+    use std::path::Component;
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                components.pop();
+            }
+            Component::CurDir => {} // skip
+            c => components.push(c),
+        }
+    }
+    let result: std::path::PathBuf = components.into_iter().collect();
+    result.to_string_lossy().to_string()
+}
+
+/// Make a path absolute (resolve relative to cwd) and clean up `.`/`..`.
 fn make_absolute(path: &str) -> String {
     let p = std::path::Path::new(path);
     if p.is_absolute() {
-        path.to_string()
+        clean_path(p)
     } else {
         std::env::current_dir()
-            .map(|cwd| cwd.join(p).to_string_lossy().to_string())
+            .map(|cwd| clean_path(&cwd.join(p)))
             .unwrap_or_else(|_| path.to_string())
     }
 }
